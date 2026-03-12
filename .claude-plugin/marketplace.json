@@ -1,7 +1,8 @@
 {
   "name": "coryking-plugins",
   "owner": {
-    "name": "Cory King"
+    "name": "Cory King",
+    "email": "me@coryk.ing"
   },
   "plugins": [
     {

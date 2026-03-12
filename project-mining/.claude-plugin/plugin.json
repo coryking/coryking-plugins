@@ -4,6 +4,7 @@
   "description": "Mine project histories for behavioral evidence. Search chat logs, git history, docs, and code for concrete examples of specific patterns, values, or skills.",
   "author": {
     "name": "Cory King",
+    "email": "me@coryk.ing",
     "url": "https://github.com/coryking"
   },
   "homepage": "https://github.com/coryking/coryking-plugins",
