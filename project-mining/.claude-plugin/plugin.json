@@ -11,8 +11,8 @@
   "repository": "https://github.com/coryking/coryking-plugins",
   "license": "MIT",
   "keywords": ["chat-history", "evidence-mining", "project-mining", "cc-explorer", "mcp"],
-  "agents": "./agents/",
-  "skills": "./skills/",
+  "agents": ["./agents/mining-researcher.md"],
+  "skills": ["./skills/cc-explorer", "./skills/project-mining"],
   "mcpServers": {
     "cc-explorer": {
       "command": "uv",
