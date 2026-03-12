@@ -1,0 +1,9 @@
+{
+  "name": "project-mining",
+  "version": "2.0.0",
+  "description": "Mine project histories for behavioral evidence. Search chat logs, git history, docs, and code for concrete examples of specific patterns, values, or skills.",
+  "author": "coryking",
+  "homepage": "https://github.com/coryking/coryking-plugins",
+  "license": "MIT",
+  "keywords": ["chat-history", "evidence-mining", "project-mining", "cc-explorer", "mcp"]
+}

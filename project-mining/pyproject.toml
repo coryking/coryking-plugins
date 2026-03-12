@@ -1,0 +1,13 @@
+[project]
+name = "cc-explorer"
+version = "1.0.0"
+description = "MCP server for exploring Claude Code chat history — search conversations, quote moments, inspect subagents."
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2.0", "fastmcp>=2.0"]
+
+[project.scripts]
+cc-explorer = "cc_explorer.mcp_server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

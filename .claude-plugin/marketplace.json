@@ -1,0 +1,9 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "coryking-plugins",
+  "plugins": [
+    {
+      "source": "./project-mining"
+    }
+  ]
+}
