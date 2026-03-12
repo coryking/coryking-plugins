@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "cc-explorer": {
-      "command": "uv",
-      "args": ["run", "--project", "${CLAUDE_PLUGIN_ROOT}", "cc-explorer"]
-    }
-  }
-}

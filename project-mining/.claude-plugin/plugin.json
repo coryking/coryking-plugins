@@ -13,5 +13,10 @@
   "keywords": ["chat-history", "evidence-mining", "project-mining", "cc-explorer", "mcp"],
   "agents": "./agents/",
   "skills": "./skills/",
-  "mcpServers": "./.mcp.json"
+  "mcpServers": {
+    "cc-explorer": {
+      "command": "uv",
+      "args": ["run", "--project", "${CLAUDE_PLUGIN_ROOT}", "cc-explorer"]
+    }
+  }
 }
