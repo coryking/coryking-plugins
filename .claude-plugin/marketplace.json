@@ -1,9 +1,13 @@
 {
-  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "coryking-plugins",
+  "owner": {
+    "name": "Cory King"
+  },
   "plugins": [
     {
-      "source": "./project-mining"
+      "name": "project-mining",
+      "source": "./project-mining",
+      "description": "Mine project histories for behavioral evidence. Search chat logs, git history, docs, and code for concrete examples of specific patterns, values, or skills."
     }
   ]
 }
