@@ -15,11 +15,14 @@ Additional entry types for records that claude-code-log skips:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, BeforeValidator
+
+from .utils import short_uuid
 
 
 # Coerce None → 0 for token fields that the API may return as null
@@ -134,12 +137,24 @@ class BaseTranscriptEntry(BaseModel):
     agentId: Optional[str] = None
     gitBranch: Optional[str] = None
 
+    def display(self, truncate: int = 500) -> str:
+        """Format entry as a display line with [role:id] prefix."""
+        return f"[?:{short_uuid(self.uuid)}]"
+
 
 class HumanEntry(BaseTranscriptEntry):
     """Actual human messages — the user talking."""
     type: Literal["user"]
     message: UserMessageModel
     isMeta: Optional[bool] = None
+
+    def display(self, truncate: int = 500) -> str:
+        text = extract_text(self)
+        prefix = f"[U:{short_uuid(self.uuid)}]"
+        line = f"{prefix} {text}"
+        if truncate and len(line) > truncate:
+            line = line[: truncate - 3] + "..."
+        return line.replace("\n", "\\n")
 
 
 class ToolResultEntry(BaseTranscriptEntry):
@@ -164,6 +179,25 @@ class AssistantTranscriptEntry(BaseTranscriptEntry):
     type: Literal["assistant"]
     message: AssistantMessageModel
     requestId: Optional[str] = None
+
+    def display(self, truncate: int = 500) -> str:
+        text = extract_text(self)
+        tool_summaries: list[str] = []
+        for item in self.message.content:
+            if isinstance(item, ToolUseContent):
+                summary = summarize_tool_input(item.name, item.input)
+                tool_summaries.append(f"→ {item.name}({summary})")
+        parts: list[str] = []
+        if text:
+            parts.append(text)
+        if tool_summaries:
+            parts.append("  ".join(tool_summaries))
+        combined = "  ".join(parts) if parts else ""
+        prefix = f"[A:{short_uuid(self.uuid)}]"
+        line = f"{prefix} {combined}"
+        if truncate and len(line) > truncate:
+            line = line[: truncate - 3] + "..."
+        return line.replace("\n", "\\n")
 
 
 class SummaryTranscriptEntry(BaseModel):
@@ -313,3 +347,89 @@ class TranscriptStats:
             stats.duration_ms = int((last_ts - first_ts).total_seconds() * 1000)
 
         return stats
+
+
+# =============================================================================
+# Text extraction (moved from parser.py)
+# =============================================================================
+
+
+def _strip_system_xml(text: str) -> str:
+    """Remove system/metadata XML from raw string messages.
+
+    Keeps meaningful content inside <result> tags.
+    """
+    text = re.sub(r"<usage>[\s\S]*?</usage>", "", text)
+    text = re.sub(r"</?task-notification>", "", text)
+    text = re.sub(r"<task-id>[^<]*</task-id>", "", text)
+    text = re.sub(r"<tool-use-id>[^<]*</tool-use-id>", "", text)
+    text = re.sub(r"<status>[^<]*</status>", "", text)
+    text = re.sub(r"<summary>[^<]*</summary>", "", text)
+    text = re.sub(r"</?result>", "", text)
+    text = re.sub(r"<system-reminder>[\s\S]*?</system-reminder>", "", text)
+    text = re.sub(
+        r"</?(?:command-name|command-message|command-args|local-command-stdout|"
+        r"local-command-caveat|user-prompt-submit-hook)>[^<]*",
+        "",
+        text,
+    )
+    text = re.sub(r"Full transcript available at:.*", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def extract_text(entry: Union[HumanEntry, AssistantTranscriptEntry]) -> str:
+    """Extract readable text from an entry's content blocks.
+
+    Joins TextContent.text values. Handles str | list[ContentItem] content.
+    Strips system XML wrappers from raw string content.
+    """
+    content = entry.message.content
+
+    if isinstance(content, str):
+        return _strip_system_xml(content)
+
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, TextContent):
+            text = _strip_system_xml(item.text).strip()
+            if text and not text.startswith("[Request interrupted by user"):
+                parts.append(text)
+    return "\n".join(parts)
+
+
+# =============================================================================
+# Tool input summarization (moved from formatting.py)
+# =============================================================================
+
+
+def summarize_tool_input(name: str, inp: dict[str, Any]) -> str:
+    """Summarize a tool's input to ~80 chars for trace and entry display."""
+    if name == "Read" and "file_path" in inp:
+        return inp["file_path"]
+    if name in ("navigate", "WebFetch") and "url" in inp:
+        url = inp["url"]
+        return url[:80] if len(url) > 80 else url
+    if name == "javascript_tool" and "text" in inp:
+        text = inp["text"]
+        return text[:60] + "..." if len(text) > 60 else text
+    if name == "Grep" and "pattern" in inp:
+        s = f"/{inp['pattern']}/"
+        if "path" in inp:
+            s += f" {inp['path']}"
+        return s[:80]
+    if name == "Glob" and "pattern" in inp:
+        s = inp["pattern"]
+        if "path" in inp:
+            s += f" in {inp['path']}"
+        return s[:80]
+    if name == "Edit" and "file_path" in inp:
+        return inp["file_path"]
+    if name == "Write" and "file_path" in inp:
+        return inp["file_path"]
+    if name == "Bash" and "command" in inp:
+        cmd = inp["command"]
+        return cmd[:80] if len(cmd) > 80 else cmd
+    # Default: stringify and truncate
+    s = str(inp)
+    return s[:80] if len(s) > 80 else s

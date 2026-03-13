@@ -1,167 +1,96 @@
-"""Formatting and display helpers for cc-explorer output.
+"""Formatting helpers for cc-explorer MCP output.
 
-All functions return strings rather than printing directly.
+All format functions return dicts for structured JSON responses.
+Conversation text appears as compact string arrays using [U:id]/[A:id] entry line format.
 """
 
-import csv
-import io
-from typing import Optional
+from typing import Any, Optional
 
 from .models import (
     AssistantTranscriptEntry,
     BaseTranscriptEntry,
-    HumanEntry,
     TextContent,
     ToolUseContent,
     TranscriptEntry,
+    summarize_tool_input,
 )
-from .parser import extract_text
-from .search import SessionInfo, TriageResult, SearchResult
+from .search import MatchHit, SearchResult, SessionInfo, TriageResult
 from .subagents import SubagentInfo
-from .utils import format_duration, format_timestamp, format_tokens, short_uuid
-
-
-STATUS_LABELS = {
-    "async_launched": "running (async)",
-    "completed": "completed",
-    "rejected": "rejected",
-    "unknown": "unknown",
-}
+from .utils import iso_timestamp
 
 
 # =============================================================================
-# Entry-level formatting (from cli.py)
+# Entry display helper
 # =============================================================================
 
 
-def role_label(entry: TranscriptEntry) -> str:
-    """Return a human-readable role label for a transcript entry."""
-    if isinstance(entry, HumanEntry):
-        return "USER"
-    elif isinstance(entry, AssistantTranscriptEntry):
-        return "ASSISTANT"
-    return "UNKNOWN"
-
-
-def format_tool_call(item: ToolUseContent, max_val_len: int = 80) -> str:
-    """Format a single tool_use block as a compact one-liner.
-
-    -> ToolName(key="value", key2="value2")
-    """
-    parts: list[str] = []
-    for key, val in item.input.items():
-        s = str(val)
-        if len(s) > max_val_len:
-            s = s[: max_val_len - 3] + "..."
-        if isinstance(val, str):
-            s = f'"{s}"'
-        parts.append(f"{key}={s}")
-    return f"→ {item.name}({', '.join(parts)})"
-
-
-def extract_tool_calls(entry: TranscriptEntry) -> list[str]:
-    """Extract formatted tool call summaries from an assistant entry."""
-    if not isinstance(entry, AssistantTranscriptEntry):
-        return []
-    return [
-        format_tool_call(item)
-        for item in entry.message.content
-        if isinstance(item, ToolUseContent)
-    ]
-
-
-def format_entry_line(
-    entry: TranscriptEntry, is_match: bool = False, truncate: int = 500
-) -> str:
-    """Format a single entry for display, including tool calls."""
-    role = role_label(entry)
-    uuid = (
-        short_uuid(entry.uuid)
-        if isinstance(entry, BaseTranscriptEntry)
-        else "--------"
-    )
-    text = ""
-    if isinstance(entry, (HumanEntry, AssistantTranscriptEntry)):
-        text = extract_text(entry)
-
-    tool_calls = extract_tool_calls(entry)
-    if tool_calls:
-        tool_text = "  ".join(tool_calls)
-        if text:
-            text = f"{text}  {tool_text}"
-        else:
-            text = tool_text
-
-    if truncate and len(text) > truncate:
-        text = text[: truncate - 3] + "..."
-    text = text.replace("\n", "\\n")
-    marker = "  ← match" if is_match else ""
-    return f"[{role} turn:{uuid}] {text}{marker}"
+def _entry_display(entry: TranscriptEntry, truncate: int = 500) -> str:
+    """Call display() on entries that support it."""
+    if isinstance(entry, BaseTranscriptEntry):
+        return entry.display(truncate=truncate)
+    return ""
 
 
 # =============================================================================
-# Search result formatting (from cli.py)
+# Search result formatting
 # =============================================================================
 
 
-def format_triage_results(all_results: list[tuple[str, TriageResult]]) -> str:
-    """Format triage/count results as CSV text."""
-    lines: list[str] = []
+def format_triage_results(all_results: list[tuple[str, TriageResult]]) -> dict[str, Any]:
+    """Format triage/count results as structured dict."""
     total = sum(r.count for _, r in all_results)
-    lines.append(f"{total} matches across {len(all_results)} pattern/session pairs")
+    seen_sessions: set[str] = set()
+    for _, r in all_results:
+        seen_sessions.add(r.session.session_id)
+    return {
+        "total_matches": total,
+        "total_sessions": len(seen_sessions),
+        "per_session": [
+            {
+                "count": r.count,
+                "pattern": pat,
+                "session_id": r.session.session_id,
+                "date": iso_timestamp(r.session.first_timestamp),
+                "snippet": r.first_match_snippet or r.session.title,
+            }
+            for pat, r in all_results
+        ],
+    }
 
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(["count", "pattern", "session", "date", "snippet"])
-    for pat, r in all_results:
-        sid = short_uuid(r.session.session_id)
-        date = format_timestamp(r.session.first_timestamp)
-        snippet = r.first_match_snippet or r.session.title
-        writer.writerow([r.count, pat, sid, date, snippet])
-    lines.append(buf.getvalue().rstrip("\n"))
-    return "\n".join(lines)
+
+def _format_match(match: MatchHit) -> dict[str, Any]:
+    """Format a single search match with context."""
+    return {
+        "session_id": match.session_id,
+        "turn_id": match.turn_uuid,
+        "context_before": [_entry_display(e) for e in match.context_before],
+        "match": _entry_display(match.entry, truncate=0),
+        "context_after": [_entry_display(e) for e in match.context_after],
+    }
 
 
-def format_search_results(result: SearchResult, pattern: str) -> str:
-    """Format search results with context.
-
-    Summary info always comes first -- tools truncate from the bottom.
-    """
-    lines: list[str] = []
-
+def format_search_results(result: SearchResult, pattern: str) -> dict[str, Any]:
+    """Format search results — content mode or overflow with samples."""
     if result.overflow:
-        lines.append(
-            f"Found {result.total_matches} matches across "
-            f"{len(result.per_session)} sessions. "
-            f"Showing {len(result.matches)} samples. "
-            f"Narrow your pattern or use --session to target a specific conversation."
-        )
-        lines.append("")
-        lines.append("Per-session counts:")
-        for r in result.per_session:
-            sid = short_uuid(r.session.session_id)
-            date = format_timestamp(r.session.first_timestamp)
-            lines.append(
-                f'  {r.count:>4}  session:{sid}  {date}  "{r.session.title}"'
-            )
-        lines.append("")
-        lines.append("Sample hits:")
-    else:
-        lines.append(f"{result.total_matches} matches")
-        lines.append("")
-
-    for i, match in enumerate(result.matches):
-        sid = short_uuid(match.session_id)
-        tid = short_uuid(match.turn_uuid)
-        lines.append(f"--- match {i + 1} [session:{sid} turn:{tid}] ---")
-        for entry in match.context_before:
-            lines.append(format_entry_line(entry))
-        lines.append(format_entry_line(match.entry, is_match=True))
-        for entry in match.context_after:
-            lines.append(format_entry_line(entry))
-        lines.append("")
-
-    return "\n".join(lines)
+        return {
+            "total_matches": result.total_matches,
+            "overflow": True,
+            "total_sessions": len(result.per_session),
+            "per_session": [
+                {
+                    "count": r.count,
+                    "session_id": r.session.session_id,
+                    "date": iso_timestamp(r.session.first_timestamp),
+                    "snippet": r.first_match_snippet or r.session.title,
+                }
+                for r in result.per_session
+            ],
+            "sample_matches": [_format_match(m) for m in result.matches],
+        }
+    return {
+        "total_matches": result.total_matches,
+        "matches": [_format_match(m) for m in result.matches],
+    }
 
 
 def format_quote(
@@ -169,117 +98,83 @@ def format_quote(
     turn: str,
     context: int,
     entries: list[TranscriptEntry],
-) -> str:
+) -> dict[str, Any]:
     """Format a quote view centered on a specific turn."""
-    lines: list[str] = []
-    sid = short_uuid(session_info.session_id) if session_info else "--------"
-    tid = short_uuid(turn)
-    lines.append(f"session:{sid}  turn:{tid} (± {context} messages)")
-    lines.append("")
-
-    for entry in entries:
-        is_target = isinstance(entry, BaseTranscriptEntry) and entry.uuid == turn
-        lines.append(format_entry_line(entry, is_match=is_target, truncate=0))
-
-    return "\n".join(lines)
+    return {
+        "session_id": session_info.session_id if session_info else None,
+        "turn_id": turn,
+        "context_size": context,
+        "entries": [_entry_display(e, truncate=0) for e in entries],
+    }
 
 
 # =============================================================================
-# Agent manifest / session / detail formatting (from cli_agents.py)
+# Session listing
 # =============================================================================
 
 
-def format_manifest_view(agent_sessions: list[SessionInfo]) -> str:
-    """Format the manifest view: all sessions that spawned agents."""
-    lines: list[str] = []
-    lines.append(f"{len(agent_sessions)} sessions with subagents")
+def _format_session_summary(s: SessionInfo) -> dict[str, Any]:
+    """Format a single session's metadata and stats."""
+    return {
+        "session_id": s.session_id,
+        "date": iso_timestamp(s.first_timestamp),
+        "title": s.title,
+        "messages": s.message_count,
+        "agents": s.stats.agent_count,
+        "context_tokens": s.stats.context_tokens,
+        "output_tokens": s.stats.output_tokens,
+        "tools": s.stats.tool_use_count,
+    }
 
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(["agents", "tools", "date", "session", "title"])
-    for s in agent_sessions:
-        writer.writerow(
-            [
-                s.stats.agent_count,
-                s.stats.tool_use_count,
-                format_timestamp(s.first_timestamp),
-                short_uuid(s.session_id),
-                s.title,
-            ]
-        )
-    lines.append(buf.getvalue().rstrip("\n"))
-    return "\n".join(lines)
+
+def format_conversation_list(sessions: list[SessionInfo]) -> dict[str, Any]:
+    """Format conversation listing with usage stats."""
+    return {
+        "total": len(sessions),
+        "sessions": [_format_session_summary(s) for s in sessions],
+    }
+
+
+def format_manifest_view(agent_sessions: list[SessionInfo]) -> dict[str, Any]:
+    """Format manifest view: sessions that spawned agents."""
+    return {
+        "total": len(agent_sessions),
+        "sessions": [_format_session_summary(s) for s in agent_sessions],
+    }
+
+
+# =============================================================================
+# Agent inspection
+# =============================================================================
 
 
 def format_session_view(
     target: SessionInfo,
     agents: list[SubagentInfo],
     compaction: bool = False,
-) -> str:
-    """Format the session view: list all agents spawned in a session.
-
-    Returns session metadata and agent CSV data combined.
-    """
-    lines: list[str] = []
-
-    date = format_timestamp(target.first_timestamp)
-    sid = short_uuid(target.session_id)
-    lines.append(f'Session: {sid}  {date}  "{target.title}"')
-    lines.append(f"{len(agents)} subagent(s) spawned")
-
-    if not agents:
-        return "\n".join(lines)
-
-    # CSV table
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(
-        [
-            "#",
-            "agent_id",
-            "started",
-            "type",
-            "status",
-            "input_tokens",
-            "output_tokens",
-            "tools",
-            "duration_ms",
-            "description",
-        ]
-    )
-    for i, sa in enumerate(agents, 1):
-        writer.writerow(
-            [
-                i,
-                short_uuid(sa.agent_id),
-                format_timestamp(sa.timestamp),
-                sa.subagent_type or "",
-                STATUS_LABELS.get(sa.status, sa.status),
-                sa.total_input_tokens or "",
-                sa.output_tokens or "",
-                sa.total_tool_use_count or "",
-                sa.total_duration_ms or "",
-                sa.description or "",
-            ]
-        )
-    lines.append(buf.getvalue().rstrip("\n"))
-
-    # Output files section
-    output_files_text = format_output_files(agents)
-    if output_files_text:
-        lines.append(output_files_text)
-
-    # Compaction detail
-    if compaction:
-        compaction_text = format_compaction(agents)
-        if compaction_text:
-            lines.append(compaction_text)
-
-    lines.append("")
-    lines.append(
-        "Tip: use get_agent_detail with an agent ID for full prompt, result, and details."
-    )
-    return "\n".join(lines)
+) -> dict[str, Any]:
+    """Format session view: all agents spawned by a session."""
+    return {
+        "session_id": target.session_id,
+        "date": iso_timestamp(target.first_timestamp),
+        "title": target.title,
+        "total_agents": len(agents),
+        "agents": [
+            {
+                "agent_id": sa.agent_id,
+                "tool_use_id": sa.tool_use_id,
+                "date": iso_timestamp(sa.timestamp),
+                "type": sa.subagent_type or "",
+                "status": sa.status,
+                "description": sa.description or "",
+                "input_tokens": sa.total_input_tokens,
+                "output_tokens": sa.output_tokens,
+                "tools": sa.total_tool_use_count,
+                "duration_ms": sa.total_duration_ms,
+            }
+            for sa in agents
+        ],
+    }
 
 
 def format_agent_detail(
@@ -289,195 +184,58 @@ def format_agent_detail(
     no_reasoning: bool = False,
     entries_map: Optional[dict] = None,
     compaction: bool = False,
-) -> str:
+) -> dict[str, Any]:
     """Format full detail for a single agent."""
-    lines: list[str] = []
+    result: dict[str, Any] = {
+        "session_id": found_session.session_id,
+        "date": iso_timestamp(found_session.first_timestamp),
+        "title": found_session.title,
+        "agent_id": found.agent_id,
+        "tool_use_id": found.tool_use_id,
+        "type": found.subagent_type or "",
+        "status": found.status,
+        "date_started": iso_timestamp(found.timestamp),
+        "input_tokens": found.total_input_tokens,
+        "output_tokens": found.output_tokens,
+        "tools": found.total_tool_use_count,
+        "tool_counts": found.tool_name_counts or {},
+        "duration_ms": found.total_duration_ms,
+    }
 
-    sid = short_uuid(found_session.session_id)
-    date = format_timestamp(found_session.first_timestamp)
-    lines.append(f'Session: {sid}  {date}  "{found_session.title}"')
-    lines.append(
-        f"Agent:   {short_uuid(found.agent_id)}  "
-        f"{found.subagent_type or '-'}  "
-        f"{found.status}"
-    )
-    lines.append(f"Started: {format_timestamp(found.timestamp)}")
-
-    if found.total_input_tokens is not None:
-        lines.append(f"Input:   {format_tokens(found.total_input_tokens)}")
-    if found.output_tokens is not None:
-        lines.append(f"Output:  {format_tokens(found.output_tokens)}")
-
-    if found.total_tool_use_count is not None:
-        tools_line = f"Tools:   {found.total_tool_use_count}"
-        if found.tool_name_counts:
-            parts = [
-                f"{name}: {count}" for name, count in found.tool_name_counts.items()
-            ]
-            tools_line += f" ({', '.join(parts)})"
-        lines.append(tools_line)
-
-    lines.append(f"Duration: {format_duration(found.total_duration_ms)}")
-
-    # Output file info
     if found.output_file_exists:
-        size_kb = found.output_file_size // 1024
-        path = found.output_file_resolved
-        compactions = len(found.compaction_events)
-        comp_str = (
-            f", {compactions} compaction(s)" if compactions else ", no compaction"
-        )
-        lines.append(
-            f"File:    {path} ({size_kb}KB, "
-            f"{found.output_entry_count} entries{comp_str})"
-        )
-        if compaction and found.compaction_events:
-            for evt in found.compaction_events:
-                from_k = evt.from_tokens // 1000
-                to_k = evt.to_tokens // 1000
-                lines.append(
-                    f"         Turn {evt.turn}: {from_k}K -> {to_k}K "
-                    f"(-{evt.drop_pct:.1f}%)"
-                )
-    elif found.output_file:
-        lines.append(f"File:    {found.output_file} (missing)")
-
-    # Prompt and result
-    lines.append("")
-    if found.prompt:
-        lines.append("<prompt>")
-        lines.append(found.prompt)
-        lines.append("</prompt>")
+        result["output_file"] = {
+            "path": found.output_file_resolved,
+            "size_bytes": found.output_file_size,
+            "entries": found.output_entry_count,
+            "compactions": len(found.compaction_events),
+        }
     else:
-        lines.append("<prompt />")
+        result["output_file"] = None
 
-    if found.result_text:
-        lines.append("")
-        lines.append("<result>")
-        lines.append(found.result_text)
-        lines.append("</result>")
+    result["prompt"] = found.prompt or None
+    result["result"] = found.result_text or None
 
-    # Trace
     if trace and entries_map and found.agent_id in entries_map:
-        lines.append("")
-        lines.append(render_trace(entries_map[found.agent_id], show_reasoning=not no_reasoning))
-
-    return "\n".join(lines)
-
-
-# =============================================================================
-# Shared display helpers (from cli_agents.py)
-# =============================================================================
-
-
-def format_output_files(agents: list[SubagentInfo]) -> str:
-    """Format output file section for a list of agents."""
-    with_output_path = [
-        (i, sa)
-        for i, sa in enumerate(agents, 1)
-        if sa.output_file or sa.output_file_resolved
-    ]
-    if not with_output_path:
-        return ""
-
-    lines: list[str] = []
-    found = [sa for _, sa in with_output_path if sa.output_file_exists]
-    missing = [sa for _, sa in with_output_path if not sa.output_file_exists]
-
-    if not found and missing:
-        lines.append("")
-        lines.append(
-            f"Output files: all {len(missing)} missing (temp files cleaned up). "
-            f"Use --task-output-dir if saved elsewhere."
+        result["trace"] = render_trace(
+            entries_map[found.agent_id],
+            show_reasoning=not no_reasoning,
         )
     else:
-        lines.append("")
-        lines.append("Output files:")
-        for i, sa in with_output_path:
-            path = sa.output_file_resolved or sa.output_file
-            if sa.output_file_exists:
-                size_kb = sa.output_file_size // 1024
-                compactions = len(sa.compaction_events)
-                comp_str = (
-                    f", {compactions} compaction(s)"
-                    if compactions
-                    else ", no compaction"
-                )
-                lines.append(
-                    f"  #{i}  {path} ({size_kb}KB, "
-                    f"{sa.output_entry_count} entries{comp_str})"
-                )
-            else:
-                lines.append(f"  #{i}  (missing)")
-        if missing:
-            lines.append(f"  ({len(missing)} of {len(with_output_path)} missing)")
+        result["trace"] = None
 
-    return "\n".join(lines)
+    return result
 
 
-def format_compaction(agents: list[SubagentInfo]) -> str:
-    """Format compaction details for agents that have them."""
-    has_compaction = [
-        (i, sa) for i, sa in enumerate(agents, 1) if sa.compaction_events
-    ]
-    if not has_compaction:
-        return ""
-
-    lines: list[str] = []
-    lines.append("")
-    lines.append("Compaction detected:")
-    for i, sa in has_compaction:
-        desc = sa.description or "(no description)"
-        lines.append(f"  #{i} ({desc}):")
-        for evt in sa.compaction_events:
-            from_k = evt.from_tokens // 1000
-            to_k = evt.to_tokens // 1000
-            lines.append(
-                f"     Turn {evt.turn}: {from_k}K -> {to_k}K tokens "
-                f"(-{evt.drop_pct:.1f}%)"
-            )
-
-    return "\n".join(lines)
-
-
-def summarize_tool_input(name: str, inp: dict) -> str:
-    """Summarize a tool's input to ~80 chars for trace display."""
-    if name == "Read" and "file_path" in inp:
-        return inp["file_path"]
-    if name in ("navigate", "WebFetch") and "url" in inp:
-        url = inp["url"]
-        return url[:80] if len(url) > 80 else url
-    if name == "javascript_tool" and "text" in inp:
-        text = inp["text"]
-        return text[:60] + "..." if len(text) > 60 else text
-    if name == "Grep" and "pattern" in inp:
-        s = f"/{inp['pattern']}/"
-        if "path" in inp:
-            s += f" {inp['path']}"
-        return s[:80]
-    if name == "Glob" and "pattern" in inp:
-        s = inp["pattern"]
-        if "path" in inp:
-            s += f" in {inp['path']}"
-        return s[:80]
-    if name == "Edit" and "file_path" in inp:
-        return inp["file_path"]
-    if name == "Write" and "file_path" in inp:
-        return inp["file_path"]
-    if name == "Bash" and "command" in inp:
-        cmd = inp["command"]
-        return cmd[:80] if len(cmd) > 80 else cmd
-    # Default: stringify and truncate
-    s = str(inp)
-    return s[:80] if len(s) > 80 else s
+# =============================================================================
+# Trace rendering
+# =============================================================================
 
 
 def render_trace(
     entries: list[TranscriptEntry], show_reasoning: bool = True
-) -> str:
+) -> list[str]:
     """Render a chronological trace of tool calls and reasoning."""
     lines: list[str] = []
-    lines.append("<trace>")
 
     for entry in entries:
         if not isinstance(entry, AssistantTranscriptEntry):
@@ -504,105 +262,11 @@ def render_trace(
                     lines.append(f"          ... ({len(text_lines) - 5} more lines)")
                 ts = "        "
 
-    lines.append("</trace>")
-    return "\n".join(lines)
+    return lines
 
 
 # =============================================================================
-# List / conversation listing formatting (from cli_list.py)
-# =============================================================================
-
-
-def format_conversation_list(sessions: list[SessionInfo]) -> str:
-    """Format conversation listing with usage stats as CSV."""
-    lines: list[str] = []
-    lines.append(f"{len(sessions)} conversations")
-
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(
-        [
-            "msgs",
-            "agents",
-            "context_tokens",
-            "output_tokens",
-            "tools",
-            "date",
-            "session",
-            "title",
-        ]
-    )
-    for s in sessions:
-        st = s.stats
-        writer.writerow(
-            [
-                s.message_count,
-                st.agent_count,
-                st.context_tokens,
-                st.output_tokens,
-                st.tool_use_count,
-                format_timestamp(s.first_timestamp),
-                short_uuid(s.session_id),
-                s.title,
-            ]
-        )
-    lines.append(buf.getvalue().rstrip("\n"))
-    return "\n".join(lines)
-
-
-# =============================================================================
-# Dump formatting (from cli.py)
-# =============================================================================
-
-
-def format_dump_entry(
-    entry: TranscriptEntry,
-    timestamps: bool = False,
-) -> Optional[str]:
-    """Format a single entry for flat dump output. Returns None if entry should be skipped."""
-    if isinstance(entry, HumanEntry):
-        label = "USER"
-    elif isinstance(entry, AssistantTranscriptEntry):
-        label = "ASSISTANT"
-    else:
-        return None
-
-    text = extract_text(entry)
-    if not text:
-        return None
-
-    text = text.replace("\\", "\\\\").replace("\n", "\\n")
-
-    if timestamps:
-        header = f"[{label} {format_timestamp(entry.timestamp)}]"
-    else:
-        header = f"[{label}]"
-
-    return f"{header} {text}"
-
-
-def format_dump(
-    entries: list[TranscriptEntry],
-    timestamps: bool = False,
-    role: str = "both",
-) -> str:
-    """Format all entries for flat text dump output."""
-    lines: list[str] = []
-    for entry in entries:
-        if role == "assistant" and isinstance(entry, HumanEntry):
-            continue
-        if role == "user" and isinstance(entry, AssistantTranscriptEntry):
-            continue
-
-        line = format_dump_entry(entry, timestamps=timestamps)
-        if line is not None:
-            lines.append(line)
-
-    return "\n".join(lines)
-
-
-# =============================================================================
-# ID matching helper (from cli_agents.py)
+# ID matching helper
 # =============================================================================
 
 

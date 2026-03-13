@@ -20,7 +20,8 @@ from .models import (
     TranscriptEntry,
     TranscriptStats,
 )
-from .parser import extract_text, load_conversations, load_transcript
+from .models import extract_text
+from .parser import load_conversations, load_transcript
 
 
 # =============================================================================

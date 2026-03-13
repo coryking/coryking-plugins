@@ -11,6 +11,13 @@ def format_timestamp(ts: Optional[datetime]) -> str:
     return ts.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def iso_timestamp(ts: Optional[datetime]) -> str:
+    """Format a datetime as ISO 8601. Returns empty string for None."""
+    if ts is None:
+        return ""
+    return ts.isoformat()
+
+
 def short_uuid(uuid: str) -> str:
     """First 8 chars of a UUID for display."""
     return uuid[:8] if uuid else "--------"

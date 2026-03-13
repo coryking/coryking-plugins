@@ -10,7 +10,11 @@ description: >
 
 # cc-explorer
 
-Explores Claude Code chat history stored as JSONL transcripts. Seven MCP tools handle all interaction — call them directly, no CLI commands needed.
+Explores Claude Code chat history stored as JSONL transcripts. Six MCP tools handle all interaction — call them directly, no CLI commands needed.
+
+All tools return structured JSON dicts. Conversation text appears as compact string arrays using entry line format:
+- `[U:id] text` — user message (first 8 chars of turn UUID)
+- `[A:id] text` — assistant message with smart tool call summaries (e.g., `→ Edit(/path/to/file)`)
 
 ## Tools
 

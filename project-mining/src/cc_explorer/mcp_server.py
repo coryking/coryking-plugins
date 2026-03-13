@@ -1,12 +1,16 @@
 """MCP server wrapping the cc_explorer library.
 
 Exposes Claude Code chat log exploration as MCP tools via FastMCP.
-All tools are read-only and return formatted text strings.
+All tools are read-only and return structured dicts.
+
+Conversation text in results uses entry line format:
+  [U:id] user text     — human message (U = user, id = first 8 chars of turn UUID)
+  [A:id] assistant text — assistant message with smart tool call summaries
 """
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from fastmcp import FastMCP
 from pydantic import Field
@@ -78,12 +82,17 @@ def search_chat_history(
         int,
         Field(description="Max results before auto-switching to count mode."),
     ] = 30,
-) -> str:
-    """Search Claude Code chat logs for patterns. Returns matching conversation excerpts with turn UUIDs for follow-up with quote_chat_moment."""
+) -> dict[str, Any]:
+    """Search Claude Code chat logs for patterns.
+
+    Returns structured JSON with matching conversation excerpts.
+    Conversation text uses [U:id]/[A:id] entry line format where id is the first 8 chars of the turn UUID.
+    Use turn UUIDs from results for follow-up with quote_chat_moment.
+    """
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
-        return f"No conversations found for {proj}"
+        return {"error": f"No conversations found for {proj}"}
 
     scope_val = ScopeType(scope)
 
@@ -97,7 +106,7 @@ def search_chat_history(
     if session:
         sessions = [s for s in sessions if s.session_id.startswith(session)]
         if not sessions:
-            return f"No session matching: {session}"
+            return {"error": f"No session matching: {session}"}
 
     if counts_only or len(patterns) > 1:
         # Count mode: triage across all patterns
@@ -108,7 +117,7 @@ def search_chat_history(
                 all_results.append((pat, r))
 
         if not all_results:
-            return f"No matches for: {', '.join(patterns)}"
+            return {"error": f"No matches for: {', '.join(patterns)}"}
 
         all_results.sort(key=lambda x: x[1].count, reverse=True)
         return format_triage_results(all_results)
@@ -118,7 +127,7 @@ def search_chat_history(
     triage_results = triage(sessions, pat, entry_types, scope=scope_val)
 
     if not triage_results:
-        return f"No matches for: {pat}"
+        return {"error": f"No matches for: {pat}"}
 
     total_hits = sum(r.count for r in triage_results)
 
@@ -133,7 +142,7 @@ def search_chat_history(
             scope=scope_val,
         )
         if not result.matches:
-            return f"No matches for: {pat}"
+            return {"error": f"No matches for: {pat}"}
         return format_search_results(result, pat)
     else:
         # Too many hits -- show counts
@@ -159,17 +168,21 @@ def quote_chat_moment(
         int,
         Field(description="Number of messages before and after the target turn."),
     ] = 3,
-) -> str:
-    """Pull the full conversation moment around a specific turn UUID. Use turn UUIDs from search_chat_history output."""
+) -> dict[str, Any]:
+    """Pull the full conversation moment around a specific turn UUID.
+
+    Returns entries as [U:id]/[A:id] formatted strings with full untruncated text.
+    Use turn UUIDs from search_chat_history output.
+    """
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
-        return f"No conversations found for {proj}"
+        return {"error": f"No conversations found for {proj}"}
 
     session_info, entries = get_turn_context(sessions, turn, context)
 
     if not entries:
-        return f"Turn {turn} not found"
+        return {"error": f"Turn {turn} not found"}
 
     return format_quote(session_info, turn, context, entries)
 
@@ -194,12 +207,12 @@ def list_chat_sessions(
         str | None,
         Field(description="Only sessions before this date (YYYY-MM-DD)."),
     ] = None,
-) -> str:
+) -> dict[str, Any]:
     """List Claude Code conversations for a project with usage stats (message count, agents, tokens, tools)."""
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
-        return f"No conversations found for {proj}"
+        return {"error": f"No conversations found for {proj}"}
 
     if min_agents is not None:
         sessions = [s for s in sessions if s.stats.agent_count >= min_agents]
@@ -221,7 +234,7 @@ def list_chat_sessions(
         ]
 
     if not sessions:
-        return "No conversations match filters"
+        return {"error": "No conversations match filters"}
 
     return format_conversation_list(sessions)
 
@@ -234,17 +247,17 @@ def list_agent_sessions(
             description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
         ),
     ] = None,
-) -> str:
+) -> dict[str, Any]:
     """List all sessions that spawned subagents, with agent counts and tool usage."""
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
-        return f"No conversations found for {proj}"
+        return {"error": f"No conversations found for {proj}"}
 
     agent_sessions = [s for s in sessions if s.stats.agent_count > 0]
 
     if not agent_sessions:
-        return "No sessions with subagents found."
+        return {"error": "No sessions with subagents found."}
 
     return format_manifest_view(agent_sessions)
 
@@ -267,12 +280,12 @@ def list_session_agents(
     compaction: Annotated[
         bool, Field(description="Show compaction details.")
     ] = False,
-) -> str:
+) -> dict[str, Any]:
     """List all agents spawned by a specific session, with stats and output file info."""
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
-        return f"No conversations found for {proj}"
+        return {"error": f"No conversations found for {proj}"}
 
     target = None
     for s in sessions:
@@ -281,7 +294,7 @@ def list_session_agents(
             break
 
     if not target:
-        return f"Session {session} not found"
+        return {"error": f"Session {session} not found"}
 
     agents = extract_subagents(target.path)
 
@@ -325,31 +338,31 @@ def get_agent_detail(
     compaction: Annotated[
         bool, Field(description="Show compaction details.")
     ] = False,
-) -> str:
+) -> dict[str, Any]:
     """Get full prompt, result, stats, and optional tool trace for specific agent(s)."""
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
-        return f"No conversations found for {proj}"
+        return {"error": f"No conversations found for {proj}"}
 
     if session:
         sessions = [s for s in sessions if s.session_id.startswith(session)]
         if not sessions:
-            return f"Session {session} not found"
+            return {"error": f"Session {session} not found"}
 
     output_dir = Path(task_output_dir).expanduser() if task_output_dir else None
 
-    parts: list[str] = []
+    details: list[dict[str, Any]] = []
     for aid in agent_ids:
         found, found_session = _find_agent(sessions, aid)
         if not found or not found_session:
-            parts.append(f"Agent {aid} not found")
+            details.append({"error": f"Agent {aid} not found"})
             continue
 
         resolve_output_files([found], output_dir)
         entries_map = scan_output_file_stats([found], keep_entries=trace)
 
-        parts.append(
+        details.append(
             format_agent_detail(
                 found,
                 found_session,
@@ -360,8 +373,9 @@ def get_agent_detail(
             )
         )
 
-    separator = "\n\n" + "=" * 60 + "\n\n"
-    return separator.join(parts)
+    if len(details) == 1:
+        return details[0]
+    return {"agents": details}
 
 
 def _find_agent(sessions, agent_id: str):

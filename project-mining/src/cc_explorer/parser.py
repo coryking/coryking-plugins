@@ -5,11 +5,10 @@
 Core functions:
 - load_transcript(path) — parse a JSONL file into typed entries
 - load_conversations(project_path) — find all JSONL files for a project
-- extract_text(entry) — pull readable text from an entry's content blocks
+- extract_text — re-exported from models.py
 """
 
 import json
-import re
 from pathlib import Path
 from typing import Any, Sequence, Union, cast
 
@@ -241,45 +240,5 @@ def load_conversations(project_path: str) -> dict[str, Path]:
     return result
 
 
-def extract_text(entry: Union[HumanEntry, AssistantTranscriptEntry]) -> str:
-    """Extract readable text from an entry's content blocks.
-
-    Joins TextContent.text values. Handles str | list[ContentItem] content.
-    Strips system XML wrappers from raw string content.
-    """
-    content = entry.message.content
-
-    if isinstance(content, str):
-        return _strip_system_xml(content)
-
-    parts: list[str] = []
-    for item in content:
-        if isinstance(item, TextContent):
-            text = _strip_system_xml(item.text).strip()
-            if text and not text.startswith("[Request interrupted by user"):
-                parts.append(text)
-    return "\n".join(parts)
-
-
-def _strip_system_xml(text: str) -> str:
-    """Remove system/metadata XML from raw string messages.
-
-    Keeps meaningful content inside <result> tags.
-    """
-    text = re.sub(r"<usage>[\s\S]*?</usage>", "", text)
-    text = re.sub(r"</?task-notification>", "", text)
-    text = re.sub(r"<task-id>[^<]*</task-id>", "", text)
-    text = re.sub(r"<tool-use-id>[^<]*</tool-use-id>", "", text)
-    text = re.sub(r"<status>[^<]*</status>", "", text)
-    text = re.sub(r"<summary>[^<]*</summary>", "", text)
-    text = re.sub(r"</?result>", "", text)
-    text = re.sub(r"<system-reminder>[\s\S]*?</system-reminder>", "", text)
-    text = re.sub(
-        r"</?(?:command-name|command-message|command-args|local-command-stdout|"
-        r"local-command-caveat|user-prompt-submit-hook)>[^<]*",
-        "",
-        text,
-    )
-    text = re.sub(r"Full transcript available at:.*", "", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+# extract_text and _strip_system_xml moved to models.py
+from .models import extract_text  # noqa: F401 — re-export for external consumers
