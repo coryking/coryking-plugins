@@ -78,20 +78,24 @@ def search_chat_history(
             description="Force count mode -- show per-session match counts instead of content."
         ),
     ] = False,
-    snippet_width: Annotated[
+    example_width: Annotated[
         int,
-        Field(description="Character width of match snippets in count/triage mode. Default 150."),
+        Field(description="Character width of example excerpts in triage mode."),
     ] = 150,
     limit: Annotated[
         int,
         Field(description="Max results before auto-switching to count mode."),
     ] = 30,
 ) -> dict[str, Any]:
-    """Search Claude Code chat logs for patterns.
+    """Search Claude Code chat logs for patterns. This is a DISCOVERY tool — use it to find WHERE things were discussed, then use quote_chat_moment to READ what was said.
 
-    Returns structured JSON with matching conversation excerpts.
+    Returns two response shapes depending on hit volume:
+    - **Content mode** (few hits): full matched entries with context and turn UUIDs. Read these directly.
+    - **Triage mode** (many hits, or multi-pattern): per-session hit counts grouped by pattern, with a short example excerpt. Use session IDs to narrow your next search, or grab turn UUIDs and quote_chat_moment to read the actual conversations.
+
+    Don't keep searching for answers in triage examples — they're for locating, not reading. Once you've found the relevant sessions/turns, switch to quote_chat_moment.
+
     Conversation text uses [U:id]/[A:id] entry line format where id is the first 8 chars of the turn UUID.
-    Use turn UUIDs from results for follow-up with quote_chat_moment.
     """
     proj = resolve_project(project)
     sessions = load_sessions(proj)
@@ -116,7 +120,7 @@ def search_chat_history(
         # Count mode: triage across all patterns
         all_results: list[tuple[str, TriageResult]] = []
         for pat in patterns:
-            results = triage(sessions, pat, entry_types, snippet_width=snippet_width, scope=scope_val)
+            results = triage(sessions, pat, entry_types, snippet_width=example_width, scope=scope_val)
             for r in results:
                 all_results.append((pat, r))
 
@@ -128,7 +132,7 @@ def search_chat_history(
 
     # Single pattern: auto-triage then maybe expand
     pat = patterns[0]
-    triage_results = triage(sessions, pat, entry_types, snippet_width=snippet_width, scope=scope_val)
+    triage_results = triage(sessions, pat, entry_types, snippet_width=example_width, scope=scope_val)
 
     if not triage_results:
         return {"error": f"No matches for: {pat}"}

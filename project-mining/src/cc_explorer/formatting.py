@@ -4,6 +4,7 @@ All format functions return dicts for structured JSON responses.
 Conversation text appears as compact string arrays using [U:id]/[A:id] entry line format.
 """
 
+from collections import OrderedDict
 from typing import Any, Optional
 
 from .models import (
@@ -37,24 +38,35 @@ def _entry_display(entry: TranscriptEntry, truncate: int = 500) -> str:
 
 
 def format_triage_results(all_results: list[tuple[str, TriageResult]]) -> dict[str, Any]:
-    """Format triage/count results as structured dict."""
+    """Format triage/count results as structured dict, grouped by session."""
     total = sum(r.count for _, r in all_results)
-    seen_sessions: set[str] = set()
-    for _, r in all_results:
-        seen_sessions.add(r.session.session_id)
-    return {
-        "total_matches": total,
-        "total_sessions": len(seen_sessions),
-        "per_session": [
-            {
-                "count": r.count,
-                "pattern": pat,
-                "session_id": r.session.session_id,
+
+    # Group by session_id, preserving insertion order
+    grouped: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    for pat, r in all_results:
+        sid = r.session.session_id
+        if sid not in grouped:
+            grouped[sid] = {
+                "session_id": sid,
                 "date": iso_timestamp(r.session.first_timestamp),
-                "snippet": r.first_match_snippet or r.session.title,
+                "patterns": [],
             }
-            for pat, r in all_results
-        ],
+        grouped[sid]["patterns"].append({
+            "pattern": pat,
+            "hits": r.count,
+            "example": r.first_match_snippet or r.session.title,
+        })
+
+    # Sort sessions by total hits descending
+    sessions = sorted(
+        grouped.values(),
+        key=lambda s: sum(p["hits"] for p in s["patterns"]),
+        reverse=True,
+    )
+
+    return {
+        "total": total,
+        "sessions": sessions,
     }
 
 
@@ -73,22 +85,21 @@ def format_search_results(result: SearchResult, pattern: str) -> dict[str, Any]:
     """Format search results — content mode or overflow with samples."""
     if result.overflow:
         return {
-            "total_matches": result.total_matches,
+            "total": result.total_matches,
             "overflow": True,
-            "total_sessions": len(result.per_session),
-            "per_session": [
+            "sessions": [
                 {
-                    "count": r.count,
                     "session_id": r.session.session_id,
                     "date": iso_timestamp(r.session.first_timestamp),
-                    "snippet": r.first_match_snippet or r.session.title,
+                    "hits": r.count,
+                    "example": r.first_match_snippet or r.session.title,
                 }
                 for r in result.per_session
             ],
             "sample_matches": [_format_match(m) for m in result.matches],
         }
     return {
-        "total_matches": result.total_matches,
+        "total": result.total_matches,
         "matches": [_format_match(m) for m in result.matches],
     }
 

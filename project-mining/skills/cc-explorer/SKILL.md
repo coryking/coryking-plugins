@@ -18,7 +18,7 @@ All tools return structured JSON dicts. Conversation text appears as compact str
 
 ## Tools
 
-- **search_chat_history** — find content across conversations. Auto-triage: few hits return content with context, many hits return per-session counts.
+- **search_chat_history** — DISCOVERY tool: find WHERE things were discussed. Auto-triage: few hits return content with turn UUIDs, many hits return per-session counts with examples. Use it to locate, then switch to `quote_chat_moment` to read.
 - **quote_chat_moment** — pull the full untruncated conversation moment around a specific turn UUID.
 - **list_chat_sessions** — list all conversations with stats (message count, agents, tokens, dates).
 - **list_agent_sessions** — which sessions spawned subagents? Counts and dates.
@@ -50,6 +50,8 @@ Multiple search patterns are OR'd and always produce counts — useful for sweep
 ### Search → quote loop
 
 The core research loop: search finds patterns and returns turn UUIDs with each match. Use those UUIDs to quote the full conversation moment — the untruncated text, tool calls with parameters, and surrounding context. This is how you go from "it was mentioned somewhere" to "here is exactly what happened."
+
+**Common anti-pattern**: repeatedly searching with more patterns to extract answers from triage examples. Triage examples are 150-char excerpts — they tell you where to look, not what was said. Once you've identified the relevant sessions and turns (usually 2-3 searches), switch to `quote_chat_moment` to actually read the conversations. Five quotes beats fifteen searches.
 
 ### Agent inspection
 
