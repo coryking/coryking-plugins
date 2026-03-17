@@ -120,7 +120,7 @@ def search_chat_history(
         # Count mode: triage across all patterns
         all_results: list[tuple[str, TriageResult]] = []
         for pat in patterns:
-            results = triage(sessions, pat, entry_types, snippet_width=example_width, scope=scope_val)
+            results = triage(sessions, pat, entry_types, example_width=example_width, scope=scope_val)
             for r in results:
                 all_results.append((pat, r))
 
@@ -132,7 +132,7 @@ def search_chat_history(
 
     # Single pattern: auto-triage then maybe expand
     pat = patterns[0]
-    triage_results = triage(sessions, pat, entry_types, snippet_width=example_width, scope=scope_val)
+    triage_results = triage(sessions, pat, entry_types, example_width=example_width, scope=scope_val)
 
     if not triage_results:
         return {"error": f"No matches for: {pat}"}

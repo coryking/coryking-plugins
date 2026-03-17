@@ -123,7 +123,7 @@ class TriageResult:
 
     session: SessionInfo
     count: int
-    first_match_snippet: str = ""  # snippet from first matching entry
+    first_match_example: str = ""  # example excerpt from first matching entry
 
 
 @dataclass
@@ -241,8 +241,8 @@ def load_sessions(project_path: str) -> list[SessionInfo]:
 # =============================================================================
 
 
-def _match_snippet(text: str, pattern: re.Pattern, width: int = 80) -> str:
-    """Extract a snippet centered on the first match within text."""
+def _match_example(text: str, pattern: re.Pattern, width: int = 150) -> str:
+    """Extract an example excerpt centered on the first match within text."""
     # Collapse whitespace for display
     text = re.sub(r"\s+", " ", text).strip()
     m = pattern.search(text)
@@ -334,7 +334,7 @@ def triage(
     sessions: list[SessionInfo],
     pattern: str,
     entry_types: tuple[type, ...] = (HumanEntry,),
-    snippet_width: int = 80,
+    example_width: int = 150,
     scope: ScopeType = ScopeType.messages,
 ) -> list[TriageResult]:
     """Count pattern matches per session. Returns sorted by hit count descending."""
@@ -344,14 +344,14 @@ def triage(
     for session in sessions:
         entries = load_transcript(session.path)
         count = 0
-        first_snippet = ""
+        first_example = ""
         for entry in entries:
             if isinstance(entry, entry_types) and _entry_matches(entry, compiled, scope):
                 count += 1
-                if not first_snippet and isinstance(entry, (HumanEntry, AssistantTranscriptEntry)):
-                    first_snippet = _match_snippet(extract_text(entry), compiled, width=snippet_width)
+                if not first_example and isinstance(entry, (HumanEntry, AssistantTranscriptEntry)):
+                    first_example = _match_example(extract_text(entry), compiled, width=example_width)
         if count > 0:
-            results.append(TriageResult(session=session, count=count, first_match_snippet=first_snippet))
+            results.append(TriageResult(session=session, count=count, first_match_example=first_example))
 
     results.sort(key=lambda r: r.count, reverse=True)
     return results

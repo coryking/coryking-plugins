@@ -54,7 +54,7 @@ def format_triage_results(all_results: list[tuple[str, TriageResult]]) -> dict[s
         grouped[sid]["patterns"].append({
             "pattern": pat,
             "hits": r.count,
-            "example": r.first_match_snippet or r.session.title,
+            "example": r.first_match_example or r.session.title,
         })
 
     # Sort sessions by total hits descending
@@ -92,7 +92,7 @@ def format_search_results(result: SearchResult, pattern: str) -> dict[str, Any]:
                     "session_id": r.session.session_id,
                     "date": iso_timestamp(r.session.first_timestamp),
                     "hits": r.count,
-                    "example": r.first_match_snippet or r.session.title,
+                    "example": r.first_match_example or r.session.title,
                 }
                 for r in result.per_session
             ],
