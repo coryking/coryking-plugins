@@ -88,10 +88,10 @@ Mines project histories (docs, git, chat logs, artifacts) for evidence of specif
 **Components:**
 - `.claude-plugin/plugin.json` — plugin metadata
 - `.mcp.json` — MCP server configuration for cc-explorer
-- `agents/mining-researcher.md` — named agent for research subagents. Inlines analytical stance, the search-then-quote methodology for chat mining, return format (claim/evidence/source/relevance), and IDE mining tiers. The orchestrator passes only the delta (objective, vocabulary, boundaries, paths).
+- `agents/mining-researcher.md` — named agent for research subagents. Inlines analytical stance, the search→grep→read methodology for chat mining, return format (claim/evidence/source/relevance), and IDE mining tiers. The orchestrator passes only the delta (objective, vocabulary, boundaries, paths). Tool mechanics are documented in MCP tool descriptions; the agent prompt focuses on research workflow.
 - `skills/project-mining/SKILL.md` — orchestrator instructions: alignment protocol, gather/analyze/synthesize workflow, researcher dispatch via `project-mining:mining-researcher`, output structure, anti-patterns
-- `skills/cc-explorer/SKILL.md` — skill teaching agents how to use cc-explorer MCP tools to explore chat logs. **Keep in sync with the server** — when tools, parameters, or output formats change in `src/cc_explorer/`, update this skill.
-- `src/cc_explorer/` — typed JSONL toolkit (Pydantic models, search/filter/triage, FastMCP server). Tools: `search` (auto-triage), `quote` (pull full conversation moment), `agents` (manifest/session/detail views), `list` (session listing with filters). `--project` defaults to CWD.
+- `skills/cc-explorer/SKILL.md` — skill teaching agents how to use cc-explorer MCP tools to explore chat logs. Describes workflow (when to use what); tool mechanics live in the MCP tool descriptions (Python docstrings), not the skill.
+- `src/cc_explorer/` — typed JSONL toolkit (Pydantic models, search/filter/triage, FastMCP server). Tools follow a progressive zoom: `list_project_sessions` (orient), `search_project` (scan), `grep_session` (examine), `read_turn` (read), plus agent inspection tools. `project` defaults to CWD.
 - `pyproject.toml` — package config with pydantic and fastmcp deps, `cc-explorer` entry point
 - `scripts/cursor_*.py` — Cursor SQLite scripts for IDE chat mining
 
@@ -134,7 +134,7 @@ The evolution: `extract_chat_evidence.py` -> `strip_chat.py` -> `cc-explorer`. E
 
 `strip_chat.py` solved the right problem (raw JSONL is ~95% tool results and plumbing) but created workflow overhead: batch-strip upfront, write intermediates, then grep with shell tools. Shell variables didn't persist between Bash calls, broad grep results got externalized and silently lost, and researchers needed multiple passes to get conversation context around hits.
 
-cc-explorer wraps typed Pydantic models (adapted from `claude-code-log`, MIT) around the JSONL structure and exposes tools for the search-then-quote research loop and agent inspection. Tools: `search` (auto-triage: few hits show content, many show counts), `quote` (pull full conversation moment), `agents` (manifest/session/detail views for subagent inspection), `list` (session listing with filters). The corpus is treated as one pool of data identified by session UUIDs and turn UUIDs — no filenames, no intermediates, no batch-strip step.
+cc-explorer wraps typed Pydantic models (adapted from `claude-code-log`, MIT) around the JSONL structure and exposes tools for progressive chat exploration and agent inspection. Four conversation tools follow a zoom pattern: `list_project_sessions` (orient), `search_project` (scan across sessions), `grep_session` (examine within one session), `read_turn` (read a moment at full fidelity). Plus agent inspection tools for tracing subagent execution. Each tool has one output shape — no mode switching. The corpus is treated as one pool of data identified by session UUIDs and turn UUIDs — no filenames, no intermediates, no batch-strip step.
 
 The MCP server architecture eliminated the final friction: researchers no longer need to invoke shell commands at all. Tools appear natively in the agent's tool palette.
 

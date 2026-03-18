@@ -6,11 +6,13 @@ How mining-researcher agents search Claude Code chat logs for behavioral evidenc
 
 Chat log mining is iterative, not linear. The best researchers follow a two-stage loop:
 
-**Search** — orient and read in one step. Start broad with multiple patterns to map which sessions are hot for your topic. The tool auto-triages: few hits show full content with context (so you can read immediately), many hits show per-session counts (so you can narrow). Each round of reading should produce new search terms the researcher didn't start with — "intellectual humility" shows up as "wait, is our judge actually trustworthy?"
+**Search** (`search_project`) — orient across all sessions. Start broad with multiple patterns to see which terms land and which sessions are hot. Each round of reading should produce new search terms the researcher didn't start with — "intellectual humility" shows up as "wait, is our judge actually trustworthy?"
 
-**Quote** — extract the full conversation moment. Once a researcher has found something worth reporting, they need: what the assistant said that triggered the reaction, the user's exact words, and what happened next. A finding without a direct quote is a claim without evidence.
+**Grep** (`grep_session`) — examine matches in context within a single session. This is where you read the data and invent new search terms.
 
-The cycle: search with 3-4 broad patterns → read what the data says → invent 2-3 new search categories from what appears → search those → find the gold → quote the specific moments → write the finding.
+**Read** (`read_turn`) — extract the full conversation moment. Once a researcher has found something worth reporting, they need: what the assistant said that triggered the reaction, the user's exact words, and what happened next. A finding without a direct quote is a claim without evidence.
+
+The cycle: search with 3-4 broad patterns → grep hot sessions → read what the data says → invent 2-3 new search categories from what appears → search/grep those → find the gold → read the specific moments → write the finding.
 
 ## What separates good from mediocre researchers
 
@@ -55,7 +57,7 @@ The biggest problem across all sessions: 38 externalized result files totaling ~
 
 BT2's cross-functional agent had 1.5MB of externalized evidence (11 files) that never made it into findings. It produced the longest final output of any agent in its session, but the patterns in those 1.5MB were invisible to it.
 
-cc-explorer solves this by controlling output size — the overflow behavior returns a sample plus counts instead of dumping everything.
+cc-explorer solves this by controlling output size — grep_session truncates to a configurable limit and includes overflow hints, and read_turn accepts a per-entry character limit.
 
 ### Shell state doesn't persist between Bash calls
 
@@ -79,20 +81,23 @@ The agent definition says "asymmetric returns are normal — if your assignment 
 
 cc-explorer exposes MCP tools that match the research workflow:
 
-| Stage | Tool | What it does | Output shape |
-|-------|------|-------------|-------------|
-| Search | `search_chat_history` | Find content (auto-triage: few→content, many→counts) | Hits with context + inline tool calls, or per-session counts |
-| Quote | `quote_chat_moment` | Full conversation around a specific turn | Messages + tool calls before/after the target turn |
-| Inspect | `list_agent_sessions` / `list_session_agents` / `get_agent_detail` | Agent inspection at manifest/session/detail levels | Agent metadata, traces, compaction |
-| Orient | `list_chat_sessions` | What sessions exist (with filters) | Session metadata CSV |
+| Stage | Tool | Scope | What it does |
+|-------|------|-------|-------------|
+| Orient | `list_project_sessions` | project | What conversations exist, with stats |
+| Search | `search_project` | project | Which patterns hit, which sessions are hot |
+| Grep | `grep_session` | session | Matches with surrounding context in one conversation |
+| Read | `read_turn` | turn | Full fidelity text around a specific moment |
+| Inspect | `list_agent_sessions` / `list_session_agents` / `get_agent_detail` | varies | Agent inspection at manifest/session/detail levels |
+
+Each step narrows scope and increases fidelity — like `ls`, `rg -c`, `rg -C3`, and `sed -n` on JSONL files. No tool switches modes based on hit volume.
 
 The corpus is treated as one pool of data. Sessions are identified by short UUID + auto-generated title (first human message, truncated) + date — not filenames. Every hit includes a `session:xxx/turn:yyy` reference that points to the immutable JSONL entry.
 
-`--project` defaults to CWD — only needed when inspecting a different project's history.
+`project` defaults to CWD — only needed when inspecting a different project's history.
 
-### The auto-triage design
+### Progressive zoom design
 
-When `search` gets too many results for a single pattern, it doesn't truncate or error — it switches to count mode: per-session counts plus a sample of representative hits (enough to invent new search terms). This means a researcher who starts with a broad pattern gets orientation data for free. Multiple patterns always show counts so you can see which terms land vs dead weight.
+`search_project` returns pattern-centric results: each pattern shows its hit count, which sessions contain it, and centered excerpts. Researchers start broad to see which terms land, then `grep_session` on hot sessions to see matches in context. `read_turn` pulls the full moment when the evidence is found. Each tool has one output shape — no mode switching.
 
 ### Tool call visibility in output
 
@@ -100,7 +105,7 @@ Assistant entries in search and quote output include inline tool call summaries:
 
 ### Searching tool inputs
 
-`search --scope tools` searches inside tool_use blocks — Bash commands, Read/Edit file paths, Grep patterns, Agent prompts. This surfaces what agents *did*, not just what was *said*. `--scope all` searches both messages and tool inputs. When using tool/all scope, the type filter automatically includes both human and assistant entries.
+`scope: "tools"` (on both `search_project` and `grep_session`) searches inside tool_use blocks — Bash commands, Read/Edit file paths, Grep patterns, Agent prompts. This surfaces what agents *did*, not just what was *said*. `scope: "all"` searches both messages and tool inputs. When using tools/all scope, the role filter automatically includes both user and assistant entries.
 
 ## What these tools don't cover
 

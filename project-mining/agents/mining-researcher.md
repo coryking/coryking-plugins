@@ -52,90 +52,42 @@ Don't silo by data source. A finding might start with a frustrated chat message,
 
 ## Data sources and formats
 
-### Claude Code chat logs: the search→quote loop
+### Claude Code chat logs: search → grep → read
 
 Chat logs are your richest source for behavioral evidence — the user's own words
-in the moment, unfiltered. Mining them is iterative, not linear.
+in the moment, unfiltered. Mining them is iterative, not linear. Three tools at
+three zoom levels — the MCP tool descriptions document parameters and output format;
+this section teaches the research workflow.
 
-**Search** — find content across conversations. The tool auto-triages: few hits
-show full content with context, many hits show per-session counts so you can narrow.
-
-Use `search_chat_history` with several candidate terms from your search vocabulary. Multiple patterns show counts so you can see which terms land vs dead weight.
-
-**The `type` parameter** controls which side of the conversation you search:
-- `human` (default) — the user's messages: corrections, frustrations, directions, decisions. Start here for behavioral evidence.
-- `assistant` — the agent's responses: reasoning, explanations, what it proposed or refused.
-- `all` — both sides. Use when searching for topic keywords that appear on either side.
-
-**The `scope` parameter** controls what content is searched:
-- `messages` (default) — conversation text
-- `tools` — inside tool_use blocks: Bash commands, file paths, grep patterns, agent prompts. Automatically sets type to `all`.
-- `all` — both messages and tool inputs
+**Search** (`search_project`) — cast a wide net across all sessions. Give it several
+candidate terms from your search vocabulary. Results show which patterns are productive
+(hit count, which sessions) and which are dead weight (omitted). This is your
+orientation step.
 
 Patterns are **regex** (case-insensitive). Use `\b` for word boundaries — `\bugh\b` matches
 "ugh" but not "though". Omit `\b` for substring matching — `frustrat` matches
 "frustrated", "frustration", etc.
 
-Results merge into one list sorted by count, each tagged with its pattern:
+**Grep** (`grep_session`) — drill into a specific session with one pattern. Returns
+matching entries with surrounding context turns, each showing its `full_length` so
+you can gauge size. This is where you read what the data says and invent new search
+terms.
 
-```
-17 matches across 8 pattern/session pairs
-count,pattern,session,date,snippet
-8,frustrat,a1b2c3d4,2026-02-24,...so frustrated with this, I said keep the original structure...
-4,frustrat,b2c3d4e5,2026-02-27,...my frustration is that it keeps gold-plating instead of...
-2,\bugh\b,a1b2c3d4,2026-02-24,...ugh, that's not what I meant. the whole point was to find...
-```
-
-**Single pattern** — auto-shows content if few hits. Use `search_chat_history` with one pattern and `context: 1`:
-
-```
---- match 1 [session:a1b2c3d4 turn:f7e8d9c0] ---
-[ASSISTANT turn:c4b3a2f1] Here's the refactored version with the new pattern...  → Edit(file_path="src/auth.py", ...)
-[USER turn:f7e8d9c0] ugh, that's not what I meant. I said keep the original structure  ← match
-[ASSISTANT turn:b3a2f1e0] You're right, I apologize. Let me revert to the original...  → Edit(file_path="src/auth.py", ...)
-```
-
-Assistant entries include inline tool call summaries (`→ ToolName(key="value", ...)`), showing what the agent actually did — Bash commands, file edits, MCP tool invocations — alongside what it said.
-
-If too many hits, auto-switches to counts with samples and a hint to narrow:
-
-```
-Found 847 matches across 43 sessions. Showing 10 samples.
-
-Per-session counts:
-  47  session:a1b2c3d4  2026-02-24  "Mine project for evidence of..."
-  ...
-
-Narrow your pattern or use --session to target a specific conversation.
-```
-
-Drill into a specific session by passing a `session` parameter to `search_chat_history`.
-
-**Quote** — once you've found the moment, pull the full conversation context using `quote_chat_moment`. You need:
+**Read** (`read_turn`) — pull the full conversation moment. You need:
 what the assistant said that triggered the reaction, the user's exact words, and what
 happened next. Every finding needs a direct quote with a source reference.
 
-```
-session:a1b2c3d4  turn:f7e8d9c0 (± 3 messages)
-
-[ASSISTANT turn:e6d5c4b3] I've updated all the configuration files...  → Edit(file_path="config/settings.yaml", ...)  → Edit(file_path="config/deploy.yaml", ...)
-[USER turn:d5c4b3a2] wait, I didn't ask you to touch the config
-[ASSISTANT turn:c4b3a2f1] You're right, let me revert those changes...  → Edit(file_path="config/settings.yaml", ...)
-[USER turn:f7e8d9c0] yeah and while you're at it, stop assuming...  ← target
-[ASSISTANT turn:b3a2f1e0] Understood. I'll only modify files you explicitly...
-[USER turn:a2f1e0d9] exactly. now, back to the auth flow...
-[ASSISTANT turn:f1e0d9c8] For the auth flow, here's what I'd suggest...  → Read(file_path="src/auth/middleware.py")
-```
-
-The tool calls in quote output are untruncated, so you see full parameters — useful for tracing exactly what an agent did during a conversation moment.
+Use `full_length` from grep output to gauge entry size before reading. Large entries
+(5000+) are usually tool results — use the `limit` parameter to avoid pulling in more
+than you need.
 
 **The loop in practice.** A typical chat mining session:
 
-1. Search with 3-4 broad patterns from your search vocabulary (multi-pattern → counts)
-2. Single-pattern search on hot sessions — read what the data says
+1. `search_project` with 3-4 broad patterns from your search vocabulary — see which terms land and which sessions are hot
+2. `grep_session` on hot sessions with your best pattern — read matches in context
 3. Invent 2-3 new search terms from what you see (this is the point)
-4. Search with those new terms
-5. Find the gold — quote the specific moments
+4. Search/grep with those new terms
+5. `read_turn` on the gold — get the full untruncated conversation moment
 6. Write your finding with the direct quote and `session:xxx/turn:yyy` reference
 
 The `session:xxx/turn:yyy` references are stable — they point to the immutable
@@ -144,10 +96,15 @@ Source field.
 
 ## Tool Access
 
-Use the cc-explorer MCP tools directly — they are automatically available to named agents within this plugin:
-- `search_chat_history` — search conversations for patterns
-- `quote_chat_moment` — pull full conversation context around a turn UUID
-- `list_chat_sessions` — list conversations with stats
+The cc-explorer MCP tools are automatically available to named agents within this plugin. The tool descriptions document parameters, output format, and usage — refer to them for mechanics.
+
+**Conversation exploration** (progressive zoom):
+- `search_project` — scan all sessions for patterns, see which terms land and where
+- `grep_session` — examine matches within a single session, with context
+- `read_turn` — read a specific conversation moment at full fidelity
+- `list_project_sessions` — list conversations with stats (dates, message counts, tokens, agents)
+
+**Agent inspection:**
 - `list_agent_sessions` — find sessions that spawned subagents
 - `list_session_agents` — see what agents a session dispatched
 - `get_agent_detail` — full prompt, result, and stats for specific agents

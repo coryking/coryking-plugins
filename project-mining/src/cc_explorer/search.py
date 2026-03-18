@@ -154,7 +154,8 @@ class SearchResult:
 
 # Map string names to entry type tuples for scope filtering
 ENTRY_TYPE_MAP: dict[str, tuple[type, ...]] = {
-    "human": (HumanEntry,),
+    "user": (HumanEntry,),
+    "human": (HumanEntry,),  # legacy alias
     "assistant": (AssistantTranscriptEntry,),
     "all": (HumanEntry, AssistantTranscriptEntry),
 }

@@ -102,14 +102,15 @@ This is inductive analysis — let themes emerge from the data. You are the anal
 
 **Chat logs (Claude Code):** `~/.claude/projects/<project-path>/*.jsonl`. This is where the raw struggle lives. Researchers use the cc-explorer MCP tools to search these directly — no pre-stripping needed. Pass the project path to each researcher in their source paths.
 
-Use the cc-explorer MCP tools to explore chat history:
+Use the cc-explorer MCP tools to explore chat history (progressive zoom):
 
-- **`list_sessions`** — List all conversations with dates, message counts, context window size, total output tokens, tool calls, agent dispatches.
-- **`list_agents`** — Manifest view: all sessions that spawned agents, with counts and dates.
-- **`list_session_agents`** — Every Agent tool call in a session: dispatch timestamp, type, status, token consumption, duration, compaction events. Pass the session ID.
-- **`get_agent_detail`** — Detail view for a specific agent: the prompt received, result returned, token stats. Supports multiple IDs for batch inspection.
-- **`search_chat_history`** — Search across chat logs with auto-triage (few hits show content, many show counts).
-- **`quote_chat_moment`** — Pull full conversation context around a specific moment.
+- **`list_project_sessions`** — List all conversations with dates, message counts, tokens, tool calls, agent dispatches.
+- **`search_project`** — Scan all sessions for patterns. Results show which patterns land and which sessions are hot.
+- **`grep_session`** — Examine matches within a single session, with surrounding context.
+- **`read_turn`** — Read a specific conversation moment at full fidelity.
+- **`list_agent_sessions`** — Sessions that spawned agents, with counts and dates.
+- **`list_session_agents`** — Agents dispatched by a session: timestamp, status, tokens, duration.
+- **`get_agent_detail`** — Full prompt, result, and stats for specific agent(s).
 
 The agent inspection tools are useful when:
 - Tracing output files back to the session and prompt version that created them

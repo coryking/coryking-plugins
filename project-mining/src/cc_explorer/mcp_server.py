@@ -3,14 +3,18 @@
 Exposes Claude Code chat log exploration as MCP tools via FastMCP.
 All tools are read-only and return structured dicts.
 
-Conversation text in results uses entry line format:
-  [U:id] user text     — human message (U = user, id = first 8 chars of turn UUID)
-  [A:id] assistant text — assistant message with smart tool call summaries
+Conversation text in results uses pipe-delimited entry line format:
+  timestamp|role|turn_id|full_length|display
+  - timestamp: unix epoch seconds
+  - role: U (user) or A (assistant)
+  - turn_id: first 8 chars of turn UUID
+  - full_length: character count of the full untruncated entry
+  - display: truncated entry text with smart tool call summaries (e.g. → Edit(/path/to/file))
 """
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
 from pydantic import Field
@@ -18,11 +22,11 @@ from pydantic import Field
 from .formatting import (
     format_agent_detail,
     format_conversation_list,
+    format_grep_results,
     format_manifest_view,
-    format_quote,
-    format_search_results,
+    format_read_turn,
+    format_search_project,
     format_session_view,
-    format_triage_results,
     matches_id,
 )
 from .search import (
@@ -42,161 +46,13 @@ mcp = FastMCP("cc-explorer")
 _TOOL_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": False}
 
 
-@mcp.tool(annotations=_TOOL_ANNOTATIONS)
-def search_chat_history(
-    patterns: Annotated[
-        list[str],
-        Field(
-            description="Regex pattern(s) to search for. Multiple patterns are OR'd and force count mode."
-        ),
-    ],
-    project: Annotated[
-        str | None,
-        Field(
-            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
-        ),
-    ] = None,
-    session: Annotated[
-        str | None,
-        Field(description="Session ID prefix to narrow search to one conversation."),
-    ] = None,
-    context: Annotated[
-        int,
-        Field(
-            description="Number of surrounding messages to include with each match."
-        ),
-    ] = 1,
-    scope: Annotated[
-        Literal["messages", "tools", "all"],
-        Field(
-            description="Search scope: 'messages' for conversation text, 'tools' for Bash/Read/Edit/Grep inputs, 'all' for both."
-        ),
-    ] = "messages",
-    counts_only: Annotated[
-        bool,
-        Field(
-            description="Force count mode -- show per-session match counts instead of content."
-        ),
-    ] = False,
-    example_width: Annotated[
-        int,
-        Field(description="Character width of example excerpts in triage mode."),
-    ] = 150,
-    limit: Annotated[
-        int,
-        Field(description="Max results before auto-switching to count mode."),
-    ] = 30,
-) -> dict[str, Any]:
-    """Search Claude Code chat logs for patterns. This is a DISCOVERY tool — use it to find WHERE things were discussed, then use quote_chat_moment to READ what was said.
-
-    Returns two response shapes depending on hit volume:
-    - **Content mode** (few hits): full matched entries with context and turn UUIDs. Read these directly.
-    - **Triage mode** (many hits, or multi-pattern): per-session hit counts grouped by pattern, with a short example excerpt. Use session IDs to narrow your next search, or grab turn UUIDs and quote_chat_moment to read the actual conversations.
-
-    Don't keep searching for answers in triage examples — they're for locating, not reading. Once you've found the relevant sessions/turns, switch to quote_chat_moment.
-
-    Conversation text uses [U:id]/[A:id] entry line format where id is the first 8 chars of the turn UUID.
-    """
-    proj = resolve_project(project)
-    sessions = load_sessions(proj)
-    if not sessions:
-        return {"error": f"No conversations found for {proj}"}
-
-    scope_val = ScopeType(scope)
-
-    # --scope tools/all implies searching all entry types
-    if scope_val in (ScopeType.tools, ScopeType.all):
-        entry_types = ENTRY_TYPE_MAP["all"]
-    else:
-        entry_types = ENTRY_TYPE_MAP["human"]
-
-    # Apply session filter early
-    if session:
-        sessions = [s for s in sessions if s.session_id.startswith(session)]
-        if not sessions:
-            return {"error": f"No session matching: {session}"}
-
-    if counts_only or len(patterns) > 1:
-        # Count mode: triage across all patterns
-        all_results: list[tuple[str, TriageResult]] = []
-        for pat in patterns:
-            results = triage(sessions, pat, entry_types, example_width=example_width, scope=scope_val)
-            for r in results:
-                all_results.append((pat, r))
-
-        if not all_results:
-            return {"error": f"No matches for: {', '.join(patterns)}"}
-
-        all_results.sort(key=lambda x: x[1].count, reverse=True)
-        return format_triage_results(all_results)
-
-    # Single pattern: auto-triage then maybe expand
-    pat = patterns[0]
-    triage_results = triage(sessions, pat, entry_types, example_width=example_width, scope=scope_val)
-
-    if not triage_results:
-        return {"error": f"No matches for: {pat}"}
-
-    total_hits = sum(r.count for r in triage_results)
-
-    if total_hits <= limit:
-        # Few enough hits -- show content
-        result = do_search(
-            sessions,
-            pat,
-            entry_types,
-            context,
-            max_results=limit,
-            scope=scope_val,
-        )
-        if not result.matches:
-            return {"error": f"No matches for: {pat}"}
-        return format_search_results(result, pat)
-    else:
-        # Too many hits -- show counts
-        all_results = [(pat, r) for r in triage_results]
-        return format_triage_results(all_results)
+# =============================================================================
+# Conversation tools
+# =============================================================================
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
-def quote_chat_moment(
-    turn: Annotated[
-        str,
-        Field(
-            description="Turn UUID (or prefix) to center on, from search output."
-        ),
-    ],
-    project: Annotated[
-        str | None,
-        Field(
-            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
-        ),
-    ] = None,
-    context: Annotated[
-        int,
-        Field(description="Number of messages before and after the target turn."),
-    ] = 3,
-) -> dict[str, Any]:
-    """Pull the full conversation moment around a specific turn UUID.
-
-    Returns entries as [U:id]/[A:id] formatted strings with full untruncated text.
-    Use turn UUIDs from search_chat_history output.
-    """
-    proj = resolve_project(project)
-    sessions = load_sessions(proj)
-    if not sessions:
-        return {"error": f"No conversations found for {proj}"}
-
-    session_info, entries = get_turn_context(sessions, turn, context)
-
-    if not entries:
-        return {"error": f"Turn {turn} not found"}
-
-    return format_quote(session_info, turn, context, entries)
-
-
-@mcp.tool(annotations=_TOOL_ANNOTATIONS)
-def list_chat_sessions(
+def list_project_sessions(
     project: Annotated[
         str | None,
         Field(
@@ -216,7 +72,10 @@ def list_chat_sessions(
         Field(description="Only sessions before this date (YYYY-MM-DD)."),
     ] = None,
 ) -> dict[str, Any]:
-    """List Claude Code conversations for a project with usage stats (message count, agents, tokens, tools)."""
+    """List conversations in a project with stats: dates, message counts, token usage, tool calls, agent dispatches.
+
+    This is the orientation step — like `ls -la` on the project's chat history. Use it to see what exists before searching.
+    """
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
@@ -245,6 +104,212 @@ def list_chat_sessions(
         return {"error": "No conversations match filters"}
 
     return format_conversation_list(sessions)
+
+
+@mcp.tool(annotations=_TOOL_ANNOTATIONS)
+def search_project(
+    patterns: Annotated[
+        list[str],
+        Field(
+            description="Regex patterns to scan for (case-insensitive). Results grouped by pattern, sorted by hit count."
+        ),
+    ],
+    project: Annotated[
+        str | None,
+        Field(
+            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
+        ),
+    ] = None,
+    role: Annotated[
+        Literal["user", "assistant", "all"],
+        Field(
+            description="Which side of the conversation to search: 'user' for human messages, 'assistant' for agent responses, 'all' for both."
+        ),
+    ] = "user",
+    scope: Annotated[
+        Literal["messages", "tools", "all"],
+        Field(
+            description="Content scope: 'messages' for conversation text, 'tools' for tool inputs (Bash commands, file paths, grep patterns), 'all' for both. Using 'tools' or 'all' searches both roles regardless of the role parameter."
+        ),
+    ] = "messages",
+    excerpt_width: Annotated[
+        int,
+        Field(description="Character width of centered excerpt examples."),
+    ] = 150,
+) -> dict[str, Any]:
+    """Scan a project's chat history for patterns and report where they appear.
+
+    Like `rg -c` across all sessions — tells you which patterns are productive and which sessions are hot. Use this to orient before drilling into a specific session with grep_session.
+
+    Returns pattern-centric results: each pattern shows its hit count, which sessions contain it, and a few centered excerpts. Patterns with zero hits are omitted.
+
+    Excerpts embed the session ID: "session_id|...centered text around match..."
+    Use the session IDs to decide where to grep next.
+    """
+    proj = resolve_project(project)
+    sessions = load_sessions(proj)
+    if not sessions:
+        return {"error": f"No conversations found for {proj}"}
+
+    scope_val = ScopeType(scope)
+
+    # --scope tools/all implies searching all entry types
+    if scope_val in (ScopeType.tools, ScopeType.all):
+        entry_types = ENTRY_TYPE_MAP["all"]
+    else:
+        entry_types = ENTRY_TYPE_MAP[role]
+
+    all_results: list[tuple[str, list[TriageResult]]] = []
+    for pat in patterns:
+        results = triage(sessions, pat, entry_types, example_width=excerpt_width, scope=scope_val)
+        all_results.append((pat, results))
+
+    # Check if anything matched
+    if not any(r for _, results in all_results for r in results):
+        return {"error": f"No matches for: {', '.join(patterns)}"}
+
+    return format_search_project(all_results, excerpt_width=excerpt_width)
+
+
+@mcp.tool(annotations=_TOOL_ANNOTATIONS)
+def grep_session(
+    session: Annotated[
+        str,
+        Field(
+            description="Session ID or prefix. Required — use search_project to find session IDs first."
+        ),
+    ],
+    pattern: Annotated[
+        str,
+        Field(description="Regex pattern to search for (case-insensitive)."),
+    ],
+    project: Annotated[
+        str | None,
+        Field(
+            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
+        ),
+    ] = None,
+    context: Annotated[
+        int,
+        Field(
+            description="Number of surrounding turns to include with each match (like grep -C)."
+        ),
+    ] = 2,
+    role: Annotated[
+        Literal["user", "assistant", "all"],
+        Field(
+            description="Which side of the conversation to search: 'user' for human messages, 'assistant' for agent responses, 'all' for both."
+        ),
+    ] = "user",
+    scope: Annotated[
+        Literal["messages", "tools", "all"],
+        Field(
+            description="Content scope: 'messages' for conversation text, 'tools' for tool inputs (Bash commands, file paths, grep patterns), 'all' for both."
+        ),
+    ] = "messages",
+    limit: Annotated[
+        int,
+        Field(
+            description="Max matches to return (like head -N). Overflow is truncated, not mode-switched."
+        ),
+    ] = 30,
+) -> dict[str, Any]:
+    """Show matches for a pattern within a single conversation, with surrounding context.
+
+    Like `rg -C3` on a single file — returns matching entries centered and truncated, with surrounding turns for context. Each entry includes its full character length so you can gauge size before calling read_turn.
+
+    Results are grouped into match blocks (like grep's `--` separator between context groups). Each block is a window of turns around a match, returned in chronological order.
+
+    Entry format in chats arrays: timestamp|role|turn_id|full_length|display
+    """
+    proj = resolve_project(project)
+    sessions = load_sessions(proj)
+    if not sessions:
+        return {"error": f"No conversations found for {proj}"}
+
+    # Filter to the target session
+    sessions = [s for s in sessions if s.session_id.startswith(session)]
+    if not sessions:
+        return {"error": f"No session matching: {session}"}
+
+    scope_val = ScopeType(scope)
+
+    # --scope tools/all implies searching all entry types
+    if scope_val in (ScopeType.tools, ScopeType.all):
+        entry_types = ENTRY_TYPE_MAP["all"]
+    else:
+        entry_types = ENTRY_TYPE_MAP[role]
+
+    result = do_search(
+        sessions,
+        pattern,
+        entry_types,
+        context,
+        max_results=limit,
+        scope=scope_val,
+    )
+
+    if not result.matches:
+        return {"error": f"No matches for: {pattern}"}
+
+    return format_grep_results(
+        session_id=sessions[0].session_id,
+        matches=result.matches,
+        total=result.total_matches,
+        limit=limit,
+    )
+
+
+@mcp.tool(annotations=_TOOL_ANNOTATIONS)
+def read_turn(
+    turn: Annotated[
+        str,
+        Field(
+            description="Turn UUID or prefix to center on (from grep_session output)."
+        ),
+    ],
+    project: Annotated[
+        str | None,
+        Field(
+            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
+        ),
+    ] = None,
+    context: Annotated[
+        int,
+        Field(description="Number of turns before and after to include."),
+    ] = 3,
+    limit: Annotated[
+        int | None,
+        Field(
+            description="Max characters per entry in output. Entries exceeding this are truncated with '... [truncated, full_length chars total]'. Omit for full text."
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    """Read a specific moment in a conversation at full fidelity.
+
+    Like `sed -n '450,470p'` — reads a specific section of the conversation without pattern matching. Takes a turn UUID (from grep_session output) and returns the surrounding conversation with full untruncated entry text.
+
+    Use the full_length values from grep_session output to gauge how large entries are before reading. If an entry is very large, use the limit parameter to cap per-entry character output.
+
+    Entry format in chats array: timestamp|role|turn_id|full_length|display
+    (When limit is not set, display contains the full untruncated text — full_length == len(display).)
+    """
+    proj = resolve_project(project)
+    sessions = load_sessions(proj)
+    if not sessions:
+        return {"error": f"No conversations found for {proj}"}
+
+    session_info, entries = get_turn_context(sessions, turn, context)
+
+    if not entries:
+        return {"error": f"Turn {turn} not found"}
+
+    return format_read_turn(session_info, turn, context, entries, limit=limit)
+
+
+# =============================================================================
+# Agent inspection tools (unchanged)
+# =============================================================================
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)

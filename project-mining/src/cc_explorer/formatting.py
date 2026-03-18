@@ -1,15 +1,22 @@
 """Formatting helpers for cc-explorer MCP output.
 
 All format functions return dicts for structured JSON responses.
-Conversation text appears as compact string arrays using [U:id]/[A:id] entry line format.
+
+Conversation text in grep_session and read_turn output uses pipe-delimited entry line format:
+  timestamp|role|turn_id|full_length|display
+  - timestamp: unix epoch seconds
+  - role: U (user) or A (assistant)
+  - turn_id: first 8 chars of turn UUID
+  - full_length: character count of the full untruncated entry
+  - display: truncated entry text with smart tool call summaries (e.g. → Edit(/path/to/file))
 """
 
-from collections import OrderedDict
 from typing import Any, Optional
 
 from .models import (
     AssistantTranscriptEntry,
     BaseTranscriptEntry,
+    HumanEntry,
     TextContent,
     ToolUseContent,
     TranscriptEntry,
@@ -17,105 +24,134 @@ from .models import (
 )
 from .search import MatchHit, SearchResult, SessionInfo, TriageResult
 from .subagents import SubagentInfo
-from .utils import iso_timestamp
+from .utils import iso_timestamp, short_uuid
 
 
 # =============================================================================
-# Entry display helper
+# Entry display helpers
 # =============================================================================
 
 
 def _entry_display(entry: TranscriptEntry, truncate: int = 500) -> str:
-    """Call display() on entries that support it."""
+    """Call display() on entries that support it. Used by agent trace rendering."""
     if isinstance(entry, BaseTranscriptEntry):
         return entry.display(truncate=truncate)
     return ""
 
 
+def format_entry_line(entry: TranscriptEntry, truncate: int = 500) -> str:
+    """Format entry as pipe-delimited: timestamp|role|turn_id|full_length|display."""
+    if not isinstance(entry, BaseTranscriptEntry):
+        return f"0|?|{short_uuid(getattr(entry, 'uuid', ''))}|0|[?]"
+
+    # Get full display for length calculation
+    full = entry.display(truncate=0)
+    full_length = len(full)
+
+    # Get display (truncated or full based on param)
+    display = entry.display(truncate=truncate) if truncate else full
+
+    ts = int(entry.timestamp.timestamp()) if entry.timestamp else 0
+    role = "U" if isinstance(entry, HumanEntry) else "A"
+    turn_id = short_uuid(entry.uuid)
+    return f"{ts}|{role}|{turn_id}|{full_length}|{display}"
+
+
 # =============================================================================
-# Search result formatting
+# Conversation tool formatters
 # =============================================================================
 
 
-def format_triage_results(all_results: list[tuple[str, TriageResult]]) -> dict[str, Any]:
-    """Format triage/count results as structured dict, grouped by session."""
-    total = sum(r.count for _, r in all_results)
+def format_search_project(
+    all_results: list[tuple[str, list[TriageResult]]],
+    excerpt_width: int = 150,
+) -> dict[str, Any]:
+    """Format triage results as pattern-centric output for search_project.
 
-    # Group by session_id, preserving insertion order
-    grouped: OrderedDict[str, dict[str, Any]] = OrderedDict()
-    for pat, r in all_results:
-        sid = r.session.session_id
-        if sid not in grouped:
-            grouped[sid] = {
-                "session_id": sid,
-                "date": iso_timestamp(r.session.first_timestamp),
-                "patterns": [],
-            }
-        grouped[sid]["patterns"].append({
+    Input: list of (pattern, [TriageResult, ...]) tuples.
+    Output: matches grouped by pattern, sorted by hit count descending.
+    Patterns with zero hits are omitted.
+    """
+    matches: list[dict[str, Any]] = []
+
+    for pat, results in all_results:
+        total_hits = sum(r.count for r in results)
+        if total_hits == 0:
+            continue
+
+        sessions = [r.session.session_id[:8] for r in results]
+        examples = []
+        for r in results:
+            if r.first_match_example:
+                examples.append(f"{r.session.session_id[:8]}|{r.first_match_example}")
+
+        entry: dict[str, Any] = {
             "pattern": pat,
-            "hits": r.count,
-            "example": r.first_match_example or r.session.title,
-        })
-
-    # Sort sessions by total hits descending
-    sessions = sorted(
-        grouped.values(),
-        key=lambda s: sum(p["hits"] for p in s["patterns"]),
-        reverse=True,
-    )
-
-    return {
-        "total": total,
-        "sessions": sessions,
-    }
-
-
-def _format_match(match: MatchHit) -> dict[str, Any]:
-    """Format a single search match with context."""
-    return {
-        "session_id": match.session_id,
-        "turn_id": match.turn_uuid,
-        "context_before": [_entry_display(e) for e in match.context_before],
-        "match": _entry_display(match.entry, truncate=0),
-        "context_after": [_entry_display(e) for e in match.context_after],
-    }
-
-
-def format_search_results(result: SearchResult, pattern: str) -> dict[str, Any]:
-    """Format search results — content mode or overflow with samples."""
-    if result.overflow:
-        return {
-            "total": result.total_matches,
-            "overflow": True,
-            "sessions": [
-                {
-                    "session_id": r.session.session_id,
-                    "date": iso_timestamp(r.session.first_timestamp),
-                    "hits": r.count,
-                    "example": r.first_match_example or r.session.title,
-                }
-                for r in result.per_session
-            ],
-            "sample_matches": [_format_match(m) for m in result.matches],
+            "hits": total_hits,
+            "sessions": sessions,
         }
-    return {
-        "total": result.total_matches,
-        "matches": [_format_match(m) for m in result.matches],
+        if examples:
+            entry["examples"] = examples
+        matches.append(entry)
+
+    matches.sort(key=lambda m: m["hits"], reverse=True)
+    return {"matches": matches}
+
+
+def format_grep_results(
+    session_id: str,
+    matches: list[MatchHit],
+    total: int,
+    limit: int,
+) -> dict[str, Any]:
+    """Format search matches as flat chats arrays for grep_session.
+
+    Each match group = one context window (the match + surrounding turns).
+    Uses format_entry_line() for each entry.
+    """
+    result: dict[str, Any] = {
+        "session_id": session_id[:8],
+        "showing": len(matches),
+        "total_hits": total,
     }
 
+    if len(matches) < total:
+        result["overflow"] = "narrow your pattern or use read_turn for specific entries"
 
-def format_quote(
+    match_blocks: list[dict[str, Any]] = []
+    for match in matches:
+        chats: list[str] = []
+        for e in match.context_before:
+            chats.append(format_entry_line(e))
+        # The match entry itself — full display for the matched turn
+        chats.append(format_entry_line(match.entry))
+        for e in match.context_after:
+            chats.append(format_entry_line(e))
+        match_blocks.append({"chats": chats})
+
+    result["matches"] = match_blocks
+    return result
+
+
+def format_read_turn(
     session_info: Optional[SessionInfo],
     turn: str,
     context: int,
     entries: list[TranscriptEntry],
+    limit: int | None = None,
 ) -> dict[str, Any]:
-    """Format a quote view centered on a specific turn."""
+    """Format a turn read at full fidelity for read_turn.
+
+    When limit is None, truncate=0 gives full text.
+    When limit is set, entries exceeding it get truncated.
+    """
+    truncate = limit if limit else 0
+    chats = [format_entry_line(e, truncate=truncate) for e in entries]
+
     return {
-        "session_id": session_info.session_id if session_info else None,
-        "turn_id": turn,
-        "context_size": context,
-        "entries": [_entry_display(e, truncate=0) for e in entries],
+        "session_id": session_info.session_id[:8] if session_info else None,
+        "turn_id": turn[:8],
+        "chats": chats,
     }
 
 
