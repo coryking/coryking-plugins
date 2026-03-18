@@ -14,6 +14,7 @@ from typing import Any, Sequence, Union, cast
 
 from pydantic import BaseModel
 
+from .utils import PrefixId
 from .models import (
     AssistantTranscriptEntry,
     ContentItem,
@@ -233,9 +234,9 @@ def load_conversations(project_path: str) -> dict[str, Path]:
     if claude_dir is None or not claude_dir.exists():
         return {}
 
-    result: dict[str, Path] = {}
+    result: dict[PrefixId, Path] = {}
     for jsonl_path in claude_dir.glob("*.jsonl"):
-        session_id = jsonl_path.stem  # UUID without .jsonl
+        session_id = PrefixId(jsonl_path.stem)
         result[session_id] = jsonl_path
     return result
 

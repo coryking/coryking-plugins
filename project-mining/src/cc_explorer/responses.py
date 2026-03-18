@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .utils import PrefixId
+
 if TYPE_CHECKING:
     from .search import MatchHit, PatternTriageResults, SessionInfo
     from .subagents import SubagentInfo
@@ -42,7 +44,7 @@ class SparseModel(BaseModel):
 class SessionSummary(SparseModel):
     """Summary of a single conversation session."""
 
-    session_id: str = Field(description="Full session UUID.")
+    session_id: PrefixId = Field(description="Session identifier.")
     date: datetime | None = Field(default=None, description="Timestamp of first message.")
     title: str | None = Field(default=None, description="Auto-generated title from first human message.")
     messages: int = Field(description="Total message count.")
@@ -94,7 +96,7 @@ class PatternMatch(SparseModel):
 
     pattern: str = Field(description="The regex pattern that was searched.")
     hits: int = Field(description="Total match count across all sessions.")
-    sessions: list[str] = Field(description="Session ID prefixes (8 chars) containing matches.")
+    sessions: list[PrefixId] = Field(description="Sessions containing matches.")
     examples: list[str] | None = Field(
         default=None,
         description="Centered excerpts as 'session_id|...text around match...'. One per session, up to excerpt_width chars.",
@@ -121,9 +123,9 @@ class SearchProjectResponse(SparseModel):
             if total_hits == 0:
                 continue
 
-            sessions = [r.session.session_id[:8] for r in results]
+            sessions = [r.session.session_id for r in results]
             examples = [
-                f"{r.session.session_id[:8]}|{r.first_match_example}"
+                f"{r.session.session_id}|{r.first_match_example}"
                 for r in results
                 if r.first_match_example
             ]
@@ -157,7 +159,7 @@ class MatchBlock(SparseModel):
 class GrepSessionResponse(SparseModel):
     """Matches for a pattern within a single session."""
 
-    session_id: str = Field(description="Session ID prefix (8 chars).")
+    session_id: PrefixId = Field(description="Session identifier.")
     showing: int = Field(description="Number of matches returned.")
     total_hits: int = Field(description="Total matches found (may exceed showing if overflow).")
     overflow: str | None = Field(
@@ -190,7 +192,7 @@ class GrepSessionResponse(SparseModel):
             match_blocks.append(MatchBlock(chats=chats))
 
         return cls(
-            session_id=session_id[:8],
+            session_id=PrefixId(session_id),
             showing=len(matches),
             total_hits=total,
             overflow=overflow,
@@ -206,8 +208,8 @@ class GrepSessionResponse(SparseModel):
 class ReadTurnResponse(SparseModel):
     """A specific moment in a conversation at full fidelity."""
 
-    session_id: str | None = Field(default=None, description="Session ID prefix (8 chars).")
-    turn_id: str = Field(description="Turn UUID prefix (8 chars) that was requested.")
+    session_id: PrefixId | None = Field(default=None, description="Session identifier.")
+    turn_id: PrefixId = Field(description="Turn identifier.")
     chats: list[str] = Field(
         description="Pipe-delimited entry lines: timestamp|role|turn_id|full_length|display. Full untruncated text unless limit was set.",
     )
@@ -226,8 +228,8 @@ class ReadTurnResponse(SparseModel):
         chats = [format_entry_line(e, truncate=truncate) for e in entries]
 
         return cls(
-            session_id=session_info.session_id[:8] if session_info else None,
-            turn_id=turn[:8],
+            session_id=PrefixId(session_info.session_id) if session_info else None,
+            turn_id=PrefixId(turn),
             chats=chats,
         )
 
@@ -240,8 +242,8 @@ class ReadTurnResponse(SparseModel):
 class AgentSummary(SparseModel):
     """Summary of a single subagent spawned during a session."""
 
-    agent_id: str = Field(description="Agent UUID.")
-    tool_use_id: str = Field(description="Tool use ID that spawned this agent.")
+    agent_id: PrefixId = Field(description="Agent identifier.")
+    tool_use_id: PrefixId = Field(description="Tool use ID that spawned this agent.")
     date: datetime | None = Field(default=None, description="Timestamp when agent was spawned.")
     type: str = Field(description="Subagent type (e.g. 'general-purpose', 'Explore').")
     status: str = Field(description="Agent status: completed, error, async_launched, unknown.")
@@ -270,7 +272,7 @@ class AgentSummary(SparseModel):
 class SessionAgentsResponse(SparseModel):
     """All agents spawned by a specific session."""
 
-    session_id: str = Field(description="Full session UUID.")
+    session_id: PrefixId = Field(description="Session identifier.")
     date: datetime | None = Field(default=None, description="Timestamp of session start.")
     title: str | None = Field(default=None, description="Session title.")
     total_agents: int = Field(description="Number of agents in this session.")
@@ -308,11 +310,11 @@ class OutputFileInfo(SparseModel):
 class AgentDetailResponse(SparseModel):
     """Full detail for a single agent: prompt, result, stats, optional trace."""
 
-    session_id: str = Field(description="Parent session UUID.")
+    session_id: PrefixId = Field(description="Parent session identifier.")
     date: datetime | None = Field(default=None, description="Timestamp of session start.")
     title: str | None = Field(default=None, description="Session title.")
-    agent_id: str = Field(description="Agent UUID.")
-    tool_use_id: str = Field(description="Tool use ID that spawned this agent.")
+    agent_id: PrefixId = Field(description="Agent identifier.")
+    tool_use_id: PrefixId = Field(description="Tool use ID that spawned this agent.")
     type: str = Field(description="Subagent type.")
     status: str = Field(description="Agent status.")
     date_started: datetime | None = Field(default=None, description="Timestamp when agent was spawned.")

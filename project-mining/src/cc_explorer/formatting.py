@@ -7,7 +7,7 @@ Pipe-delimited entry line format:
   timestamp|role|turn_id|full_length|display
   - timestamp: unix epoch seconds
   - role: U (user) or A (assistant)
-  - turn_id: first 8 chars of turn UUID
+  - turn_id: first 8 chars of turn UUID (via PrefixId.__str__)
   - full_length: character count of the full untruncated entry
   - display: truncated entry text with smart tool call summaries (e.g. → Edit(/path/to/file))
 """
@@ -22,7 +22,7 @@ from .models import (
     summarize_tool_input,
 )
 from .subagents import SubagentInfo
-from .utils import short_uuid
+from .utils import PrefixId
 
 
 # =============================================================================
@@ -33,7 +33,9 @@ from .utils import short_uuid
 def format_entry_line(entry: TranscriptEntry, truncate: int = 500) -> str:
     """Format entry as pipe-delimited: timestamp|role|turn_id|full_length|display."""
     if not isinstance(entry, BaseTranscriptEntry):
-        return f"0|?|{short_uuid(getattr(entry, 'uuid', ''))}|0|[?]"
+        uuid = getattr(entry, 'uuid', None)
+        turn_id = uuid if isinstance(uuid, PrefixId) else PrefixId(uuid or '')
+        return f"0|?|{turn_id}|0|[?]"
 
     # Get full display for length calculation
     full = entry.display(truncate=0)
@@ -44,8 +46,7 @@ def format_entry_line(entry: TranscriptEntry, truncate: int = 500) -> str:
 
     ts = int(entry.timestamp.timestamp()) if entry.timestamp else 0
     role = "U" if isinstance(entry, HumanEntry) else "A"
-    turn_id = short_uuid(entry.uuid)
-    return f"{ts}|{role}|{turn_id}|{full_length}|{display}"
+    return f"{ts}|{role}|{entry.uuid}|{full_length}|{display}"
 
 
 # =============================================================================
@@ -94,8 +95,4 @@ def render_trace(
 
 def matches_id(sa: SubagentInfo, prefix: str) -> bool:
     """Check if a subagent matches an agent_id or tool_use_id prefix."""
-    if sa.agent_id and sa.agent_id.startswith(prefix):
-        return True
-    if sa.tool_use_id.startswith(prefix):
-        return True
-    return False
+    return sa.agent_id == prefix or sa.tool_use_id == prefix

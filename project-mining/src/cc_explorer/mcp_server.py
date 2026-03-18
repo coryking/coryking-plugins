@@ -213,7 +213,7 @@ def grep_session(
         raise ToolError(f"No conversations found for {proj}")
 
     # Filter to the target session
-    sessions = [s for s in sessions if s.session_id.startswith(session)]
+    sessions = [s for s in sessions if s.session_id == session]
     if not sessions:
         raise ToolError(f"No session matching: {session}")
 
@@ -344,7 +344,7 @@ def list_session_agents(
 
     target = None
     for s in sessions:
-        if s.session_id.startswith(session):
+        if s.session_id == session:
             target = s
             break
 
@@ -401,7 +401,7 @@ def get_agent_detail(
         raise ToolError(f"No conversations found for {proj}")
 
     if session:
-        sessions = [s for s in sessions if s.session_id.startswith(session)]
+        sessions = [s for s in sessions if s.session_id == session]
         if not sessions:
             raise ToolError(f"Session {session} not found")
 

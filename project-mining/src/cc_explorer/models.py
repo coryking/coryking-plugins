@@ -22,7 +22,7 @@ from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, BeforeValidator
 
-from .utils import short_uuid
+from .utils import PrefixId
 
 
 # Coerce None → 0 for token fields that the API may return as null
@@ -58,7 +58,7 @@ class ThinkingContent(BaseModel):
 
 class ToolUseContent(BaseModel):
     type: Literal["tool_use"]
-    id: str
+    id: PrefixId
     name: str
     input: dict[str, Any]
     caller: Optional[dict] = None
@@ -66,10 +66,10 @@ class ToolUseContent(BaseModel):
 
 class ToolResultContent(BaseModel):
     type: Literal["tool_result"]
-    tool_use_id: str
+    tool_use_id: PrefixId
     content: Union[str, list[dict[str, Any]]]
     is_error: Optional[bool] = None
-    agentId: Optional[str] = None
+    agentId: Optional[PrefixId] = None
 
 
 ContentItem = Union[
@@ -126,20 +126,20 @@ ToolUseResult = Union[
 
 class BaseTranscriptEntry(BaseModel):
     """Common fields across all transcript entries."""
-    uuid: str
-    parentUuid: Optional[str] = None
+    uuid: PrefixId
+    parentUuid: Optional[PrefixId] = None
     timestamp: datetime
-    sessionId: str
+    sessionId: PrefixId
     isSidechain: bool = False
     userType: str = ""
     cwd: str = ""
     version: str = ""
-    agentId: Optional[str] = None
+    agentId: Optional[PrefixId] = None
     gitBranch: Optional[str] = None
 
     def display(self, truncate: int = 500) -> str:
         """Format entry as a display line with [role:id] prefix."""
-        return f"[?:{short_uuid(self.uuid)}]"
+        return f"[?:{self.uuid}]"
 
 
 class HumanEntry(BaseTranscriptEntry):
@@ -150,7 +150,7 @@ class HumanEntry(BaseTranscriptEntry):
 
     def display(self, truncate: int = 500) -> str:
         text = extract_text(self)
-        prefix = f"[U:{short_uuid(self.uuid)}]"
+        prefix = f"[U:{self.uuid}]"
         line = f"{prefix} {text}"
         if truncate and len(line) > truncate:
             line = line[: truncate - 3] + "..."
@@ -193,7 +193,7 @@ class AssistantTranscriptEntry(BaseTranscriptEntry):
         if tool_summaries:
             parts.append("  ".join(tool_summaries))
         combined = "  ".join(parts) if parts else ""
-        prefix = f"[A:{short_uuid(self.uuid)}]"
+        prefix = f"[A:{self.uuid}]"
         line = f"{prefix} {combined}"
         if truncate and len(line) > truncate:
             line = line[: truncate - 3] + "..."
@@ -204,9 +204,9 @@ class SummaryTranscriptEntry(BaseModel):
     """Context compaction summary."""
     type: Literal["summary"]
     summary: str
-    leafUuid: str
+    leafUuid: PrefixId
     cwd: Optional[str] = None
-    sessionId: Optional[str] = None
+    sessionId: Optional[PrefixId] = None
 
 
 class SystemTranscriptEntry(BaseTranscriptEntry):
@@ -226,7 +226,7 @@ class QueueOperationTranscriptEntry(BaseModel):
     type: Literal["queue-operation"]
     operation: Literal["enqueue", "dequeue", "remove", "popAll"]
     timestamp: datetime
-    sessionId: str
+    sessionId: PrefixId
     content: Optional[Union[list[ContentItem], str]] = None
 
 

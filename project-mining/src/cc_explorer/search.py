@@ -382,7 +382,7 @@ def search(
 
     target_sessions = sessions
     if session_id:
-        target_sessions = [s for s in sessions if s.session_id.startswith(session_id)]
+        target_sessions = [s for s in sessions if s.session_id == session_id]
 
     for session in target_sessions:
         entries = load_transcript(session.path)
@@ -462,8 +462,7 @@ def get_turn_context(
         for idx, entry in enumerate(entries):
             if not isinstance(entry, BaseTranscriptEntry):
                 continue
-            # Support prefix matching (expand output shows truncated UUIDs)
-            if not (entry.uuid == turn_uuid or entry.uuid.startswith(turn_uuid)):
+            if entry.uuid != turn_uuid:
                 continue
 
             # Found it — gather context

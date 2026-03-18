@@ -39,14 +39,15 @@ from .models import (
     TranscriptStats,
 )
 from .parser import load_transcript
+from .utils import PrefixId
 
 
 @dataclass
 class SubagentInfo:
     """Metadata about a single subagent spawned during a session."""
 
-    tool_use_id: str
-    agent_id: str = ""
+    tool_use_id: PrefixId
+    agent_id: PrefixId = PrefixId("")
     subagent_type: str = ""
     description: str = ""
     prompt: str = ""
