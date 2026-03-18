@@ -1,38 +1,32 @@
 """MCP server wrapping the cc_explorer library.
 
 Exposes Claude Code chat log exploration as MCP tools via FastMCP.
-All tools are read-only and return structured dicts.
-
-Conversation text in results uses pipe-delimited entry line format:
-  timestamp|role|turn_id|full_length|display
-  - timestamp: unix epoch seconds
-  - role: U (user) or A (assistant)
-  - turn_id: first 8 chars of turn UUID
-  - full_length: character count of the full untruncated entry
-  - display: truncated entry text with smart tool call summaries (e.g. → Edit(/path/to/file))
+All tools are read-only and return typed Pydantic response models.
+FastMCP auto-generates output schemas from return type annotations.
 """
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-from .formatting import (
-    format_agent_detail,
-    format_conversation_list,
-    format_grep_results,
-    format_manifest_view,
-    format_read_turn,
-    format_search_project,
-    format_session_view,
-    matches_id,
+from .formatting import matches_id
+from .responses import (
+    AgentDetailResponse,
+    AgentListResponse,
+    GrepSessionResponse,
+    ReadTurnResponse,
+    SearchProjectResponse,
+    SessionAgentsResponse,
+    SessionListResponse,
 )
 from .search import (
     ENTRY_TYPE_MAP,
+    PatternTriageResults,
     ScopeType,
-    TriageResult,
     get_turn_context,
     load_sessions,
     resolve_project,
@@ -71,7 +65,7 @@ def list_project_sessions(
         str | None,
         Field(description="Only sessions before this date (YYYY-MM-DD)."),
     ] = None,
-) -> dict[str, Any]:
+) -> SessionListResponse:
     """List conversations in a project with stats: dates, message counts, token usage, tool calls, agent dispatches.
 
     This is the orientation step — like `ls -la` on the project's chat history. Use it to see what exists before searching.
@@ -79,7 +73,7 @@ def list_project_sessions(
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
-        return {"error": f"No conversations found for {proj}"}
+        raise ToolError(f"No conversations found for {proj}")
 
     if min_agents is not None:
         sessions = [s for s in sessions if s.stats.agent_count >= min_agents]
@@ -101,9 +95,9 @@ def list_project_sessions(
         ]
 
     if not sessions:
-        return {"error": "No conversations match filters"}
+        raise ToolError("No conversations match filters")
 
-    return format_conversation_list(sessions)
+    return SessionListResponse.from_sessions(sessions)
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -136,20 +130,15 @@ def search_project(
         int,
         Field(description="Character width of centered excerpt examples."),
     ] = 150,
-) -> dict[str, Any]:
+) -> SearchProjectResponse:
     """Scan a project's chat history for patterns and report where they appear.
 
     Like `rg -c` across all sessions — tells you which patterns are productive and which sessions are hot. Use this to orient before drilling into a specific session with grep_session.
-
-    Returns pattern-centric results: each pattern shows its hit count, which sessions contain it, and a few centered excerpts. Patterns with zero hits are omitted.
-
-    Excerpts embed the session ID: "session_id|...centered text around match..."
-    Use the session IDs to decide where to grep next.
     """
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
-        return {"error": f"No conversations found for {proj}"}
+        raise ToolError(f"No conversations found for {proj}")
 
     scope_val = ScopeType(scope)
 
@@ -159,16 +148,16 @@ def search_project(
     else:
         entry_types = ENTRY_TYPE_MAP[role]
 
-    all_results: list[tuple[str, list[TriageResult]]] = []
+    all_results: PatternTriageResults = []
     for pat in patterns:
         results = triage(sessions, pat, entry_types, example_width=excerpt_width, scope=scope_val)
         all_results.append((pat, results))
 
     # Check if anything matched
     if not any(r for _, results in all_results for r in results):
-        return {"error": f"No matches for: {', '.join(patterns)}"}
+        raise ToolError(f"No matches for: {', '.join(patterns)}")
 
-    return format_search_project(all_results, excerpt_width=excerpt_width)
+    return SearchProjectResponse.from_triage(all_results, excerpt_width=excerpt_width)
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -213,24 +202,20 @@ def grep_session(
             description="Max matches to return (like head -N). Overflow is truncated, not mode-switched."
         ),
     ] = 30,
-) -> dict[str, Any]:
+) -> GrepSessionResponse:
     """Show matches for a pattern within a single conversation, with surrounding context.
 
-    Like `rg -C3` on a single file — returns matching entries centered and truncated, with surrounding turns for context. Each entry includes its full character length so you can gauge size before calling read_turn.
-
-    Results are grouped into match blocks (like grep's `--` separator between context groups). Each block is a window of turns around a match, returned in chronological order.
-
-    Entry format in chats arrays: timestamp|role|turn_id|full_length|display
+    Like `rg -C3` on a single file — returns matching entries with surrounding turns for context. Each entry includes its full character length so you can gauge size before calling read_turn.
     """
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
-        return {"error": f"No conversations found for {proj}"}
+        raise ToolError(f"No conversations found for {proj}")
 
     # Filter to the target session
     sessions = [s for s in sessions if s.session_id.startswith(session)]
     if not sessions:
-        return {"error": f"No session matching: {session}"}
+        raise ToolError(f"No session matching: {session}")
 
     scope_val = ScopeType(scope)
 
@@ -250,9 +235,9 @@ def grep_session(
     )
 
     if not result.matches:
-        return {"error": f"No matches for: {pattern}"}
+        raise ToolError(f"No matches for: {pattern}")
 
-    return format_grep_results(
+    return GrepSessionResponse.from_matches(
         session_id=sessions[0].session_id,
         matches=result.matches,
         total=result.total_matches,
@@ -281,34 +266,31 @@ def read_turn(
     limit: Annotated[
         int | None,
         Field(
-            description="Max characters per entry in output. Entries exceeding this are truncated with '... [truncated, full_length chars total]'. Omit for full text."
+            description="Max characters per entry in output. Entries exceeding this are truncated. Omit for full text."
         ),
     ] = None,
-) -> dict[str, Any]:
+) -> ReadTurnResponse:
     """Read a specific moment in a conversation at full fidelity.
 
-    Like `sed -n '450,470p'` — reads a specific section of the conversation without pattern matching. Takes a turn UUID (from grep_session output) and returns the surrounding conversation with full untruncated entry text.
+    Like `sed -n '450,470p'` — reads a specific section without pattern matching. Takes a turn UUID (from grep_session output) and returns the surrounding conversation.
 
-    Use the full_length values from grep_session output to gauge how large entries are before reading. If an entry is very large, use the limit parameter to cap per-entry character output.
-
-    Entry format in chats array: timestamp|role|turn_id|full_length|display
-    (When limit is not set, display contains the full untruncated text — full_length == len(display).)
+    Use the full_length values from grep_session to gauge entry sizes before reading.
     """
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
-        return {"error": f"No conversations found for {proj}"}
+        raise ToolError(f"No conversations found for {proj}")
 
     session_info, entries = get_turn_context(sessions, turn, context)
 
     if not entries:
-        return {"error": f"Turn {turn} not found"}
+        raise ToolError(f"Turn {turn} not found")
 
-    return format_read_turn(session_info, turn, context, entries, limit=limit)
+    return ReadTurnResponse.from_entries(session_info, turn, entries, limit=limit)
 
 
 # =============================================================================
-# Agent inspection tools (unchanged)
+# Agent inspection tools
 # =============================================================================
 
 
@@ -320,19 +302,19 @@ def list_agent_sessions(
             description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
         ),
     ] = None,
-) -> dict[str, Any]:
+) -> SessionListResponse:
     """List all sessions that spawned subagents, with agent counts and tool usage."""
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
-        return {"error": f"No conversations found for {proj}"}
+        raise ToolError(f"No conversations found for {proj}")
 
     agent_sessions = [s for s in sessions if s.stats.agent_count > 0]
 
     if not agent_sessions:
-        return {"error": "No sessions with subagents found."}
+        raise ToolError("No sessions with subagents found.")
 
-    return format_manifest_view(agent_sessions)
+    return SessionListResponse.from_sessions(agent_sessions)
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -353,12 +335,12 @@ def list_session_agents(
     compaction: Annotated[
         bool, Field(description="Show compaction details.")
     ] = False,
-) -> dict[str, Any]:
+) -> SessionAgentsResponse:
     """List all agents spawned by a specific session, with stats and output file info."""
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
-        return {"error": f"No conversations found for {proj}"}
+        raise ToolError(f"No conversations found for {proj}")
 
     target = None
     for s in sessions:
@@ -367,7 +349,7 @@ def list_session_agents(
             break
 
     if not target:
-        return {"error": f"Session {session} not found"}
+        raise ToolError(f"Session {session} not found")
 
     agents = extract_subagents(target.path)
 
@@ -375,7 +357,7 @@ def list_session_agents(
     resolve_output_files(agents, output_dir)
     scan_output_file_stats(agents)
 
-    return format_session_view(target, agents, compaction=compaction)
+    return SessionAgentsResponse.from_session(target, agents)
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -411,44 +393,47 @@ def get_agent_detail(
     compaction: Annotated[
         bool, Field(description="Show compaction details.")
     ] = False,
-) -> dict[str, Any]:
+) -> AgentDetailResponse | AgentListResponse:
     """Get full prompt, result, stats, and optional tool trace for specific agent(s)."""
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
-        return {"error": f"No conversations found for {proj}"}
+        raise ToolError(f"No conversations found for {proj}")
 
     if session:
         sessions = [s for s in sessions if s.session_id.startswith(session)]
         if not sessions:
-            return {"error": f"Session {session} not found"}
+            raise ToolError(f"Session {session} not found")
 
     output_dir = Path(task_output_dir).expanduser() if task_output_dir else None
 
-    details: list[dict[str, Any]] = []
+    details: list[AgentDetailResponse] = []
+    not_found: list[str] = []
     for aid in agent_ids:
         found, found_session = _find_agent(sessions, aid)
         if not found or not found_session:
-            details.append({"error": f"Agent {aid} not found"})
+            not_found.append(aid)
             continue
 
         resolve_output_files([found], output_dir)
         entries_map = scan_output_file_stats([found], keep_entries=trace)
 
         details.append(
-            format_agent_detail(
+            AgentDetailResponse.from_subagent(
                 found,
                 found_session,
                 trace=trace,
                 no_reasoning=no_reasoning,
                 entries_map=entries_map,
-                compaction=compaction,
             )
         )
 
+    if not details:
+        raise ToolError(f"Agent(s) not found: {', '.join(not_found)}")
+
     if len(details) == 1:
         return details[0]
-    return {"agents": details}
+    return AgentListResponse(agents=details)
 
 
 def _find_agent(sessions, agent_id: str):

@@ -148,6 +148,10 @@ class SearchResult:
     per_session: list[TriageResult] = field(default_factory=list)
 
 
+# Pattern string paired with per-session triage results
+PatternTriageResults = list[tuple[str, list[TriageResult]]]
+
+
 # =============================================================================
 # Entry type mapping
 # =============================================================================
