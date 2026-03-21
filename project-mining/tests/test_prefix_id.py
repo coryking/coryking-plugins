@@ -4,7 +4,9 @@ Defines the behavioral contract:
 - str subclass (drop-in compatible)
 - Exact equality for full UUIDs (36 chars)
 - Prefix matching when either side is short
+- != is the inverse of == (not inherited from str's C-level __ne__)
 - Hash on first 8 chars (so dicts work with prefix lookups)
+- 'in' searches the full UUID (the identity), not the short display form
 - .short property for display (first 8 chars)
 - str() / f-string returns short form (MCP-boundary friendly)
 - .full property for the complete value
@@ -107,30 +109,33 @@ class TestShort:
 
 
 # =============================================================================
-# Equality — the core behavior
+# Equality and inequality — the core behavior
+#
+# PrefixId inherits from str (a C builtin). str's __ne__ is its own C-level
+# method that does exact byte comparison — it does NOT delegate to __eq__.
+# So overriding __eq__ without __ne__ silently breaks != for prefix matches.
+# Both operators must be tested independently.
 # =============================================================================
 
 
 class TestEquality:
+    # --- __eq__ (==) ---
+
     def test_full_vs_full_same(self):
         a = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
         b = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
         assert a == b
 
     def test_full_vs_full_different(self):
-        assert FULL_A != FULL_B
+        assert not (FULL_A == FULL_B)
 
     def test_short_matches_full(self):
         """A prefix matches a full UUID that starts with it."""
-        full = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
-        short = PrefixId("a9529cc1")
-        assert short == full
+        assert SHORT_A == FULL_A
 
     def test_full_matches_short(self):
         """Symmetric — order shouldn't matter."""
-        full = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
-        short = PrefixId("a9529cc1")
-        assert full == short
+        assert FULL_A == SHORT_A
 
     def test_short_vs_short_same(self):
         a = PrefixId("a9529cc1")
@@ -138,36 +143,74 @@ class TestEquality:
         assert a == b
 
     def test_short_vs_short_different(self):
-        assert SHORT_A != SHORT_B
-
-    def test_short_no_match(self):
-        full = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
-        short = PrefixId("b1234567")
-        assert full != short
+        assert not (SHORT_A == SHORT_B)
 
     def test_vs_plain_str_prefix(self):
         """PrefixId should work with plain str on the other side."""
-        pid = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
-        assert pid == "a9529cc1"
+        assert FULL_A == "a9529cc1"
 
     def test_vs_plain_str_full(self):
-        pid = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
-        assert pid == "a9529cc1-b576-5fd3-9f1a-1234567890ab"
-
-    def test_vs_plain_str_no_match(self):
-        pid = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
-        assert pid != "xxxxxxxx"
+        assert FULL_A == "a9529cc1-b576-5fd3-9f1a-1234567890ab"
 
     def test_vs_non_string(self):
-        pid = PrefixId("a9529cc1")
-        assert pid != 42
-        assert pid != None  # noqa: E711
+        assert not (SHORT_A == 42)
+        assert not (SHORT_A == None)  # noqa: E711
 
     def test_very_short_prefix(self):
         """Even a 1-char prefix should match."""
-        full = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
-        assert full == PrefixId("a")
-        assert full != PrefixId("b")
+        assert FULL_A == PrefixId("a")
+        assert not (FULL_A == PrefixId("b"))
+
+    # --- __ne__ (!=) — must be the inverse of __eq__ ---
+
+    def test_ne_prefix_match_is_false(self):
+        """!= must return False when __eq__ returns True (prefix match)."""
+        assert not (FULL_A != SHORT_A)
+
+    def test_ne_plain_str_prefix_is_false(self):
+        assert not (FULL_A != "a9529cc1")
+
+    def test_ne_same_full_is_false(self):
+        a = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
+        b = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
+        assert not (a != b)
+
+    def test_ne_different_is_true(self):
+        assert FULL_A != FULL_B
+
+    def test_ne_no_match_plain_str(self):
+        assert FULL_A != "xxxxxxxx"
+
+    def test_ne_non_string(self):
+        assert SHORT_A != 42
+
+
+# =============================================================================
+# Containment — 'in' searches the full UUID (the identity)
+#
+# str.__contains__ already operates on the raw internal value, which is the
+# full UUID. This is the behavior we want: the full UUID is the identity,
+# the short form is just display. These tests pin that behavior.
+# =============================================================================
+
+
+class TestContains:
+    def test_prefix_in_full(self):
+        assert "a9529cc1" in FULL_A
+
+    def test_middle_fragment_in_full(self):
+        assert "b576" in FULL_A
+
+    def test_end_fragment_in_full(self):
+        assert "890ab" in FULL_A
+
+    def test_nonexistent_fragment(self):
+        assert "zzzzz" not in FULL_A
+
+    def test_contains_on_short_prefix_id(self):
+        """A PrefixId created from a short value only has that much to search."""
+        assert "a952" in SHORT_A
+        assert "b576" not in SHORT_A
 
 
 # =============================================================================
@@ -178,9 +221,7 @@ class TestEquality:
 class TestHashing:
     def test_full_and_prefix_hash_equal(self):
         """If a == b, then hash(a) == hash(b). Required by Python data model."""
-        full = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
-        short = PrefixId("a9529cc1")
-        assert hash(full) == hash(short)
+        assert hash(FULL_A) == hash(SHORT_A)
 
     def test_same_full_uuids_hash_equal(self):
         a = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
@@ -192,13 +233,13 @@ class TestHashing:
         assert hash(SHORT_A) != hash(SHORT_B)
 
     def test_usable_in_set(self):
-        s = {PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")}
-        assert PrefixId("a9529cc1") in s
+        s = {FULL_A}
+        assert SHORT_A in s
 
     def test_prefix_in_set_finds_full(self):
         """A set containing a full UUID should match a prefix lookup."""
-        s = {PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")}
-        assert PrefixId("a9529cc1") in s
+        s = {FULL_A}
+        assert SHORT_A in s
 
 
 # =============================================================================
@@ -209,16 +250,16 @@ class TestHashing:
 class TestDictKeys:
     def test_store_full_lookup_by_prefix(self):
         """Store with full UUID key, retrieve with prefix."""
-        d = {PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab"): "found it"}
-        assert d[PrefixId("a9529cc1")] == "found it"
+        d = {FULL_A: "found it"}
+        assert d[SHORT_A] == "found it"
 
     def test_store_full_lookup_by_full(self):
-        d = {PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab"): "found it"}
-        assert d[PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")] == "found it"
+        d = {FULL_A: "found it"}
+        assert d[FULL_A] == "found it"
 
     def test_prefix_in_dict(self):
-        d = {PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab"): "val"}
-        assert PrefixId("a9529cc1") in d
+        d = {FULL_A: "val"}
+        assert SHORT_A in d
 
     def test_plain_str_prefix_in_dict(self):
         """Plain str DOES match — PrefixId.__eq__ handles the comparison
@@ -226,16 +267,13 @@ class TestDictKeys:
 
         This means you can do d["a9529cc1"] on a PrefixId-keyed dict.
         """
-        d = {PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab"): "val"}
+        d = {FULL_A: "val"}
         assert "a9529cc1" in d
 
     def test_multiple_keys_distinct(self):
-        d = {
-            PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab"): "A",
-            PrefixId("b1234567-aaaa-bbbb-cccc-dddddddddddd"): "B",
-        }
-        assert d[PrefixId("a9529cc1")] == "A"
-        assert d[PrefixId("b1234567")] == "B"
+        d = {FULL_A: "A", FULL_B: "B"}
+        assert d[SHORT_A] == "A"
+        assert d[SHORT_B] == "B"
 
 
 # =============================================================================
@@ -245,13 +283,11 @@ class TestDictKeys:
 
 class TestRepr:
     def test_repr_full(self):
-        pid = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
-        r = repr(pid)
+        r = repr(FULL_A)
         assert "PrefixId" in r
         assert "a9529cc1" in r
 
     def test_repr_short(self):
-        pid = PrefixId("a9529cc1")
-        r = repr(pid)
+        r = repr(SHORT_A)
         assert "PrefixId" in r
         assert "a9529cc1" in r

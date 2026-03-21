@@ -54,6 +54,12 @@ class PrefixId(str):
             return long.startswith(short)
         return a == b
 
+    def __ne__(self, other) -> bool:
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
     def __hash__(self) -> int:
         return hash(self.full[:8])
 
