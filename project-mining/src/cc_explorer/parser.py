@@ -9,6 +9,7 @@ Core functions:
 """
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence, Union, cast
 
@@ -195,13 +196,34 @@ def create_transcript_entry(data: dict[str, Any]) -> TranscriptEntry:
 # =============================================================================
 
 
+@dataclass
+class CachedTranscript:
+    """Parsed transcript entries with the file mtime at parse time."""
+
+    mtime: float
+    entries: list[TranscriptEntry]
+
+
+_cache: dict[Path, CachedTranscript] = {}
+
+
 def load_transcript(path: Path) -> list[TranscriptEntry]:
     """Load a JSONL file into typed transcript entries.
 
+    Caches results by (path, mtime) — the MCP server is a persistent process,
+    so the cache lives across tool calls. Re-parses only when the file changes.
+
     Skips malformed lines and unknown entry types. Returns all entry types.
     """
+    resolved = path.resolve()
+    mtime = resolved.stat().st_mtime
+
+    cached = _cache.get(resolved)
+    if cached is not None and cached.mtime == mtime:
+        return cached.entries
+
     entries: list[TranscriptEntry] = []
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
+    with open(resolved, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -212,6 +234,8 @@ def load_transcript(path: Path) -> list[TranscriptEntry]:
                 entries.append(entry)
             except (json.JSONDecodeError, ValueError, Exception):
                 continue
+
+    _cache[resolved] = CachedTranscript(mtime=mtime, entries=entries)
     return entries
 
 

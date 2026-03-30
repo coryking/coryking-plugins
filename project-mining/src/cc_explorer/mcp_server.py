@@ -25,13 +25,12 @@ from .responses import (
 )
 from .search import (
     ENTRY_TYPE_MAP,
-    PatternTriageResults,
     ScopeType,
     get_turn_context,
     load_sessions,
     resolve_project,
     search as do_search,
-    triage,
+    triage_multi,
 )
 from .subagents import extract_subagents, resolve_output_files, scan_output_file_stats
 
@@ -148,10 +147,7 @@ def search_project(
     else:
         entry_types = ENTRY_TYPE_MAP[role]
 
-    all_results: PatternTriageResults = []
-    for pat in patterns:
-        results = triage(sessions, pat, entry_types, example_width=excerpt_width, scope=scope_val)
-        all_results.append((pat, results))
+    all_results = triage_multi(sessions, patterns, entry_types, example_width=excerpt_width, scope=scope_val)
 
     # Check if anything matched
     if not any(r for _, results in all_results for r in results):

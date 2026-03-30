@@ -362,6 +362,48 @@ def triage(
     return results
 
 
+def triage_multi(
+    sessions: list[SessionInfo],
+    patterns: list[str],
+    entry_types: tuple[type, ...] = (HumanEntry,),
+    example_width: int = 150,
+    scope: ScopeType = ScopeType.messages,
+) -> PatternTriageResults:
+    """Count matches for multiple patterns in a single pass over each session.
+
+    Loads each session's transcript once and checks all patterns per entry.
+    Returns PatternTriageResults — same type consumed by SearchProjectResponse.from_triage.
+    """
+    compiled = [(pat, re.compile(pat, re.IGNORECASE)) for pat in patterns]
+
+    # Per-pattern accumulators: {pattern_index: {session_index: (count, first_example)}}
+    accum: dict[int, dict[int, tuple[int, str]]] = {i: {} for i in range(len(compiled))}
+
+    for si, session in enumerate(sessions):
+        entries = load_transcript(session.path)
+        for entry in entries:
+            if not isinstance(entry, entry_types):
+                continue
+            for pi, (_, regex) in enumerate(compiled):
+                if _entry_matches(entry, regex, scope):
+                    count, example = accum[pi].get(si, (0, ""))
+                    if not example and isinstance(entry, (HumanEntry, AssistantTranscriptEntry)):
+                        example = _match_example(extract_text(entry), regex, width=example_width)
+                    accum[pi][si] = (count + 1, example)
+
+    results: PatternTriageResults = []
+    for pi, (pat, _) in enumerate(compiled):
+        session_results: list[TriageResult] = []
+        for si, (count, example) in accum[pi].items():
+            session_results.append(
+                TriageResult(session=sessions[si], count=count, first_match_example=example)
+            )
+        session_results.sort(key=lambda r: r.count, reverse=True)
+        results.append((pat, session_results))
+
+    return results
+
+
 def search(
     sessions: list[SessionInfo],
     pattern: str,
