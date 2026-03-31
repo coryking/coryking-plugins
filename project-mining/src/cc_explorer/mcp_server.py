@@ -27,6 +27,7 @@ from .search import (
     ENTRY_TYPE_MAP,
     ConversationRole,
     ScopeType,
+    SessionInfo,
     get_turn_context,
     load_sessions,
     resolve_project,
