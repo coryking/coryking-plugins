@@ -39,6 +39,24 @@ mcp = FastMCP("cc-explorer")
 
 _TOOL_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": False}
 
+
+def _filter_by_date(
+    sessions: list[SessionInfo],
+    after: datetime | None,
+    before: datetime | None,
+) -> list[SessionInfo]:
+    """Filter sessions by date range. Naive datetimes treated as UTC."""
+    if after:
+        if after.tzinfo is None:
+            after = after.replace(tzinfo=timezone.utc)
+        sessions = [s for s in sessions if s.first_timestamp and s.first_timestamp >= after]
+    if before:
+        if before.tzinfo is None:
+            before = before.replace(tzinfo=timezone.utc)
+        sessions = [s for s in sessions if s.first_timestamp and s.first_timestamp <= before]
+    return sessions
+
+
 # =============================================================================
 # Conversation tools
 # =============================================================================
@@ -65,12 +83,12 @@ def list_project_sessions(
         Field(description="Only sessions with at least N agents."),
     ] = 0,
     after: Annotated[
-        str | None,
-        Field(description="Only sessions after this date (YYYY-MM-DD)."),
+        datetime | None,
+        Field(description="Only sessions after this datetime."),
     ] = None,
     before: Annotated[
-        str | None,
-        Field(description="Only sessions before this date (YYYY-MM-DD)."),
+        datetime | None,
+        Field(description="Only sessions before this datetime."),
     ] = None,
 ) -> SessionListResponse:
     """List conversations in a project with stats: dates, message counts, token usage, tool calls, agent dispatches.
@@ -85,18 +103,7 @@ def list_project_sessions(
     sessions = [s for s in sessions if s.message_count >= min_messages]
     sessions = [s for s in sessions if s.stats.tool_use_count >= min_tools]
     sessions = [s for s in sessions if s.stats.agent_count >= min_agents]
-
-    if after:
-        after_dt = datetime.strptime(after, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        sessions = [
-            s for s in sessions if s.first_timestamp and s.first_timestamp >= after_dt
-        ]
-
-    if before:
-        before_dt = datetime.strptime(before, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-        sessions = [
-            s for s in sessions if s.first_timestamp and s.first_timestamp <= before_dt
-        ]
+    sessions = _filter_by_date(sessions, after, before)
 
     if not sessions:
         raise ToolError("No conversations match filters")
@@ -130,6 +137,14 @@ def search_project(
             description="Content scope: 'messages' for conversation text, 'tools' for tool inputs (Bash commands, file paths, grep patterns), 'all' for both. Using 'tools' or 'all' searches both roles regardless of the role parameter."
         ),
     ] = ScopeType.messages,
+    after: Annotated[
+        datetime | None,
+        Field(description="Only search sessions after this datetime."),
+    ] = None,
+    before: Annotated[
+        datetime | None,
+        Field(description="Only search sessions before this datetime."),
+    ] = None,
     excerpt_width: Annotated[
         int,
         Field(description="Character width of centered excerpt examples."),
@@ -143,6 +158,8 @@ def search_project(
     sessions = load_sessions(proj)
     if not sessions:
         raise ToolError(f"No conversations found for {proj}")
+
+    sessions = _filter_by_date(sessions, after, before)
 
     # --scope tools/all implies searching all entry types
     if scope in (ScopeType.tools, ScopeType.all):
@@ -303,6 +320,14 @@ def list_agent_sessions(
             description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
         ),
     ] = None,
+    after: Annotated[
+        datetime | None,
+        Field(description="Only sessions after this datetime."),
+    ] = None,
+    before: Annotated[
+        datetime | None,
+        Field(description="Only sessions before this datetime."),
+    ] = None,
 ) -> SessionListResponse:
     """List all sessions that spawned subagents, with agent counts and tool usage."""
     proj = resolve_project(project)
@@ -311,6 +336,7 @@ def list_agent_sessions(
         raise ToolError(f"No conversations found for {proj}")
 
     agent_sessions = [s for s in sessions if s.stats.agent_count > 0]
+    agent_sessions = _filter_by_date(agent_sessions, after, before)
 
     if not agent_sessions:
         raise ToolError("No sessions with subagents found.")
