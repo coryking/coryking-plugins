@@ -9,8 +9,12 @@ Pipe-delimited entry line format:
   - role: U (user) or A (assistant)
   - turn_id: first 8 chars of turn UUID (via PrefixId.__str__)
   - full_length: character count of the full untruncated entry
-  - display: truncated entry text with smart tool call summaries (e.g. → Edit(/path/to/file))
+  - display: body only (truncated text + tool summaries)
 """
+
+from __future__ import annotations
+
+from datetime import datetime
 
 from .models import (
     AssistantTranscriptEntry,
@@ -23,6 +27,18 @@ from .models import (
 )
 from .subagents import SubagentInfo
 from .utils import PrefixId
+
+
+# =============================================================================
+# Session reference helpers
+# =============================================================================
+
+
+def format_session_ref(session_id: str, timestamp: datetime | None) -> str:
+    """Format a session reference: 'session_id (YYYY-MM-DD)' or bare id if no timestamp."""
+    if timestamp:
+        return f"{session_id} ({timestamp.strftime('%Y-%m-%d')})"
+    return str(session_id)
 
 
 # =============================================================================

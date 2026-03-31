@@ -138,8 +138,9 @@ class BaseTranscriptEntry(BaseModel):
     gitBranch: Optional[str] = None
 
     def display(self, truncate: int = 500) -> str:
-        """Format entry as a display line with [role:id] prefix."""
-        return f"[?:{self.uuid}]"
+        """Short display string for unknown entry kinds (no role/id; pipe line carries that)."""
+        _ = truncate  # unused here; same signature as HumanEntry / AssistantTranscriptEntry
+        return "[?]"
 
 
 class HumanEntry(BaseTranscriptEntry):
@@ -150,8 +151,7 @@ class HumanEntry(BaseTranscriptEntry):
 
     def display(self, truncate: int = 500) -> str:
         text = extract_text(self)
-        prefix = f"[U:{self.uuid}]"
-        line = f"{prefix} {text}"
+        line = text
         if truncate and len(line) > truncate:
             line = line[: truncate - 3] + "..."
         return line.replace("\n", "\\n")
@@ -193,8 +193,7 @@ class AssistantTranscriptEntry(BaseTranscriptEntry):
         if tool_summaries:
             parts.append("  ".join(tool_summaries))
         combined = "  ".join(parts) if parts else ""
-        prefix = f"[A:{self.uuid}]"
-        line = f"{prefix} {combined}"
+        line = combined
         if truncate and len(line) > truncate:
             line = line[: truncate - 3] + "..."
         return line.replace("\n", "\\n")

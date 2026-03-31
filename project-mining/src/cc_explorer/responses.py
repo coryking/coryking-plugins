@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .formatting import format_entry_line, format_session_ref, render_trace
 from .utils import PrefixId
 
 if TYPE_CHECKING:
@@ -91,15 +92,20 @@ class SessionListResponse(SparseModel):
 # =============================================================================
 
 
+MAX_EXAMPLES_PER_PATTERN = 7
+
+
 class PatternMatch(SparseModel):
     """Results for a single search pattern across all sessions."""
 
     pattern: str = Field(description="The regex pattern that was searched.")
     hits: int = Field(description="Total match count across all sessions.")
-    sessions: list[PrefixId] = Field(description="Sessions containing matches.")
+    sessions: list[str] = Field(
+        description="Session IDs with dates: 'session_id (YYYY-MM-DD)', sorted by date descending."
+    )
     examples: list[str] | None = Field(
         default=None,
-        description="Centered excerpts as 'session_id|...text around match...'. One per session, up to excerpt_width chars.",
+        description="Centered excerpts as 'session_id|...text around match...'. Capped to avoid token bloat.",
     )
 
 
@@ -123,19 +129,23 @@ class SearchProjectResponse(SparseModel):
             if total_hits == 0:
                 continue
 
-            sessions = [r.session.session_id for r in results]
-            examples = [
+            sessions = [
+                format_session_ref(r.session.session_id, r.session.first_timestamp)
+                for r in results
+            ]
+            all_examples = [
                 f"{r.session.session_id}|{r.first_match_example}"
                 for r in results
                 if r.first_match_example
             ]
+            examples = all_examples[:MAX_EXAMPLES_PER_PATTERN] or None
 
             matches.append(
                 PatternMatch(
                     pattern=pat,
                     hits=total_hits,
                     sessions=sessions,
-                    examples=examples or None,
+                    examples=examples,
                 )
             )
 
@@ -178,7 +188,6 @@ class GrepSessionResponse(SparseModel):
         total: int,
         limit: int,
     ) -> GrepSessionResponse:
-        from .formatting import format_entry_line
 
         overflow = None
         if len(matches) < total:
@@ -222,7 +231,6 @@ class ReadTurnResponse(SparseModel):
         entries: list,
         limit: int | None = None,
     ) -> ReadTurnResponse:
-        from .formatting import format_entry_line
 
         truncate = limit if limit else 0
         chats = [format_entry_line(e, truncate=truncate) for e in entries]
@@ -340,7 +348,6 @@ class AgentDetailResponse(SparseModel):
         no_reasoning: bool = False,
         entries_map: Optional[dict] = None,
     ) -> AgentDetailResponse:
-        from .formatting import render_trace
 
         output_file = None
         if found.output_file_exists:

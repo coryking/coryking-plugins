@@ -7,7 +7,7 @@ FastMCP auto-generates output schemas from return type annotations.
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -25,6 +25,7 @@ from .responses import (
 )
 from .search import (
     ENTRY_TYPE_MAP,
+    ConversationRole,
     ScopeType,
     get_turn_context,
     load_sessions,
@@ -37,7 +38,6 @@ from .subagents import extract_subagents, resolve_output_files, scan_output_file
 mcp = FastMCP("cc-explorer")
 
 _TOOL_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": False}
-
 
 # =============================================================================
 # Conversation tools
@@ -52,10 +52,18 @@ def list_project_sessions(
             description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
         ),
     ] = None,
+    min_messages: Annotated[
+        int,
+        Field(description="Only sessions with at least N messages."),
+    ] = 4,
+    min_tools: Annotated[
+        int,
+        Field(description="Only sessions with at least N tool calls."),
+    ] = 0,
     min_agents: Annotated[
-        int | None,
+        int,
         Field(description="Only sessions with at least N agents."),
-    ] = None,
+    ] = 0,
     after: Annotated[
         str | None,
         Field(description="Only sessions after this date (YYYY-MM-DD)."),
@@ -74,8 +82,9 @@ def list_project_sessions(
     if not sessions:
         raise ToolError(f"No conversations found for {proj}")
 
-    if min_agents is not None:
-        sessions = [s for s in sessions if s.stats.agent_count >= min_agents]
+    sessions = [s for s in sessions if s.message_count >= min_messages]
+    sessions = [s for s in sessions if s.stats.tool_use_count >= min_tools]
+    sessions = [s for s in sessions if s.stats.agent_count >= min_agents]
 
     if after:
         after_dt = datetime.strptime(after, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -84,13 +93,9 @@ def list_project_sessions(
         ]
 
     if before:
-        before_dt = datetime.strptime(before, "%Y-%m-%d").replace(
-            tzinfo=timezone.utc
-        )
+        before_dt = datetime.strptime(before, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         sessions = [
-            s
-            for s in sessions
-            if s.first_timestamp and s.first_timestamp <= before_dt
+            s for s in sessions if s.first_timestamp and s.first_timestamp <= before_dt
         ]
 
     if not sessions:
@@ -114,17 +119,17 @@ def search_project(
         ),
     ] = None,
     role: Annotated[
-        Literal["user", "assistant", "all"],
+        ConversationRole,
         Field(
             description="Which side of the conversation to search: 'user' for human messages, 'assistant' for agent responses, 'all' for both."
         ),
-    ] = "user",
+    ] = ConversationRole.user,
     scope: Annotated[
-        Literal["messages", "tools", "all"],
+        ScopeType,
         Field(
             description="Content scope: 'messages' for conversation text, 'tools' for tool inputs (Bash commands, file paths, grep patterns), 'all' for both. Using 'tools' or 'all' searches both roles regardless of the role parameter."
         ),
-    ] = "messages",
+    ] = ScopeType.messages,
     excerpt_width: Annotated[
         int,
         Field(description="Character width of centered excerpt examples."),
@@ -139,15 +144,15 @@ def search_project(
     if not sessions:
         raise ToolError(f"No conversations found for {proj}")
 
-    scope_val = ScopeType(scope)
-
     # --scope tools/all implies searching all entry types
-    if scope_val in (ScopeType.tools, ScopeType.all):
-        entry_types = ENTRY_TYPE_MAP["all"]
+    if scope in (ScopeType.tools, ScopeType.all):
+        entry_types = ENTRY_TYPE_MAP[ConversationRole.all]
     else:
         entry_types = ENTRY_TYPE_MAP[role]
 
-    all_results = triage_multi(sessions, patterns, entry_types, example_width=excerpt_width, scope=scope_val)
+    all_results = triage_multi(
+        sessions, patterns, entry_types, example_width=excerpt_width, scope=scope
+    )
 
     # Check if anything matched
     if not any(r for _, results in all_results for r in results):
@@ -177,21 +182,23 @@ def grep_session(
     context: Annotated[
         int,
         Field(
-            description="Number of surrounding turns to include with each match (like grep -C)."
+            description="Number of surrounding turns to include with each match (like grep -C).",
+            ge=0,
+            le=5,
         ),
     ] = 2,
     role: Annotated[
-        Literal["user", "assistant", "all"],
+        ConversationRole,
         Field(
             description="Which side of the conversation to search: 'user' for human messages, 'assistant' for agent responses, 'all' for both."
         ),
-    ] = "user",
+    ] = ConversationRole.user,
     scope: Annotated[
-        Literal["messages", "tools", "all"],
+        ScopeType,
         Field(
             description="Content scope: 'messages' for conversation text, 'tools' for tool inputs (Bash commands, file paths, grep patterns), 'all' for both."
         ),
-    ] = "messages",
+    ] = ScopeType.messages,
     limit: Annotated[
         int,
         Field(
@@ -213,11 +220,9 @@ def grep_session(
     if not sessions:
         raise ToolError(f"No session matching: {session}")
 
-    scope_val = ScopeType(scope)
-
     # --scope tools/all implies searching all entry types
-    if scope_val in (ScopeType.tools, ScopeType.all):
-        entry_types = ENTRY_TYPE_MAP["all"]
+    if scope in (ScopeType.tools, ScopeType.all):
+        entry_types = ENTRY_TYPE_MAP[ConversationRole.all]
     else:
         entry_types = ENTRY_TYPE_MAP[role]
 
@@ -227,7 +232,7 @@ def grep_session(
         entry_types,
         context,
         max_results=limit,
-        scope=scope_val,
+        scope=scope,
     )
 
     if not result.matches:
@@ -315,9 +320,7 @@ def list_agent_sessions(
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
 def list_session_agents(
-    session: Annotated[
-        str, Field(description="Session ID or prefix to inspect.")
-    ],
+    session: Annotated[str, Field(description="Session ID or prefix to inspect.")],
     project: Annotated[
         str | None,
         Field(
@@ -328,9 +331,7 @@ def list_session_agents(
         str | None,
         Field(description="Directory containing saved .output files."),
     ] = None,
-    compaction: Annotated[
-        bool, Field(description="Show compaction details.")
-    ] = False,
+    compaction: Annotated[bool, Field(description="Show compaction details.")] = False,
 ) -> SessionAgentsResponse:
     """List all agents spawned by a specific session, with stats and output file info."""
     proj = resolve_project(project)
@@ -370,9 +371,7 @@ def get_agent_detail(
     ] = None,
     session: Annotated[
         str | None,
-        Field(
-            description="Session ID prefix to narrow the search."
-        ),
+        Field(description="Session ID prefix to narrow the search."),
     ] = None,
     task_output_dir: Annotated[
         str | None,
@@ -386,9 +385,7 @@ def get_agent_detail(
         bool,
         Field(description="Omit reasoning text from trace output."),
     ] = False,
-    compaction: Annotated[
-        bool, Field(description="Show compaction details.")
-    ] = False,
+    compaction: Annotated[bool, Field(description="Show compaction details.")] = False,
 ) -> AgentDetailResponse | AgentListResponse:
     """Get full prompt, result, stats, and optional tool trace for specific agent(s)."""
     proj = resolve_project(project)

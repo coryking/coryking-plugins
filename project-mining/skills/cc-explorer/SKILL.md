@@ -51,7 +51,7 @@ Use when tracing what an agent did, correlating outputs with sessions, or buildi
 
 ### Progressive search (broad → narrow)
 
-Start with `search_project` using several candidate patterns. The results show which terms land (high hit count) vs dead weight (zero hits, omitted from output). The session IDs tell you where to drill in.
+Start with `search_project` using all your candidate patterns in one call. The tool accepts an array and scans all sessions in a single pass regardless of pattern count — 20 patterns costs the same as 1. Front-load everything you can think of. The results show which terms land (high hit count) vs dead weight (zero hits, omitted from output). Session IDs include dates, so you can reason about chronology directly without a separate `list_project_sessions` call.
 
 Then `grep_session` on the hot sessions with your best pattern. Matches appear with surrounding context — enough to understand what was happening. When you find the moment you need, `read_turn` gives you the full untruncated text.
 

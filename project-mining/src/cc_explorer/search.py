@@ -25,6 +25,23 @@ from .parser import load_conversations, load_transcript
 
 
 # =============================================================================
+# Scope enum and tool text extraction
+# =============================================================================
+
+
+class ScopeType(str, Enum):
+    messages = "messages"
+    tools = "tools"
+    all = "all"
+
+
+class ConversationRole(str, Enum):
+    user = "user"
+    assistant = "assistant"
+    all = "all"
+
+
+# =============================================================================
 # Project resolution
 # =============================================================================
 
@@ -47,16 +64,6 @@ def resolve_project(project: Optional[str] = None) -> str:
 
     return project
 
-
-# =============================================================================
-# Scope enum and tool text extraction
-# =============================================================================
-
-
-class ScopeType(str, Enum):
-    messages = "messages"
-    tools = "tools"
-    all = "all"
 
 
 # Map tool names to the input keys that contain searchable text
