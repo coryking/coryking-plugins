@@ -70,8 +70,8 @@ def resolve_project(project: Optional[str] = None) -> str:
 _TOOL_TEXT_KEYS: dict[str, list[str]] = {
     "Bash": ["command", "description"],
     "Read": ["file_path"],
-    "Edit": ["file_path", "old_string", "new_string"],
-    "Write": ["file_path", "content"],
+    "Edit": ["file_path"],
+    "Write": ["file_path"],
     "Glob": ["pattern", "path"],
     "Grep": ["pattern", "path"],
     "Agent": ["prompt", "description"],
@@ -254,21 +254,34 @@ def load_sessions(project_path: str) -> list[SessionInfo]:
 
 
 def _match_example(text: str, pattern: re.Pattern, width: int = 150) -> str:
-    """Extract an example excerpt centered on the first match within text."""
+    """Extract an example excerpt starting at the first match within text.
+
+    Centers the window so the match start is visible (not the midpoint of a
+    greedy span). Snaps slice boundaries to word breaks to avoid fragments.
+    """
     # Collapse whitespace for display
     text = re.sub(r"\s+", " ", text).strip()
     m = pattern.search(text)
     if not m:
         return text[:width]
-    # Center the match within the width
-    match_start, match_end = m.start(), m.end()
-    match_mid = (match_start + match_end) // 2
-    half = width // 2
-    start = max(0, match_mid - half)
+    # Start the window a few words before the match so there's leading context
+    match_start = m.start()
+    lead = min(30, match_start)  # up to 30 chars of leading context
+    start = max(0, match_start - lead)
     end = min(len(text), start + width)
-    # Adjust start if we hit the end of text
+    # If we hit the end, pull the start back
     if end - start < width:
         start = max(0, end - width)
+    # Snap start forward to a word boundary (space) if we're mid-word
+    if start > 0:
+        space = text.find(" ", start)
+        if space != -1 and space < match_start:
+            start = space + 1
+    # Snap end back to a word boundary
+    if end < len(text):
+        space = text.rfind(" ", start, end)
+        if space > start:
+            end = space
     snippet = text[start:end]
     prefix = "..." if start > 0 else ""
     suffix = "..." if end < len(text) else ""
@@ -361,7 +374,7 @@ def triage(
             if isinstance(entry, entry_types) and _entry_matches(entry, compiled, scope):
                 count += 1
                 if not first_example and isinstance(entry, (HumanEntry, AssistantTranscriptEntry)):
-                    first_example = _match_example(extract_text(entry), compiled, width=example_width)
+                    first_example = _match_example(entry.display(truncate=0), compiled, width=example_width)
         if count > 0:
             results.append(TriageResult(session=session, count=count, first_match_example=first_example))
 
@@ -395,7 +408,7 @@ def triage_multi(
                 if _entry_matches(entry, regex, scope):
                     count, example = accum[pi].get(si, (0, ""))
                     if not example and isinstance(entry, (HumanEntry, AssistantTranscriptEntry)):
-                        example = _match_example(extract_text(entry), regex, width=example_width)
+                        example = _match_example(entry.display(truncate=0), regex, width=example_width)
                     accum[pi][si] = (count + 1, example)
 
     results: PatternTriageResults = []

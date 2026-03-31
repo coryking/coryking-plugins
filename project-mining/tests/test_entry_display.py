@@ -51,7 +51,8 @@ class TestHumanEntryDisplay:
         assert s == "hello world"
         assert "[U:" not in s
 
-    def test_newlines_escaped(self):
+    def test_newlines_preserved_in_display(self):
+        """display() returns raw text — newline escaping is format_entry_line's job."""
         e = HumanEntry(
             uuid=FULL_UUID,
             timestamp=TS,
@@ -62,7 +63,24 @@ class TestHumanEntryDisplay:
                 content=[TextContent(type="text", text="a\nb")],
             ),
         )
-        assert e.display(truncate=0) == "a\\nb"
+        assert e.display(truncate=0) == "a\nb"
+
+    def test_newlines_escaped_in_format_entry_line(self):
+        """format_entry_line escapes newlines for pipe-delimited output."""
+        e = HumanEntry(
+            uuid=FULL_UUID,
+            timestamp=TS,
+            sessionId="bbbbbbbb-1111-2222-3333-444444444444",
+            type="user",
+            message=UserMessageModel(
+                role="user",
+                content=[TextContent(type="text", text="a\nb")],
+            ),
+        )
+        line = format_entry_line(e, truncate=0)
+        display = line.split("|", 4)[4]
+        assert "\\n" in display
+        assert "\n" not in display
 
     def test_truncation(self, human_entry):
         long_text = "x" * 100

@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .formatting import format_entry_line, format_session_ref, render_trace
+from .formatting import format_entry_line, format_session_date, format_session_ref, render_trace
 from .utils import PrefixId
 
 if TYPE_CHECKING:
@@ -100,12 +100,10 @@ class PatternMatch(SparseModel):
 
     pattern: str = Field(description="The regex pattern that was searched.")
     hits: int = Field(description="Total match count across all sessions.")
-    sessions: list[str] = Field(
-        description="Session IDs with dates: 'session_id (YYYY-MM-DD)', sorted by date descending."
-    )
+    sessions: int = Field(description="Number of sessions containing matches.")
     examples: list[str] | None = Field(
         default=None,
-        description="Centered excerpts as 'session_id|...text around match...'. Capped to avoid token bloat.",
+        description="Pipe-delimited: 'session_id|YYYY-MM-DD|excerpt'. Capped to avoid token bloat.",
     )
 
 
@@ -129,12 +127,8 @@ class SearchProjectResponse(SparseModel):
             if total_hits == 0:
                 continue
 
-            sessions = [
-                format_session_ref(r.session.session_id, r.session.first_timestamp)
-                for r in results
-            ]
             all_examples = [
-                f"{r.session.session_id}|{r.first_match_example}"
+                f"{PrefixId(r.session.session_id)}|{format_session_date(r.session.first_timestamp)}|{r.first_match_example}"
                 for r in results
                 if r.first_match_example
             ]
@@ -144,7 +138,7 @@ class SearchProjectResponse(SparseModel):
                 PatternMatch(
                     pattern=pat,
                     hits=total_hits,
-                    sessions=sessions,
+                    sessions=len(results),
                     examples=examples,
                 )
             )

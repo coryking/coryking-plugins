@@ -41,6 +41,13 @@ def format_session_ref(session_id: str, timestamp: datetime | None) -> str:
     return str(session_id)
 
 
+def format_session_date(timestamp: datetime | None) -> str:
+    """Format a session date as YYYY-MM-DD, or empty string if no timestamp."""
+    if timestamp:
+        return timestamp.strftime("%Y-%m-%d")
+    return ""
+
+
 # =============================================================================
 # Entry display helpers
 # =============================================================================
@@ -62,6 +69,8 @@ def format_entry_line(entry: TranscriptEntry, truncate: int = 500) -> str:
 
     ts = int(entry.timestamp.timestamp()) if entry.timestamp else 0
     role = "U" if isinstance(entry, HumanEntry) else "A"
+    # Escape newlines for pipe-delimited single-line output
+    display = display.replace("\n", "\\n")
     return f"{ts}|{role}|{entry.uuid}|{full_length}|{display}"
 
 

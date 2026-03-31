@@ -135,9 +135,9 @@ def search_project(
         Field(description="Character width of centered excerpt examples."),
     ] = 150,
 ) -> SearchProjectResponse:
-    """Scan a project's chat history for patterns and report where they appear.
+    """Scan a project's chat history for patterns, grouped by pattern with per-pattern hit counts and session breakdowns.
 
-    Like `rg -c` across all sessions — tells you which patterns are productive and which sessions are hot. Use this to orient before drilling into a specific session with grep_session.
+    Pass all your candidate search terms at once — each gets its own hit count and session list so you can see which terms are useful and which aren't. Use separate patterns rather than regex OR pipes (e.g. ["facebook.*scrape", "fb_capture"] not "facebook.*scrape|fb_capture") to get this per-term breakdown. Results are sorted by hit count (hottest patterns and sessions first) and include session dates for chronological context. Follow up with grep_session on sessions that look promising.
     """
     proj = resolve_project(project)
     sessions = load_sessions(proj)

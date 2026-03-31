@@ -154,7 +154,7 @@ class HumanEntry(BaseTranscriptEntry):
         line = text
         if truncate and len(line) > truncate:
             line = line[: truncate - 3] + "..."
-        return line.replace("\n", "\\n")
+        return line
 
 
 class ToolResultEntry(BaseTranscriptEntry):
@@ -196,7 +196,7 @@ class AssistantTranscriptEntry(BaseTranscriptEntry):
         line = combined
         if truncate and len(line) > truncate:
             line = line[: truncate - 3] + "..."
-        return line.replace("\n", "\\n")
+        return line
 
 
 class SummaryTranscriptEntry(BaseModel):
