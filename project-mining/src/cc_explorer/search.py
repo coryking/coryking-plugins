@@ -214,11 +214,12 @@ def load_sessions(project_path: str) -> list[SessionInfo]:
         if not entries:
             continue
 
-        # Count meaningful messages (human + assistant)
+        # Count meaningful messages — entries with actual content
         message_count = sum(
             1
             for e in entries
             if isinstance(e, (HumanEntry, AssistantTranscriptEntry))
+            and len(e.display(truncate=0)) > 0
         )
         if message_count == 0:
             continue
