@@ -237,6 +237,41 @@ class ReadTurnResponse(SparseModel):
 
 
 # =============================================================================
+# browse_session
+# =============================================================================
+
+
+class BrowseSessionResponse(SparseModel):
+    """First or last N conversation turns from a session."""
+
+    session_id: PrefixId = Field(description="Session identifier.")
+    position: str = Field(description="'head' or 'tail' — which end was read.")
+    showing: int = Field(description="Number of turns returned.")
+    total_turns: int = Field(description="Total conversation turns in the session.")
+    chats: list[str] = Field(
+        description="Pipe-delimited entry lines: timestamp|role|turn_id|full_length|display.",
+    )
+
+    @classmethod
+    def from_entries(
+        cls,
+        session_id: str,
+        position: str,
+        entries: list,
+        total: int,
+        truncate: int = 500,
+    ) -> BrowseSessionResponse:
+        chats = [format_entry_line(e, truncate=truncate) for e in entries]
+        return cls(
+            session_id=PrefixId(session_id),
+            position=position,
+            showing=len(entries),
+            total_turns=total,
+            chats=chats,
+        )
+
+
+# =============================================================================
 # list_session_agents
 # =============================================================================
 

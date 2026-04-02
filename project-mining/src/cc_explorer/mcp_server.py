@@ -17,6 +17,7 @@ from .formatting import matches_id
 from .responses import (
     AgentDetailResponse,
     AgentListResponse,
+    BrowseSessionResponse,
     GrepSessionResponse,
     ReadTurnResponse,
     SearchProjectResponse,
@@ -28,6 +29,7 @@ from .search import (
     ConversationRole,
     ScopeType,
     SessionInfo,
+    browse_session_turns,
     get_turn_context,
     load_sessions,
     resolve_project,
@@ -306,6 +308,68 @@ def read_turn(
         raise ToolError(f"Turn {turn} not found")
 
     return ReadTurnResponse.from_entries(session_info, turn, entries, limit=limit)
+
+
+@mcp.tool(annotations=_TOOL_ANNOTATIONS)
+def browse_session(
+    session: Annotated[
+        str,
+        Field(
+            description="Session ID or prefix. Use list_project_sessions to find session IDs."
+        ),
+    ],
+    project: Annotated[
+        str | None,
+        Field(
+            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
+        ),
+    ] = None,
+    position: Annotated[
+        str,
+        Field(
+            description="Which end to read: 'head' for the start, 'tail' for the end.",
+        ),
+    ] = "head",
+    turns: Annotated[
+        int,
+        Field(description="Number of conversation turns to return.", ge=1, le=50),
+    ] = 10,
+    limit: Annotated[
+        int | None,
+        Field(
+            description="Max characters per entry in output. Entries exceeding this are truncated. Omit for full text."
+        ),
+    ] = 500,
+) -> BrowseSessionResponse:
+    """Read the first or last N turns of a conversation — like head/tail on a session.
+
+    Quick orientation tool: see how a conversation started or where it ended up without needing a search pattern. Use 'head' to understand what the session was about, 'tail' to see the conclusion.
+    """
+    if position not in ("head", "tail"):
+        raise ToolError(f"position must be 'head' or 'tail', got: {position!r}")
+
+    proj = resolve_project(project)
+    sessions = load_sessions(proj)
+    if not sessions:
+        raise ToolError(f"No conversations found for {proj}")
+
+    target = [s for s in sessions if s.session_id == session]
+    if not target:
+        raise ToolError(f"No session matching: {session}")
+
+    entries, total = browse_session_turns(target[0], position, turns)
+
+    if not entries:
+        raise ToolError(f"Session {session} has no conversation turns")
+
+    truncate = limit if limit else 0
+    return BrowseSessionResponse.from_entries(
+        session_id=target[0].session_id,
+        position=position,
+        entries=entries,
+        total=total,
+        truncate=truncate,
+    )
 
 
 # =============================================================================

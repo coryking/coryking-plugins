@@ -554,3 +554,25 @@ def get_turn_context(
             return session, result
 
     return None, []
+
+
+def browse_session_turns(
+    session: SessionInfo,
+    position: str,
+    turns: int = 10,
+) -> tuple[list[TranscriptEntry], int]:
+    """Return first or last N conversation turns from a session.
+
+    Filters to HumanEntry + AssistantTranscriptEntry (same as other tools).
+    Returns (sliced_entries, total_conversation_turns).
+    """
+    entries = load_transcript(session.path)
+    conversation = [
+        e for e in entries if isinstance(e, (HumanEntry, AssistantTranscriptEntry))
+    ]
+    total = len(conversation)
+    if position == "tail":
+        sliced = conversation[-turns:] if turns < total else conversation
+    else:
+        sliced = conversation[:turns]
+    return sliced, total
