@@ -14,6 +14,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from .formatting import matches_id
+from .utils import PrefixId
 from .responses import (
     AgentDetailResponse,
     AgentListResponse,
@@ -242,7 +243,7 @@ def grep_session(
         raise ToolError(f"No conversations found for {proj}")
 
     # Filter to the target session
-    sessions = [s for s in sessions if s.session_id == session]
+    sessions = [s for s in sessions if PrefixId(s.session_id) == session]
     if not sessions:
         raise ToolError(f"No session matching: {session}")
 
@@ -372,7 +373,7 @@ def browse_session(
     if not sessions:
         raise ToolError(f"No conversations found for {proj}")
 
-    target = [s for s in sessions if s.session_id == session]
+    target = [s for s in sessions if PrefixId(s.session_id) == session]
     if not target:
         raise ToolError(f"No session matching: {session}")
 
@@ -456,7 +457,7 @@ def list_session_agents(
 
     target = None
     for s in sessions:
-        if s.session_id == session:
+        if PrefixId(s.session_id) == session:
             target = s
             break
 
@@ -515,7 +516,7 @@ def get_agent_detail(
         raise ToolError(f"No conversations found for {proj}")
 
     if session:
-        sessions = [s for s in sessions if s.session_id == session]
+        sessions = [s for s in sessions if PrefixId(s.session_id) == session]
         if not sessions:
             raise ToolError(f"Session {session} not found")
 
