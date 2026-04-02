@@ -225,12 +225,12 @@ def grep_session(
             description="Max matches to return (like head -N). Overflow is truncated, not mode-switched."
         ),
     ] = 30,
-    tool_detail: Annotated[
+    truncate: Annotated[
         int,
         Field(
-            description="Max chars for tool input display. 0 = full input (JSON), 80 = compact summary (default).",
+            description="Truncate each content piece (text, tool inputs) to N chars. 0 = full content.",
         ),
-    ] = 80,
+    ] = 500,
 ) -> GrepSessionResponse:
     """Show matches for a pattern within a single conversation, with surrounding context.
 
@@ -269,7 +269,7 @@ def grep_session(
         matches=result.matches,
         total=result.total_matches,
         limit=limit,
-        tool_detail=tool_detail,
+        truncate=truncate,
     )
 
 
@@ -291,18 +291,12 @@ def read_turn(
         int,
         Field(description="Number of turns before and after to include."),
     ] = 3,
-    limit: Annotated[
-        int | None,
-        Field(
-            description="Max characters per entry in output. Entries exceeding this are truncated. Omit for full text."
-        ),
-    ] = None,
-    tool_detail: Annotated[
+    truncate: Annotated[
         int,
         Field(
-            description="Max chars for tool input display. 0 = full input (JSON), 80 = compact summary (default).",
+            description="Truncate each content piece (text, tool inputs) to N chars. 0 = full content.",
         ),
-    ] = 80,
+    ] = 0,
 ) -> ReadTurnResponse:
     """Read a specific moment in a conversation at full fidelity.
 
@@ -320,7 +314,7 @@ def read_turn(
     if not entries:
         raise ToolError(f"Turn {turn} not found")
 
-    return ReadTurnResponse.from_entries(session_info, turn, entries, limit=limit, tool_detail=tool_detail)
+    return ReadTurnResponse.from_entries(session_info, turn, entries, truncate=truncate)
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -359,18 +353,12 @@ def browse_session(
             description="Which side to show: 'user' for human messages only, 'assistant' for agent responses only, 'all' for both.",
         ),
     ] = ConversationRole.all,
-    limit: Annotated[
-        int | None,
-        Field(
-            description="Max characters per entry in output. Entries exceeding this are truncated. Omit for full text."
-        ),
-    ] = None,
-    tool_detail: Annotated[
+    truncate: Annotated[
         int,
         Field(
-            description="Max chars for tool input display. 0 = full input (JSON), 80 = compact summary (default).",
+            description="Truncate each content piece (text, tool inputs) to N chars. 0 = full content.",
         ),
-    ] = 80,
+    ] = 0,
 ) -> BrowseSessionResponse:
     """Read the first or last N turns of a conversation — like head/tail on a session.
 
@@ -398,14 +386,12 @@ def browse_session(
             raise ToolError(f"Turn {turn} not found in session {session}")
         raise ToolError(f"Session {session} has no conversation turns")
 
-    truncate = limit if limit else 0
     return BrowseSessionResponse.from_entries(
         session_id=target[0].session_id,
         position=position,
         entries=entries,
         total=total,
         truncate=truncate,
-        tool_detail=tool_detail,
         anchor=turn,
     )
 
@@ -515,10 +501,10 @@ def get_agent_detail(
         Field(description="Omit reasoning text from trace output."),
     ] = False,
     compaction: Annotated[bool, Field(description="Show compaction details.")] = False,
-    tool_detail: Annotated[
+    truncate: Annotated[
         int,
         Field(
-            description="Max chars for tool input display in traces. 0 = full input (JSON), 80 = compact summary (default).",
+            description="Truncate each content piece (text, tool inputs) to N chars. 0 = full content.",
         ),
     ] = 80,
 ) -> AgentDetailResponse | AgentListResponse:
@@ -553,7 +539,7 @@ def get_agent_detail(
                 trace=trace,
                 no_reasoning=no_reasoning,
                 entries_map=entries_map,
-                tool_detail=tool_detail,
+                truncate=truncate,
             )
         )
 

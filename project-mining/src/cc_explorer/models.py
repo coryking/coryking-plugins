@@ -22,7 +22,7 @@ from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, BeforeValidator
 
-from .utils import PrefixId
+from .utils import PrefixId, smart_truncate
 
 
 # Coerce None → 0 for token fields that the API may return as null
@@ -137,7 +137,7 @@ class BaseTranscriptEntry(BaseModel):
     agentId: Optional[PrefixId] = None
     gitBranch: Optional[str] = None
 
-    def display(self, truncate: int = 500) -> str:
+    def display(self, truncate: int) -> str:
         """Short display string for unknown entry kinds (no role/id; pipe line carries that)."""
         _ = truncate  # unused here; same signature as HumanEntry / AssistantTranscriptEntry
         return "[?]"
@@ -149,12 +149,9 @@ class HumanEntry(BaseTranscriptEntry):
     message: UserMessageModel
     isMeta: Optional[bool] = None
 
-    def display(self, truncate: int = 500) -> str:
+    def display(self, truncate: int) -> str:
         text = extract_text(self)
-        line = text
-        if truncate and len(line) > truncate:
-            line = line[: truncate - 3] + "..."
-        return line
+        return smart_truncate(text, truncate)
 
 
 class ToolResultEntry(BaseTranscriptEntry):
@@ -180,23 +177,19 @@ class AssistantTranscriptEntry(BaseTranscriptEntry):
     message: AssistantMessageModel
     requestId: Optional[str] = None
 
-    def display(self, truncate: int = 500, tool_detail: int = 80) -> str:
+    def display(self, truncate: int) -> str:
         text = extract_text(self)
         tool_summaries: list[str] = []
         for item in self.message.content:
             if isinstance(item, ToolUseContent):
-                summary = format_tool_input(item.name, item.input, max_length=tool_detail)
-                tool_summaries.append(f"→ {item.name}({summary})")
+                detail = format_tool_input(item.name, item.input, truncate=truncate)
+                tool_summaries.append(f"→ {item.name}({detail})")
         parts: list[str] = []
         if text:
-            parts.append(text)
+            parts.append(smart_truncate(text, truncate))
         if tool_summaries:
             parts.append("  ".join(tool_summaries))
-        combined = "  ".join(parts) if parts else ""
-        line = combined
-        if truncate and len(line) > truncate:
-            line = line[: truncate - 3] + "..."
-        return line
+        return "  ".join(parts) if parts else ""
 
 
 class SummaryTranscriptEntry(BaseModel):
@@ -402,45 +395,40 @@ def extract_text(entry: Union[HumanEntry, AssistantTranscriptEntry]) -> str:
 # =============================================================================
 
 
-def format_tool_input(name: str, inp: dict[str, Any], max_length: int = 80) -> str:
+def format_tool_input(name: str, inp: dict[str, Any], truncate: int = 80) -> str:
     """Format a tool's input for display.
 
-    max_length controls truncation: 0 = full input, N = cap at N chars.
+    truncate controls detail level (0 = full input, N = cap at N chars).
     Per-tool-name logic picks the most relevant field to show;
-    max_length controls how much of it is visible.
+    truncate controls how much of it is visible.
     """
     import json
 
-    def _cap(s: str) -> str:
-        if max_length and len(s) > max_length:
-            return s[: max_length - 3] + "..."
-        return s
-
-    if max_length == 0:
+    if truncate == 0:
         # Full input — JSON-format the entire input dict
         return json.dumps(inp, indent=2, default=str)
 
     if name == "Read" and "file_path" in inp:
-        return _cap(inp["file_path"])
+        return smart_truncate(inp["file_path"], truncate)
     if name in ("navigate", "WebFetch") and "url" in inp:
-        return _cap(inp["url"])
+        return smart_truncate(inp["url"], truncate)
     if name == "javascript_tool" and "text" in inp:
-        return _cap(inp["text"])
+        return smart_truncate(inp["text"], truncate)
     if name == "Grep" and "pattern" in inp:
         s = f"/{inp['pattern']}/"
         if "path" in inp:
             s += f" {inp['path']}"
-        return _cap(s)
+        return smart_truncate(s, truncate)
     if name == "Glob" and "pattern" in inp:
         s = inp["pattern"]
         if "path" in inp:
             s += f" in {inp['path']}"
-        return _cap(s)
+        return smart_truncate(s, truncate)
     if name == "Edit" and "file_path" in inp:
-        return _cap(inp["file_path"])
+        return smart_truncate(inp["file_path"], truncate)
     if name == "Write" and "file_path" in inp:
-        return _cap(inp["file_path"])
+        return smart_truncate(inp["file_path"], truncate)
     if name == "Bash" and "command" in inp:
-        return _cap(inp["command"])
+        return smart_truncate(inp["command"], truncate)
     # Default: stringify and truncate
-    return _cap(str(inp))
+    return smart_truncate(str(inp), truncate)

@@ -22,6 +22,7 @@ from .models import (
 )
 from .models import extract_text
 from .parser import load_conversations, load_transcript
+from .utils import smart_truncate
 
 
 # =============================================================================
@@ -195,9 +196,7 @@ def session_title(entries: list[TranscriptEntry]) -> str:
             continue
         # Single line, truncated
         first_line = text.split("\n")[0].strip()
-        if len(first_line) > 60:
-            return first_line[:57] + "..."
-        return first_line
+        return smart_truncate(first_line, 60)
     return "(empty session)"
 
 

@@ -26,7 +26,7 @@ from .models import (
     format_tool_input,
 )
 from .subagents import SubagentInfo
-from .utils import PrefixId
+from .utils import PrefixId, smart_truncate
 
 
 # =============================================================================
@@ -53,7 +53,7 @@ def format_session_date(timestamp: datetime | None) -> str:
 # =============================================================================
 
 
-def format_entry_line(entry: TranscriptEntry, truncate: int = 500, tool_detail: int = 80) -> str:
+def format_entry_line(entry: TranscriptEntry, truncate: int) -> str:
     """Format entry as pipe-delimited: timestamp|role|turn_id|full_length|display."""
     if not isinstance(entry, BaseTranscriptEntry):
         uuid = getattr(entry, 'uuid', None)
@@ -61,11 +61,11 @@ def format_entry_line(entry: TranscriptEntry, truncate: int = 500, tool_detail: 
         return f"0|?|{turn_id}|0|[?]"
 
     # Get full display for length calculation
-    full = entry.display(truncate=0, tool_detail=tool_detail)
+    full = entry.display(truncate=0)
     full_length = len(full)
 
     # Get display (truncated or full based on param)
-    display = entry.display(truncate=truncate, tool_detail=tool_detail) if truncate else full
+    display = entry.display(truncate=truncate) if truncate else full
 
     ts = int(entry.timestamp.timestamp()) if entry.timestamp else 0
     role = "U" if isinstance(entry, HumanEntry) else "A"
@@ -80,7 +80,7 @@ def format_entry_line(entry: TranscriptEntry, truncate: int = 500, tool_detail: 
 
 
 def render_trace(
-    entries: list[TranscriptEntry], show_reasoning: bool = True, tool_detail: int = 80
+    entries: list[TranscriptEntry], show_reasoning: bool = True, *, truncate: int,
 ) -> list[str]:
     """Render a chronological trace of tool calls and reasoning."""
     lines: list[str] = []
@@ -95,7 +95,7 @@ def render_trace(
 
         for item in entry.message.content:
             if isinstance(item, ToolUseContent):
-                summary = format_tool_input(item.name, item.input, max_length=tool_detail)
+                summary = format_tool_input(item.name, item.input, truncate=truncate)
                 lines.append(f"{ts}  {item.name:<20s}{summary}")
                 ts = "        "
             elif isinstance(item, TextContent) and show_reasoning:
@@ -104,8 +104,7 @@ def render_trace(
                     continue
                 text_lines = text.split("\n")
                 for line in text_lines[:5]:
-                    truncated = line[:100] + "..." if len(line) > 100 else line
-                    lines.append(f'          "{truncated}"')
+                    lines.append(f'          "{smart_truncate(line, 100)}"')
                 if len(text_lines) > 5:
                     lines.append(f"          ... ({len(text_lines) - 5} more lines)")
                 ts = "        "

@@ -2,7 +2,25 @@
 
 from __future__ import annotations
 
+import textwrap
 from typing import Any
+
+
+def smart_truncate(text: str, width: int, placeholder: str = "...") -> str:
+    """Truncate text to width, preferring word boundaries.
+
+    width=0 means no truncation (return as-is).
+    Tries textwrap.shorten first (word-boundary break). If that collapses
+    to just the placeholder (single long token, no spaces), falls back to
+    a hard character cut.
+    """
+    if not width or len(text) <= width:
+        return text
+    result = textwrap.shorten(text, width=width, placeholder=placeholder)
+    if result != placeholder:
+        return result
+    # Fallback: hard cut (no word boundary found)
+    return text[: width - len(placeholder)] + placeholder
 
 
 

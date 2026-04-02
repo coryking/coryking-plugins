@@ -95,8 +95,25 @@ class TestHumanEntryDisplay:
             ),
         )
         out = e.display(truncate=20)
-        assert len(out) == 20
+        assert len(out) <= 20
         assert out.endswith("...")
+
+    def test_truncation_word_boundary(self):
+        """Truncation prefers word boundaries over hard character cuts."""
+        e = HumanEntry(
+            uuid=FULL_UUID,
+            timestamp=TS,
+            sessionId="bbbbbbbb-1111-2222-3333-444444444444",
+            type="user",
+            message=UserMessageModel(
+                role="user",
+                content=[TextContent(type="text", text="hello world this is a long message")],
+            ),
+        )
+        out = e.display(truncate=20)
+        assert out.endswith("...")
+        # Should break at a word boundary, not mid-word
+        assert "worl..." not in out
 
 
 class TestAssistantTranscriptEntryDisplay:
@@ -104,7 +121,9 @@ class TestAssistantTranscriptEntryDisplay:
         s = assistant_entry.display(truncate=0)
         assert "[A:" not in s
         assert "Exactly. Facebook's initial page load." in s
-        assert "→ Read(/tmp/foo.py)" in s
+        # truncate=0 shows full JSON input
+        assert "→ Read(" in s
+        assert '"file_path": "/tmp/foo.py"' in s
 
     def test_empty_assistant(self):
         e = AssistantTranscriptEntry(
@@ -132,8 +151,8 @@ class TestBaseTranscriptEntryDisplay:
             type="system",
             content="warn",
         )
-        assert e.display() == "[?]"
-        assert str(e.uuid) not in e.display()
+        assert e.display(truncate=0) == "[?]"
+        assert str(e.uuid) not in e.display(truncate=0)
 
 
 class TestFormatEntryLineNoDuplicateIdentity:
