@@ -181,6 +181,7 @@ class GrepSessionResponse(SparseModel):
         matches: list[MatchHit],
         total: int,
         limit: int,
+        tool_detail: int = 80,
     ) -> GrepSessionResponse:
 
         overflow = None
@@ -189,9 +190,9 @@ class GrepSessionResponse(SparseModel):
 
         match_blocks: list[MatchBlock] = []
         for match in matches:
-            chats: list[str] = [format_entry_line(e) for e in match.context_before]
-            chats.append(format_entry_line(match.entry))
-            chats.extend(format_entry_line(e) for e in match.context_after)
+            chats: list[str] = [format_entry_line(e, tool_detail=tool_detail) for e in match.context_before]
+            chats.append(format_entry_line(match.entry, tool_detail=tool_detail))
+            chats.extend(format_entry_line(e, tool_detail=tool_detail) for e in match.context_after)
             match_blocks.append(MatchBlock(chats=chats))
 
         return cls(
@@ -224,10 +225,11 @@ class ReadTurnResponse(SparseModel):
         turn: str,
         entries: list,
         limit: int | None = None,
+        tool_detail: int = 80,
     ) -> ReadTurnResponse:
 
         truncate = limit if limit else 0
-        chats = [format_entry_line(e, truncate=truncate) for e in entries]
+        chats = [format_entry_line(e, truncate=truncate, tool_detail=tool_detail) for e in entries]
 
         return cls(
             session_id=PrefixId(session_info.session_id) if session_info else None,
@@ -248,6 +250,7 @@ class BrowseSessionResponse(SparseModel):
     position: str = Field(description="'head' or 'tail' — which end was read.")
     showing: int = Field(description="Number of turns returned.")
     total_turns: int = Field(description="Total conversation turns in the session.")
+    anchor: PrefixId | None = Field(default=None, description="Turn used as anchor, if one was specified.")
     chats: list[str] = Field(
         description="Pipe-delimited entry lines: timestamp|role|turn_id|full_length|display.",
     )
@@ -259,14 +262,17 @@ class BrowseSessionResponse(SparseModel):
         position: str,
         entries: list,
         total: int,
-        truncate: int = 500,
+        truncate: int = 0,
+        tool_detail: int = 80,
+        anchor: str | None = None,
     ) -> BrowseSessionResponse:
-        chats = [format_entry_line(e, truncate=truncate) for e in entries]
+        chats = [format_entry_line(e, truncate=truncate, tool_detail=tool_detail) for e in entries]
         return cls(
             session_id=PrefixId(session_id),
             position=position,
             showing=len(entries),
             total_turns=total,
+            anchor=PrefixId(anchor) if anchor else None,
             chats=chats,
         )
 
@@ -376,6 +382,7 @@ class AgentDetailResponse(SparseModel):
         trace: bool = False,
         no_reasoning: bool = False,
         entries_map: Optional[dict] = None,
+        tool_detail: int = 80,
     ) -> AgentDetailResponse:
 
         output_file = None
@@ -392,6 +399,7 @@ class AgentDetailResponse(SparseModel):
             trace_lines = render_trace(
                 entries_map[found.agent_id],
                 show_reasoning=not no_reasoning,
+                tool_detail=tool_detail,
             )
 
         return cls(

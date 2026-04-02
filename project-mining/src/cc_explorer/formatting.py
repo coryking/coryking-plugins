@@ -23,7 +23,7 @@ from .models import (
     TextContent,
     ToolUseContent,
     TranscriptEntry,
-    summarize_tool_input,
+    format_tool_input,
 )
 from .subagents import SubagentInfo
 from .utils import PrefixId
@@ -53,7 +53,7 @@ def format_session_date(timestamp: datetime | None) -> str:
 # =============================================================================
 
 
-def format_entry_line(entry: TranscriptEntry, truncate: int = 500) -> str:
+def format_entry_line(entry: TranscriptEntry, truncate: int = 500, tool_detail: int = 80) -> str:
     """Format entry as pipe-delimited: timestamp|role|turn_id|full_length|display."""
     if not isinstance(entry, BaseTranscriptEntry):
         uuid = getattr(entry, 'uuid', None)
@@ -61,11 +61,11 @@ def format_entry_line(entry: TranscriptEntry, truncate: int = 500) -> str:
         return f"0|?|{turn_id}|0|[?]"
 
     # Get full display for length calculation
-    full = entry.display(truncate=0)
+    full = entry.display(truncate=0, tool_detail=tool_detail)
     full_length = len(full)
 
     # Get display (truncated or full based on param)
-    display = entry.display(truncate=truncate) if truncate else full
+    display = entry.display(truncate=truncate, tool_detail=tool_detail) if truncate else full
 
     ts = int(entry.timestamp.timestamp()) if entry.timestamp else 0
     role = "U" if isinstance(entry, HumanEntry) else "A"
@@ -80,7 +80,7 @@ def format_entry_line(entry: TranscriptEntry, truncate: int = 500) -> str:
 
 
 def render_trace(
-    entries: list[TranscriptEntry], show_reasoning: bool = True
+    entries: list[TranscriptEntry], show_reasoning: bool = True, tool_detail: int = 80
 ) -> list[str]:
     """Render a chronological trace of tool calls and reasoning."""
     lines: list[str] = []
@@ -95,7 +95,7 @@ def render_trace(
 
         for item in entry.message.content:
             if isinstance(item, ToolUseContent):
-                summary = summarize_tool_input(item.name, item.input)
+                summary = format_tool_input(item.name, item.input, max_length=tool_detail)
                 lines.append(f"{ts}  {item.name:<20s}{summary}")
                 ts = "        "
             elif isinstance(item, TextContent) and show_reasoning:

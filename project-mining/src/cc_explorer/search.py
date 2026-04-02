@@ -560,19 +560,37 @@ def browse_session_turns(
     session: SessionInfo,
     position: str,
     turns: int = 10,
+    anchor_turn: str | None = None,
+    entry_types: tuple[type, ...] = (HumanEntry, AssistantTranscriptEntry),
 ) -> tuple[list[TranscriptEntry], int]:
     """Return first or last N conversation turns from a session.
 
-    Filters to HumanEntry + AssistantTranscriptEntry (same as other tools).
+    Filters to entry_types (default: HumanEntry + AssistantTranscriptEntry).
+    If anchor_turn is set, tail reads forward from anchor, head reads up to anchor.
     Returns (sliced_entries, total_conversation_turns).
     """
     entries = load_transcript(session.path)
-    conversation = [
-        e for e in entries if isinstance(e, (HumanEntry, AssistantTranscriptEntry))
-    ]
+    conversation = [e for e in entries if isinstance(e, entry_types)]
     total = len(conversation)
-    if position == "tail":
-        sliced = conversation[-turns:] if turns < total else conversation
+
+    if anchor_turn:
+        anchor_idx = None
+        for i, e in enumerate(conversation):
+            if isinstance(e, BaseTranscriptEntry) and e.uuid == anchor_turn:
+                anchor_idx = i
+                break
+        if anchor_idx is None:
+            return [], total
+
+        if position == "tail":
+            sliced = conversation[anchor_idx : anchor_idx + turns]
+        else:
+            start = max(0, anchor_idx - turns + 1)
+            sliced = conversation[start : anchor_idx + 1]
     else:
-        sliced = conversation[:turns]
+        if position == "tail":
+            sliced = conversation[-turns:]
+        else:
+            sliced = conversation[:turns]
+
     return sliced, total

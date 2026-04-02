@@ -225,6 +225,12 @@ def grep_session(
             description="Max matches to return (like head -N). Overflow is truncated, not mode-switched."
         ),
     ] = 30,
+    tool_detail: Annotated[
+        int,
+        Field(
+            description="Max chars for tool input display. 0 = full input (JSON), 80 = compact summary (default).",
+        ),
+    ] = 80,
 ) -> GrepSessionResponse:
     """Show matches for a pattern within a single conversation, with surrounding context.
 
@@ -263,6 +269,7 @@ def grep_session(
         matches=result.matches,
         total=result.total_matches,
         limit=limit,
+        tool_detail=tool_detail,
     )
 
 
@@ -290,6 +297,12 @@ def read_turn(
             description="Max characters per entry in output. Entries exceeding this are truncated. Omit for full text."
         ),
     ] = None,
+    tool_detail: Annotated[
+        int,
+        Field(
+            description="Max chars for tool input display. 0 = full input (JSON), 80 = compact summary (default).",
+        ),
+    ] = 80,
 ) -> ReadTurnResponse:
     """Read a specific moment in a conversation at full fidelity.
 
@@ -307,7 +320,7 @@ def read_turn(
     if not entries:
         raise ToolError(f"Turn {turn} not found")
 
-    return ReadTurnResponse.from_entries(session_info, turn, entries, limit=limit)
+    return ReadTurnResponse.from_entries(session_info, turn, entries, limit=limit, tool_detail=tool_detail)
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -334,16 +347,34 @@ def browse_session(
         int,
         Field(description="Number of conversation turns to return.", ge=1, le=50),
     ] = 10,
+    turn: Annotated[
+        str | None,
+        Field(
+            description="Turn UUID to anchor on. With 'tail': read forward from this turn. With 'head': read up to this turn. Omit to read from actual start/end.",
+        ),
+    ] = None,
+    role: Annotated[
+        ConversationRole,
+        Field(
+            description="Which side to show: 'user' for human messages only, 'assistant' for agent responses only, 'all' for both.",
+        ),
+    ] = ConversationRole.all,
     limit: Annotated[
         int | None,
         Field(
             description="Max characters per entry in output. Entries exceeding this are truncated. Omit for full text."
         ),
-    ] = 500,
+    ] = None,
+    tool_detail: Annotated[
+        int,
+        Field(
+            description="Max chars for tool input display. 0 = full input (JSON), 80 = compact summary (default).",
+        ),
+    ] = 80,
 ) -> BrowseSessionResponse:
     """Read the first or last N turns of a conversation — like head/tail on a session.
 
-    Quick orientation tool: see how a conversation started or where it ended up without needing a search pattern. Use 'head' to understand what the session was about, 'tail' to see the conclusion.
+    Quick orientation tool: see how a conversation started or where it ended up without needing a search pattern. Use 'head' to understand what the session was about, 'tail' to see the conclusion. Pass a turn UUID to anchor and paginate through a session.
     """
     if position not in ("head", "tail"):
         raise ToolError(f"position must be 'head' or 'tail', got: {position!r}")
@@ -357,9 +388,14 @@ def browse_session(
     if not target:
         raise ToolError(f"No session matching: {session}")
 
-    entries, total = browse_session_turns(target[0], position, turns)
+    entry_types = ENTRY_TYPE_MAP[role]
+    entries, total = browse_session_turns(
+        target[0], position, turns, anchor_turn=turn, entry_types=entry_types
+    )
 
     if not entries:
+        if turn:
+            raise ToolError(f"Turn {turn} not found in session {session}")
         raise ToolError(f"Session {session} has no conversation turns")
 
     truncate = limit if limit else 0
@@ -369,6 +405,8 @@ def browse_session(
         entries=entries,
         total=total,
         truncate=truncate,
+        tool_detail=tool_detail,
+        anchor=turn,
     )
 
 
@@ -477,6 +515,12 @@ def get_agent_detail(
         Field(description="Omit reasoning text from trace output."),
     ] = False,
     compaction: Annotated[bool, Field(description="Show compaction details.")] = False,
+    tool_detail: Annotated[
+        int,
+        Field(
+            description="Max chars for tool input display in traces. 0 = full input (JSON), 80 = compact summary (default).",
+        ),
+    ] = 80,
 ) -> AgentDetailResponse | AgentListResponse:
     """Get full prompt, result, stats, and optional tool trace for specific agent(s)."""
     proj = resolve_project(project)
@@ -509,6 +553,7 @@ def get_agent_detail(
                 trace=trace,
                 no_reasoning=no_reasoning,
                 entries_map=entries_map,
+                tool_detail=tool_detail,
             )
         )
 

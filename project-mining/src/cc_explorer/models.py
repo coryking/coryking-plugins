@@ -180,12 +180,12 @@ class AssistantTranscriptEntry(BaseTranscriptEntry):
     message: AssistantMessageModel
     requestId: Optional[str] = None
 
-    def display(self, truncate: int = 500) -> str:
+    def display(self, truncate: int = 500, tool_detail: int = 80) -> str:
         text = extract_text(self)
         tool_summaries: list[str] = []
         for item in self.message.content:
             if isinstance(item, ToolUseContent):
-                summary = summarize_tool_input(item.name, item.input)
+                summary = format_tool_input(item.name, item.input, max_length=tool_detail)
                 tool_summaries.append(f"→ {item.name}({summary})")
         parts: list[str] = []
         if text:
@@ -402,33 +402,45 @@ def extract_text(entry: Union[HumanEntry, AssistantTranscriptEntry]) -> str:
 # =============================================================================
 
 
-def summarize_tool_input(name: str, inp: dict[str, Any]) -> str:
-    """Summarize a tool's input to ~80 chars for trace and entry display."""
+def format_tool_input(name: str, inp: dict[str, Any], max_length: int = 80) -> str:
+    """Format a tool's input for display.
+
+    max_length controls truncation: 0 = full input, N = cap at N chars.
+    Per-tool-name logic picks the most relevant field to show;
+    max_length controls how much of it is visible.
+    """
+    import json
+
+    def _cap(s: str) -> str:
+        if max_length and len(s) > max_length:
+            return s[: max_length - 3] + "..."
+        return s
+
+    if max_length == 0:
+        # Full input — JSON-format the entire input dict
+        return json.dumps(inp, indent=2, default=str)
+
     if name == "Read" and "file_path" in inp:
-        return inp["file_path"]
+        return _cap(inp["file_path"])
     if name in ("navigate", "WebFetch") and "url" in inp:
-        url = inp["url"]
-        return url[:80] if len(url) > 80 else url
+        return _cap(inp["url"])
     if name == "javascript_tool" and "text" in inp:
-        text = inp["text"]
-        return text[:60] + "..." if len(text) > 60 else text
+        return _cap(inp["text"])
     if name == "Grep" and "pattern" in inp:
         s = f"/{inp['pattern']}/"
         if "path" in inp:
             s += f" {inp['path']}"
-        return s[:80]
+        return _cap(s)
     if name == "Glob" and "pattern" in inp:
         s = inp["pattern"]
         if "path" in inp:
             s += f" in {inp['path']}"
-        return s[:80]
+        return _cap(s)
     if name == "Edit" and "file_path" in inp:
-        return inp["file_path"]
+        return _cap(inp["file_path"])
     if name == "Write" and "file_path" in inp:
-        return inp["file_path"]
+        return _cap(inp["file_path"])
     if name == "Bash" and "command" in inp:
-        cmd = inp["command"]
-        return cmd[:80] if len(cmd) > 80 else cmd
+        return _cap(inp["command"])
     # Default: stringify and truncate
-    s = str(inp)
-    return s[:80] if len(s) > 80 else s
+    return _cap(str(inp))
