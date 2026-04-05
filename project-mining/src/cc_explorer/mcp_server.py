@@ -14,6 +14,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from .formatting import matches_id
+from .models import AssistantTranscriptEntry, ToolResultEntry, parse_agent_content
 from .utils import PrefixId
 from .responses import (
     AgentDetailResponse,
@@ -229,14 +230,21 @@ def grep_session(
     truncate: Annotated[
         int,
         Field(
-            description="Truncate each content piece (text, tool inputs) to N chars. 0 = full content.",
+            description="Truncate each content piece (text, tool inputs/outputs) to N chars. 0 = full content.",
         ),
     ] = 500,
+    agent_content: Annotated[
+        str | None,
+        Field(
+            description="Comma-separated content to show for assistant turns beyond text: 'thinking', 'inputs' (tool call summaries), 'outputs' (tool results). Default: 'inputs'. Empty string = text only. Pair with truncate when using 'outputs' — tool results can be very large.",
+        ),
+    ] = None,
 ) -> GrepSessionResponse:
     """Show matches for a pattern within a single conversation, with surrounding context.
 
     Like `rg -C3` on a single file — returns matching entries with surrounding turns for context. Each entry includes its full character length so you can gauge size before calling read_turn.
     """
+    content_set = parse_agent_content(agent_content)
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
@@ -260,6 +268,7 @@ def grep_session(
         context,
         max_results=limit,
         scope=scope,
+        agent_content=content_set,
     )
 
     if not result.matches:
@@ -271,6 +280,7 @@ def grep_session(
         total=result.total_matches,
         limit=limit,
         truncate=truncate,
+        agent_content=content_set,
     )
 
 
@@ -295,9 +305,15 @@ def read_turn(
     truncate: Annotated[
         int,
         Field(
-            description="Truncate each content piece (text, tool inputs) to N chars. 0 = full content.",
+            description="Truncate each content piece (text, tool inputs/outputs) to N chars. 0 = full content.",
         ),
     ] = 0,
+    agent_content: Annotated[
+        str | None,
+        Field(
+            description="Comma-separated content to show for assistant turns beyond text: 'thinking', 'inputs' (tool call summaries), 'outputs' (tool results). Default: 'inputs'. Empty string = text only. Pair with truncate when using 'outputs' — tool results can be very large.",
+        ),
+    ] = None,
 ) -> ReadTurnResponse:
     """Read a specific moment in a conversation at full fidelity.
 
@@ -305,17 +321,18 @@ def read_turn(
 
     Use the full_length values from grep_session to gauge entry sizes before reading.
     """
+    content_set = parse_agent_content(agent_content)
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
         raise ToolError(f"No conversations found for {proj}")
 
-    session_info, entries = get_turn_context(sessions, turn, context)
+    session_info, entries = get_turn_context(sessions, turn, context, agent_content=content_set)
 
     if not entries:
         raise ToolError(f"Turn {turn} not found")
 
-    return ReadTurnResponse.from_entries(session_info, turn, entries, truncate=truncate)
+    return ReadTurnResponse.from_entries(session_info, turn, entries, truncate=truncate, agent_content=content_set)
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -357,14 +374,21 @@ def browse_session(
     truncate: Annotated[
         int,
         Field(
-            description="Truncate each content piece (text, tool inputs) to N chars. 0 = full content.",
+            description="Truncate each content piece (text, tool inputs/outputs) to N chars. 0 = full content.",
         ),
     ] = 0,
+    agent_content: Annotated[
+        str | None,
+        Field(
+            description="Comma-separated content to show for assistant turns beyond text: 'thinking', 'inputs' (tool call summaries), 'outputs' (tool results). Default: 'inputs'. Empty string = text only. Pair with truncate when using 'outputs' — tool results can be very large.",
+        ),
+    ] = None,
 ) -> BrowseSessionResponse:
     """Read the first or last N turns of a conversation — like head/tail on a session.
 
     Quick orientation tool: see how a conversation started or where it ended up without needing a search pattern. Use 'head' to understand what the session was about, 'tail' to see the conclusion. Pass a turn UUID to anchor and paginate through a session.
     """
+    content_set = parse_agent_content(agent_content)
     if position not in ("head", "tail"):
         raise ToolError(f"position must be 'head' or 'tail', got: {position!r}")
 
@@ -378,6 +402,10 @@ def browse_session(
         raise ToolError(f"No session matching: {session}")
 
     entry_types = ENTRY_TYPE_MAP[role]
+    # Add ToolResultEntry when outputs requested and assistant entries are included
+    if "outputs" in content_set and AssistantTranscriptEntry in entry_types:
+        entry_types = entry_types + (ToolResultEntry,)
+
     entries, total = browse_session_turns(
         target[0], position, turns, anchor_turn=turn, entry_types=entry_types
     )
@@ -394,6 +422,7 @@ def browse_session(
         total=total,
         truncate=truncate,
         anchor=turn,
+        agent_content=content_set,
     )
 
 

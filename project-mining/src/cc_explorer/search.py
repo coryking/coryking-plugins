@@ -13,9 +13,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .models import (
+    DEFAULT_AGENT_CONTENT,
     AssistantTranscriptEntry,
     BaseTranscriptEntry,
     HumanEntry,
+    ToolResultEntry,
     ToolUseContent,
     TranscriptEntry,
     TranscriptStats,
@@ -173,6 +175,20 @@ ENTRY_TYPE_MAP: dict[str, tuple[type, ...]] = {
 }
 
 
+def conversation_types_for(
+    agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+) -> tuple[type, ...]:
+    """Determine entry types to include based on agent_content.
+
+    ToolResultEntry is only included when 'outputs' is requested and
+    AssistantTranscriptEntry is present (tool results are assistant-side).
+    """
+    base = (HumanEntry, AssistantTranscriptEntry)
+    if "outputs" in agent_content:
+        return base + (ToolResultEntry,)
+    return base
+
+
 # =============================================================================
 # Session loading
 # =============================================================================
@@ -324,15 +340,15 @@ def _get_context(
     idx: int,
     context: int,
     entry_types: tuple[type, ...],
+    agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
 ) -> tuple[list[TranscriptEntry], list[TranscriptEntry]]:
     """Get context entries around a match, filtered to conversation types."""
-    # For context, include both human and assistant entries regardless of search type
-    conversation_types = (HumanEntry, AssistantTranscriptEntry)
+    conv_types = conversation_types_for(agent_content)
 
     before: list[TranscriptEntry] = []
     count = 0
     for i in range(idx - 1, -1, -1):
-        if isinstance(entries[i], conversation_types):
+        if isinstance(entries[i], conv_types):
             before.insert(0, entries[i])
             count += 1
             if count >= context:
@@ -341,7 +357,7 @@ def _get_context(
     after: list[TranscriptEntry] = []
     count = 0
     for i in range(idx + 1, len(entries)):
-        if isinstance(entries[i], conversation_types):
+        if isinstance(entries[i], conv_types):
             after.append(entries[i])
             count += 1
             if count >= context:
@@ -432,6 +448,7 @@ def search(
     session_id: str | None = None,
     max_results: int = 30,
     scope: ScopeType = ScopeType.messages,
+    agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
 ) -> SearchResult:
     """Search for pattern across sessions. Returns matching entries with context.
 
@@ -456,7 +473,7 @@ def search(
             if not _entry_matches(entry, compiled, scope):
                 continue
 
-            before, after = _get_context(entries, idx, context, entry_types)
+            before, after = _get_context(entries, idx, context, entry_types, agent_content)
             session_matches.append(
                 MatchHit(
                     session_id=session.session_id,
@@ -511,13 +528,14 @@ def get_turn_context(
     sessions: list[SessionInfo],
     turn_uuid: str,
     context: int = 3,
+    agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
 ) -> tuple[SessionInfo | None, list[TranscriptEntry]]:
     """Find a turn by UUID across all sessions and return surrounding entries.
 
     Turn UUIDs are globally unique — no need to specify session.
     Returns (session_info, entries) where entries includes context.
     """
-    conversation_types = (HumanEntry, AssistantTranscriptEntry)
+    conv_types = conversation_types_for(agent_content)
 
     for session in sessions:
         entries = load_transcript(session.path)
@@ -534,7 +552,7 @@ def get_turn_context(
             count = 0
             before_start = idx
             for i in range(idx - 1, -1, -1):
-                if isinstance(entries[i], conversation_types):
+                if isinstance(entries[i], conv_types):
                     before_start = i
                     count += 1
                     if count >= context:
@@ -543,7 +561,7 @@ def get_turn_context(
             # Collect from before_start through context after
             count_after = 0
             for i in range(before_start, len(entries)):
-                if isinstance(entries[i], conversation_types):
+                if isinstance(entries[i], conv_types):
                     result.append(entries[i])
                     if i > idx:
                         count_after += 1

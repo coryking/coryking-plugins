@@ -138,4 +138,16 @@ cc-explorer wraps typed Pydantic models (adapted from `claude-code-log`, MIT) ar
 
 The MCP server architecture eliminated the final friction: researchers no longer need to invoke shell commands at all. Tools appear natively in the agent's tool palette.
 
+### The `agent_content` display parameter
+
+Display tools (`grep_session`, `read_turn`, `browse_session`) accepted `truncate` to control content length, but had no way to toggle what *categories* of content to show. Tool inputs were always on; tool outputs and thinking blocks were always off.
+
+`agent_content` is a comma-separated set of atoms (`thinking`, `inputs`, `outputs`) controlling what's shown for assistant turns beyond the always-present text. Default `"inputs"` preserves backward compatibility. The parameter is orthogonal to existing controls: `truncate` governs length of whatever's visible, `role` filters which entries appear, `scope` (on search tools) controls what's searched.
+
+Key design choices:
+- **Text is always shown** — no atom for it. The param controls extras.
+- **Tool outputs are separate entries** — `ToolResultEntry` gets role marker `"T"` in pipe-delimited output, interleaved positionally after the assistant turn that triggered them. No tool name on output lines (positional pairing is sufficient).
+- **`message.content` ToolResultContent is the display source** for outputs (human-readable text Claude saw), not `toolUseResult` (raw structured metadata).
+- **ThinkingContent** was already parsed but silently dropped — `thinking` atom surfaces it with `[thinking]` prefix.
+
 See `docs/` for the JSONL format reference and other design documentation.

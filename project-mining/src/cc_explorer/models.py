@@ -30,6 +30,35 @@ NoneAsZero = Annotated[int, BeforeValidator(lambda v: 0 if v is None else v)]
 
 
 # =============================================================================
+# Agent content visibility
+# =============================================================================
+
+
+AGENT_CONTENT_ATOMS = frozenset({"thinking", "inputs", "outputs"})
+DEFAULT_AGENT_CONTENT = frozenset({"inputs"})
+
+
+def parse_agent_content(value: str | None) -> frozenset[str]:
+    """Parse comma-separated agent_content string into a validated frozenset.
+
+    None → DEFAULT_AGENT_CONTENT (backward compat)
+    "" → empty set (text only)
+    "inputs,outputs" → frozenset({"inputs", "outputs"})
+    """
+    if value is None:
+        return DEFAULT_AGENT_CONTENT
+    if not value.strip():
+        return frozenset()
+    atoms = frozenset(a.strip() for a in value.split(",") if a.strip())
+    invalid = atoms - AGENT_CONTENT_ATOMS
+    if invalid:
+        raise ValueError(
+            f"Invalid agent_content atoms: {invalid}. Valid: {sorted(AGENT_CONTENT_ATOMS)}"
+        )
+    return atoms
+
+
+# =============================================================================
 # Content Models
 # =============================================================================
 
@@ -137,9 +166,12 @@ class BaseTranscriptEntry(BaseModel):
     agentId: Optional[PrefixId] = None
     gitBranch: Optional[str] = None
 
-    def display(self, truncate: int) -> str:
+    def display(
+        self,
+        truncate: int,
+        agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+    ) -> str:
         """Short display string for unknown entry kinds (no role/id; pipe line carries that)."""
-        _ = truncate  # unused here; same signature as HumanEntry / AssistantTranscriptEntry
         return "[?]"
 
 
@@ -149,7 +181,11 @@ class HumanEntry(BaseTranscriptEntry):
     message: UserMessageModel
     isMeta: Optional[bool] = None
 
-    def display(self, truncate: int) -> str:
+    def display(
+        self,
+        truncate: int,
+        agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+    ) -> str:
         text = extract_text(self)
         return smart_truncate(text, truncate)
 
@@ -161,6 +197,40 @@ class ToolResultEntry(BaseTranscriptEntry):
     toolUseResult: Optional[ToolUseResult] = None
     isMeta: Optional[bool] = None
     agentId: Optional[str] = None
+
+    def display(
+        self,
+        truncate: int,
+        agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+    ) -> str:
+        """Render tool output. Only shown when 'outputs' is in agent_content."""
+        if "outputs" not in agent_content:
+            return ""
+        return self._render_output(truncate)
+
+    def _render_output(self, truncate: int) -> str:
+        """Extract and format tool result from message.content ToolResultContent items."""
+        parts: list[str] = []
+        content = self.message.content
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, ToolResultContent):
+                    error_prefix = "[error] " if item.is_error else ""
+                    if isinstance(item.content, str):
+                        text = smart_truncate(item.content, truncate)
+                        parts.append(f"{error_prefix}{text}")
+                    elif isinstance(item.content, list):
+                        for block in item.content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = smart_truncate(block.get("text", ""), truncate)
+                                parts.append(f"{error_prefix}{text}")
+                            elif isinstance(block, dict) and block.get("type") == "image":
+                                parts.append("[image]")
+        elif isinstance(content, str):
+            text = _strip_system_xml(content)
+            if text:
+                parts.append(smart_truncate(text, truncate))
+        return "  ".join(parts) if parts else ""
 
 
 class MetaEntry(BaseTranscriptEntry):
@@ -177,18 +247,34 @@ class AssistantTranscriptEntry(BaseTranscriptEntry):
     message: AssistantMessageModel
     requestId: Optional[str] = None
 
-    def display(self, truncate: int) -> str:
-        text = extract_text(self)
-        tool_summaries: list[str] = []
-        for item in self.message.content:
-            if isinstance(item, ToolUseContent):
-                detail = format_tool_input(item.name, item.input, truncate=truncate)
-                tool_summaries.append(f"→ {item.name}({detail})")
+    def display(
+        self,
+        truncate: int,
+        agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+    ) -> str:
         parts: list[str] = []
+
+        # Thinking — only if "thinking" in agent_content
+        if "thinking" in agent_content:
+            for item in self.message.content:
+                if isinstance(item, ThinkingContent) and item.thinking.strip():
+                    parts.append(f"[thinking] {smart_truncate(item.thinking.strip(), truncate)}")
+
+        # Text — always shown
+        text = extract_text(self)
         if text:
             parts.append(smart_truncate(text, truncate))
-        if tool_summaries:
-            parts.append("  ".join(tool_summaries))
+
+        # Tool inputs — only if "inputs" in agent_content
+        if "inputs" in agent_content:
+            tool_summaries: list[str] = []
+            for item in self.message.content:
+                if isinstance(item, ToolUseContent):
+                    detail = format_tool_input(item.name, item.input, truncate=truncate)
+                    tool_summaries.append(f"→ {item.name}({detail})")
+            if tool_summaries:
+                parts.append("  ".join(tool_summaries))
+
         return "  ".join(parts) if parts else ""
 
 

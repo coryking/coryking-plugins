@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from .formatting import format_entry_line, format_session_date, format_session_ref, render_trace
+from .models import DEFAULT_AGENT_CONTENT
 from .utils import PrefixId
 
 if TYPE_CHECKING:
@@ -182,6 +183,7 @@ class GrepSessionResponse(SparseModel):
         total: int,
         limit: int,
         truncate: int,
+        agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
     ) -> GrepSessionResponse:
 
         overflow = None
@@ -190,9 +192,9 @@ class GrepSessionResponse(SparseModel):
 
         match_blocks: list[MatchBlock] = []
         for match in matches:
-            chats: list[str] = [format_entry_line(e, truncate=truncate) for e in match.context_before]
-            chats.append(format_entry_line(match.entry, truncate=truncate))
-            chats.extend(format_entry_line(e, truncate=truncate) for e in match.context_after)
+            chats: list[str] = [format_entry_line(e, truncate=truncate, agent_content=agent_content) for e in match.context_before]
+            chats.append(format_entry_line(match.entry, truncate=truncate, agent_content=agent_content))
+            chats.extend(format_entry_line(e, truncate=truncate, agent_content=agent_content) for e in match.context_after)
             match_blocks.append(MatchBlock(chats=chats))
 
         return cls(
@@ -225,9 +227,10 @@ class ReadTurnResponse(SparseModel):
         turn: str,
         entries: list,
         truncate: int,
+        agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
     ) -> ReadTurnResponse:
 
-        chats = [format_entry_line(e, truncate=truncate) for e in entries]
+        chats = [format_entry_line(e, truncate=truncate, agent_content=agent_content) for e in entries]
 
         return cls(
             session_id=PrefixId(session_info.session_id) if session_info else None,
@@ -262,8 +265,9 @@ class BrowseSessionResponse(SparseModel):
         total: int,
         truncate: int,
         anchor: str | None = None,
+        agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
     ) -> BrowseSessionResponse:
-        chats = [format_entry_line(e, truncate=truncate) for e in entries]
+        chats = [format_entry_line(e, truncate=truncate, agent_content=agent_content) for e in entries]
         return cls(
             session_id=PrefixId(session_id),
             position=position,

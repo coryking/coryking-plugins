@@ -25,7 +25,19 @@ Four tools for exploring chat content, each operating at a different scope — l
 
 Each step narrows scope and increases fidelity. No tool switches modes or changes output shape based on hit volume.
 
-Entry text in `grep_session` and `read_turn` output uses pipe-delimited format: `timestamp|role|turn_id|full_length|display`. The tool descriptions document this format in detail.
+Entry text in `grep_session`, `read_turn`, and `browse_session` output uses pipe-delimited format: `timestamp|role|turn_id|full_length|display`. Roles: `U` = user, `A` = assistant, `T` = tool result (output from a tool call). The tool descriptions document this format in detail.
+
+### Controlling assistant turn detail with `agent_content`
+
+`grep_session`, `read_turn`, and `browse_session` accept an `agent_content` parameter — a comma-separated set of content atoms to show for assistant turns, beyond the always-present text:
+
+| Atom | What it shows |
+|------|--------------|
+| `thinking` | Extended thinking blocks (prefixed with `[thinking]`) |
+| `inputs` | Tool call summaries (`→ Bash(git status)`) |
+| `outputs` | Tool results (separate `T`-role entries interleaved after assistant turns) |
+
+Default is `"inputs"` (matches traditional behavior). Empty string `""` shows text only. Use `"inputs,outputs"` to see full tool round-trips. Pair `outputs` with `truncate` — tool results can be very large.
 
 ## The agent inspection tools
 
