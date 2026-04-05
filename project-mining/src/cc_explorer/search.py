@@ -180,8 +180,10 @@ def conversation_types_for(
 ) -> tuple[type, ...]:
     """Determine entry types to include based on agent_content.
 
-    ToolResultEntry is only included when 'outputs' is requested and
-    AssistantTranscriptEntry is present (tool results are assistant-side).
+    ToolResultEntry is added when 'outputs' is requested (tool results
+    are assistant-side content). Callers that filter by role should
+    check that AssistantTranscriptEntry is in their entry_types before
+    adding ToolResultEntry — see browse_session in mcp_server.py.
     """
     base = (HumanEntry, AssistantTranscriptEntry)
     if "outputs" in agent_content:
@@ -559,9 +561,10 @@ def get_turn_context(
                         break
 
             # Collect from before_start through context after
+            # Always include the target turn even if it's not in conv_types
             count_after = 0
             for i in range(before_start, len(entries)):
-                if isinstance(entries[i], conv_types):
+                if i == idx or isinstance(entries[i], conv_types):
                     result.append(entries[i])
                     if i > idx:
                         count_after += 1

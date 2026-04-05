@@ -244,7 +244,10 @@ def grep_session(
 
     Like `rg -C3` on a single file — returns matching entries with surrounding turns for context. Each entry includes its full character length so you can gauge size before calling read_turn.
     """
-    content_set = parse_agent_content(agent_content)
+    try:
+        content_set = parse_agent_content(agent_content)
+    except ValueError as e:
+        raise ToolError(str(e))
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
@@ -321,7 +324,10 @@ def read_turn(
 
     Use the full_length values from grep_session to gauge entry sizes before reading.
     """
-    content_set = parse_agent_content(agent_content)
+    try:
+        content_set = parse_agent_content(agent_content)
+    except ValueError as e:
+        raise ToolError(str(e))
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
@@ -388,7 +394,10 @@ def browse_session(
 
     Quick orientation tool: see how a conversation started or where it ended up without needing a search pattern. Use 'head' to understand what the session was about, 'tail' to see the conclusion. Pass a turn UUID to anchor and paginate through a session.
     """
-    content_set = parse_agent_content(agent_content)
+    try:
+        content_set = parse_agent_content(agent_content)
+    except ValueError as e:
+        raise ToolError(str(e))
     if position not in ("head", "tail"):
         raise ToolError(f"position must be 'head' or 'tail', got: {position!r}")
 
