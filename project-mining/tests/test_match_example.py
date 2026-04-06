@@ -10,7 +10,7 @@ Two bugs:
 
 import re
 
-from cc_explorer.search import _match_example
+from cc_explorer.formatting import _match_example
 
 
 class TestMatchExampleCentering:

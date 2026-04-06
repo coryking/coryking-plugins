@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .formatting import format_entry_line, format_session_date, format_session_ref, render_trace
+from .formatting import format_entry_line, format_session_date, render_trace
 from .utils import PrefixId
 
 if TYPE_CHECKING:

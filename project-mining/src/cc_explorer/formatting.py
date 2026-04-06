@@ -36,18 +36,53 @@ from .utils import PrefixId, smart_truncate
 # =============================================================================
 
 
-def format_session_ref(session_id: str, timestamp: datetime | None) -> str:
-    """Format a session reference: 'session_id (YYYY-MM-DD)' or bare id if no timestamp."""
-    if timestamp:
-        return f"{session_id} ({timestamp.strftime('%Y-%m-%d')})"
-    return str(session_id)
-
-
 def format_session_date(timestamp: datetime | None) -> str:
     """Format a session date as YYYY-MM-DD, or empty string if no timestamp."""
     if timestamp:
         return timestamp.strftime("%Y-%m-%d")
     return ""
+
+
+# =============================================================================
+# Excerpt extraction
+# =============================================================================
+
+
+def _match_example(text: str, pattern: re.Pattern, width: int = 150) -> str:
+    """Extract an example excerpt centered on the first match within text.
+
+    Centers the window so the match start is visible (not the midpoint of a
+    greedy span). Snaps slice boundaries to word breaks to avoid fragments.
+    Used for both per-session triage examples and grep_session match-line
+    rendering — anywhere a long body needs to surface a specific hit.
+    """
+    # Collapse whitespace for display
+    text = re.sub(r"\s+", " ", text).strip()
+    m = pattern.search(text)
+    if not m:
+        return text[:width]
+    # Start the window a few words before the match so there's leading context
+    match_start = m.start()
+    lead = min(30, match_start)  # up to 30 chars of leading context
+    start = max(0, match_start - lead)
+    end = min(len(text), start + width)
+    # If we hit the end, pull the start back
+    if end - start < width:
+        start = max(0, end - width)
+    # Snap start forward to a word boundary (space) if we're mid-word
+    if start > 0:
+        space = text.find(" ", start)
+        if space != -1 and space < match_start:
+            start = space + 1
+    # Snap end back to a word boundary
+    if end < len(text):
+        space = text.rfind(" ", start, end)
+        if space > start:
+            end = space
+    snippet = text[start:end]
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(text) else ""
+    return f"{prefix}{snippet}{suffix}"
 
 
 # =============================================================================
@@ -81,7 +116,6 @@ def format_entry_line(
     if truncate:
         if center_pattern is not None:
             # Center the excerpt on the first match so mid-entry hits stay visible
-            from .search import _match_example
             display = _match_example(full, center_pattern, width=truncate)
         else:
             display = entry.display(truncate=truncate, hide=hide)

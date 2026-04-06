@@ -62,6 +62,18 @@ def _filter_by_date(
     return sessions
 
 
+def _parse_hide_or_raise(value: str | None) -> frozenset[str]:
+    """parse_hide that converts ValueError to ToolError for MCP entry points.
+
+    Lives here (not in models.py) to keep FastMCP exception types out of the
+    pure-data layer. The three display tools all need this conversion.
+    """
+    try:
+        return parse_hide(value)
+    except ValueError as e:
+        raise ToolError(str(e))
+
+
 # =============================================================================
 # Conversation tools
 # =============================================================================
@@ -232,10 +244,7 @@ def grep_session(
 
     Match blocks are returned with three fields: `before` (context turns before), `match` (the matching entry, excerpted on the hit so it stays visible even when truncated), and `after` (context turns after).
     """
-    try:
-        hide_set = parse_hide(hide)
-    except ValueError as e:
-        raise ToolError(str(e))
+    hide_set = _parse_hide_or_raise(hide)
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
@@ -318,10 +327,7 @@ def read_turn(
 
     Use the full_length values from grep_session to gauge entry sizes before reading. Use `context=N` to control the radius (turns on each side of the anchor).
     """
-    try:
-        hide_set = parse_hide(hide)
-    except ValueError as e:
-        raise ToolError(str(e))
+    hide_set = _parse_hide_or_raise(hide)
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
@@ -403,10 +409,7 @@ def browse_session(
 
     `turns=N` controls how many turns to return from the position (a linear window). This differs from `read_turn` and `grep_session` where `context=N` means a radius around an anchor.
     """
-    try:
-        hide_set = parse_hide(hide)
-    except ValueError as e:
-        raise ToolError(str(e))
+    hide_set = _parse_hide_or_raise(hide)
     if position not in ("head", "tail"):
         raise ToolError(f"position must be 'head' or 'tail', got: {position!r}")
 

@@ -24,6 +24,7 @@ from .models import (
     extract_text,
     extract_thinking_text,
 )
+from .formatting import _match_example
 from .parser import load_conversations, load_transcript
 from .utils import smart_truncate
 
@@ -165,7 +166,6 @@ PatternTriageResults = list[tuple[str, list[TriageResult]]]
 # via conversation_types_for() when outputs are visible and assistant is in scope.
 ENTRY_TYPE_MAP: dict[str, tuple[type, ...]] = {
     "user": (HumanEntry,),
-    "human": (HumanEntry,),  # legacy alias
     "assistant": (AssistantTranscriptEntry,),
     "all": (HumanEntry, AssistantTranscriptEntry),
 }
@@ -268,41 +268,6 @@ def load_sessions(project_path: str) -> list[SessionInfo]:
 # =============================================================================
 
 
-def _match_example(text: str, pattern: re.Pattern, width: int = 150) -> str:
-    """Extract an example excerpt starting at the first match within text.
-
-    Centers the window so the match start is visible (not the midpoint of a
-    greedy span). Snaps slice boundaries to word breaks to avoid fragments.
-    """
-    # Collapse whitespace for display
-    text = re.sub(r"\s+", " ", text).strip()
-    m = pattern.search(text)
-    if not m:
-        return text[:width]
-    # Start the window a few words before the match so there's leading context
-    match_start = m.start()
-    lead = min(30, match_start)  # up to 30 chars of leading context
-    start = max(0, match_start - lead)
-    end = min(len(text), start + width)
-    # If we hit the end, pull the start back
-    if end - start < width:
-        start = max(0, end - width)
-    # Snap start forward to a word boundary (space) if we're mid-word
-    if start > 0:
-        space = text.find(" ", start)
-        if space != -1 and space < match_start:
-            start = space + 1
-    # Snap end back to a word boundary
-    if end < len(text):
-        space = text.rfind(" ", start, end)
-        if space > start:
-            end = space
-    snippet = text[start:end]
-    prefix = "..." if start > 0 else ""
-    suffix = "..." if end < len(text) else ""
-    return f"{prefix}{snippet}{suffix}"
-
-
 def _entry_matches(
     entry: TranscriptEntry,
     pattern: re.Pattern,
@@ -380,6 +345,9 @@ def _get_context(
 # =============================================================================
 
 
+# Kept as the single-pattern reference implementation — test_triage_multi.py
+# uses it as the oracle in the equivalence test for triage_multi(). Delete
+# only if that equivalence test goes away.
 def triage(
     sessions: list[SessionInfo],
     pattern: str,
