@@ -48,7 +48,7 @@ class TestFormatEntryLine:
 
 
 class TestGrepSessionResponseSerialization:
-    def test_session_id_is_8_chars(self, human_entry):
+    def test_session_is_8_chars(self, human_entry):
         match = MatchHit(
             session_id=FULL_UUID,
             turn_uuid=FULL_UUID,
@@ -62,18 +62,19 @@ class TestGrepSessionResponseSerialization:
             total=1,
             limit=30,
             truncate=500,
+            pattern="hello",
         )
         dumped = resp.model_dump()
-        assert len(dumped["session_id"]) == 8
-        assert dumped["session_id"] == "a9529cc1"
+        assert len(dumped["session"]) == 8
+        assert dumped["session"] == "a9529cc1"
 
 
 class TestReadTurnResponseSerialization:
     def test_ids_are_8_chars(self, human_entry, session_info):
         resp = ReadTurnResponse.from_entries(session_info, FULL_UUID, [human_entry], truncate=0)
         dumped = resp.model_dump()
-        assert len(dumped["session_id"]) == 8
-        assert len(dumped["turn_id"]) == 8
+        assert len(dumped["session"]) == 8
+        assert len(dumped["turn"]) == 8
 
 
 # =============================================================================

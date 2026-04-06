@@ -27,17 +27,17 @@ Each step narrows scope and increases fidelity. No tool switches modes or change
 
 Entry text in `grep_session`, `read_turn`, and `browse_session` output uses pipe-delimited format: `timestamp|role|turn_id|full_length|display`. Roles: `U` = user, `A` = assistant, `T` = tool result (output from a tool call). The tool descriptions document this format in detail.
 
-### Controlling assistant turn detail with `agent_content`
+### Controlling assistant turn detail with `hide`
 
-`grep_session`, `read_turn`, and `browse_session` accept an `agent_content` parameter — a comma-separated set of content atoms to show for assistant turns, beyond the always-present text:
+`grep_session`, `read_turn`, and `browse_session` accept a `hide` parameter — a comma-separated set of assistant-turn content atoms to suppress from both search and display:
 
-| Atom | What it shows |
+| Atom | What it suppresses |
 |------|--------------|
 | `thinking` | Extended thinking blocks (prefixed with `[thinking]`) |
 | `inputs` | Tool call summaries (`→ Bash(git status)`) |
 | `outputs` | Tool results (separate `T`-role entries interleaved after assistant turns) |
 
-Default is `"inputs"` (matches traditional behavior). Empty string `""` shows text only. Use `"inputs,outputs"` to see full tool round-trips. Pair `outputs` with `truncate` — tool results can be very large.
+Default is `""` (show and search everything). Pass `hide="outputs"` to suppress noisy tool results, or `hide="inputs,outputs,thinking"` for a text-only view. Text is always shown. When tool outputs are huge, control volume with `truncate` — `hide` is for category filtering, not size management.
 
 ## The agent inspection tools
 
@@ -82,4 +82,4 @@ Trace subagent execution top-down: `list_agent_sessions` identifies which sessio
 - Turn UUIDs from grep_session are the bridge to read_turn — grab them when you find something interesting.
 - `full_length` in grep output tells you how big an entry is before you read it. Large values (5000+) mean tool results or long outputs — use `read_turn` with a `limit` to avoid pulling in too much.
 - High agent counts in session listings signal orchestration sessions (fan-out research, multi-step workflows).
-- `scope: "tools"` searches inside tool call inputs (Bash commands, file paths, grep patterns) — useful for finding what agents *did*, not just what was *said*.
+- Search is exhaustive by default — patterns match against text, tool inputs (Bash commands, file paths, grep patterns), tool outputs, and assistant thinking. Write tight regex (e.g. `\bword\b`) to narrow noisy searches.

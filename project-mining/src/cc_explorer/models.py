@@ -30,30 +30,39 @@ NoneAsZero = Annotated[int, BeforeValidator(lambda v: 0 if v is None else v)]
 
 
 # =============================================================================
-# Agent content visibility
+# Hide — assistant-turn content filter
 # =============================================================================
+#
+# `hide` is a comma-separated set of assistant-turn content atoms to suppress
+# from both search and display. Default empty = show/search everything. Text
+# is always shown and is not an atom.
+#
+# Atoms:
+#   thinking — extended thinking blocks
+#   inputs   — tool call summaries (assistant-side)
+#   outputs  — tool results (ToolResultEntry content)
 
 
-AGENT_CONTENT_ATOMS = frozenset({"thinking", "inputs", "outputs"})
-DEFAULT_AGENT_CONTENT = frozenset({"inputs"})
+HIDE_ATOMS = frozenset({"thinking", "inputs", "outputs"})
 
 
-def parse_agent_content(value: str | None) -> frozenset[str]:
-    """Parse comma-separated agent_content string into a validated frozenset.
+def parse_hide(value: str | None) -> frozenset[str]:
+    """Parse comma-separated hide string into a validated frozenset.
 
-    None → DEFAULT_AGENT_CONTENT (backward compat)
-    "" → empty set (text only)
-    "inputs,outputs" → frozenset({"inputs", "outputs"})
+    None → frozenset() (show everything — the default)
+    "" → frozenset() (show everything)
+    "outputs" → frozenset({"outputs"}) (hide tool results)
+    "inputs,thinking" → frozenset({"inputs", "thinking"})
     """
-    if value is None:
-        return DEFAULT_AGENT_CONTENT
-    if not value.strip():
+    if not value or not value.strip():
         return frozenset()
     atoms = frozenset(a.strip() for a in value.split(",") if a.strip())
-    invalid = atoms - AGENT_CONTENT_ATOMS
+    invalid = atoms - HIDE_ATOMS
     if invalid:
         raise ValueError(
-            f"Invalid agent_content atoms: {invalid}. Valid: {sorted(AGENT_CONTENT_ATOMS)}"
+            f"Invalid hide atoms: {sorted(invalid)}. "
+            f"Valid: {sorted(HIDE_ATOMS)}. "
+            f"Text is always shown and is not an atom."
         )
     return atoms
 
@@ -169,7 +178,7 @@ class BaseTranscriptEntry(BaseModel):
     def display(
         self,
         truncate: int,
-        agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+        hide: frozenset[str] = frozenset(),
     ) -> str:
         """Short display string for unknown entry kinds (no role/id; pipe line carries that)."""
         return "[?]"
@@ -184,7 +193,7 @@ class HumanEntry(BaseTranscriptEntry):
     def display(
         self,
         truncate: int,
-        agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+        hide: frozenset[str] = frozenset(),
     ) -> str:
         text = extract_text(self)
         return smart_truncate(text, truncate)
@@ -201,10 +210,10 @@ class ToolResultEntry(BaseTranscriptEntry):
     def display(
         self,
         truncate: int,
-        agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+        hide: frozenset[str] = frozenset(),
     ) -> str:
-        """Render tool output. Only shown when 'outputs' is in agent_content."""
-        if "outputs" not in agent_content:
+        """Render tool output. Suppressed when 'outputs' is in hide."""
+        if "outputs" in hide:
             return ""
         return self._render_output(truncate)
 
@@ -250,12 +259,12 @@ class AssistantTranscriptEntry(BaseTranscriptEntry):
     def display(
         self,
         truncate: int,
-        agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+        hide: frozenset[str] = frozenset(),
     ) -> str:
         parts: list[str] = []
 
-        # Thinking — only if "thinking" in agent_content
-        if "thinking" in agent_content:
+        # Thinking — shown unless 'thinking' is hidden
+        if "thinking" not in hide:
             for item in self.message.content:
                 if isinstance(item, ThinkingContent) and item.thinking.strip():
                     parts.append(f"[thinking] {smart_truncate(item.thinking.strip(), truncate)}")
@@ -265,8 +274,8 @@ class AssistantTranscriptEntry(BaseTranscriptEntry):
         if text:
             parts.append(smart_truncate(text, truncate))
 
-        # Tool inputs — only if "inputs" in agent_content
-        if "inputs" in agent_content:
+        # Tool inputs — shown unless 'inputs' is hidden
+        if "inputs" not in hide:
             tool_summaries: list[str] = []
             for item in self.message.content:
                 if isinstance(item, ToolUseContent):
@@ -473,6 +482,40 @@ def extract_text(entry: Union[HumanEntry, AssistantTranscriptEntry]) -> str:
             text = _strip_system_xml(item.text).strip()
             if text and not text.startswith("[Request interrupted by user"):
                 parts.append(text)
+    return "\n".join(parts)
+
+
+def extract_thinking_text(entry: AssistantTranscriptEntry) -> str:
+    """Extract thinking-block text from an assistant entry. Empty string if none."""
+    parts: list[str] = []
+    for item in entry.message.content:
+        if isinstance(item, ThinkingContent):
+            text = item.thinking.strip()
+            if text:
+                parts.append(text)
+    return "\n".join(parts)
+
+
+def extract_output_text(entry: "ToolResultEntry") -> str:
+    """Extract raw searchable text from a tool result entry's content.
+
+    Walks message.content ToolResultContent items. Unlike display(), this is
+    untruncated and unformatted — intended for search and centered-excerpt
+    extraction, not for direct rendering.
+    """
+    parts: list[str] = []
+    content = entry.message.content
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, ToolResultContent):
+                if isinstance(item.content, str):
+                    parts.append(item.content)
+                elif isinstance(item.content, list):
+                    for block in item.content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            parts.append(block.get("text", ""))
+    elif isinstance(content, str):
+        parts.append(content)
     return "\n".join(parts)
 
 

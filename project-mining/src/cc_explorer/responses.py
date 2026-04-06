@@ -10,13 +10,13 @@ Conversation text in chats arrays uses pipe-delimited entry line format:
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .formatting import format_entry_line, format_session_date, format_session_ref, render_trace
-from .models import DEFAULT_AGENT_CONTENT
+from .formatting import format_entry_line, format_session_date, render_trace
 from .utils import PrefixId
 
 if TYPE_CHECKING:
@@ -46,7 +46,7 @@ class SparseModel(BaseModel):
 class SessionSummary(SparseModel):
     """Summary of a single conversation session."""
 
-    session_id: PrefixId = Field(description="Session identifier.")
+    session: PrefixId = Field(description="Session identifier — pass this back as the `session` param to other tools.")
     date: datetime | None = Field(default=None, description="Timestamp of first message.")
     title: str | None = Field(default=None, description="Auto-generated title from first human message.")
     messages: int = Field(description="Total message count.")
@@ -58,7 +58,7 @@ class SessionSummary(SparseModel):
     @classmethod
     def from_session_info(cls, s: SessionInfo) -> SessionSummary:
         return cls(
-            session_id=s.session_id,
+            session=s.session_id,
             date=s.first_timestamp,
             title=s.title,
             messages=s.message_count,
@@ -104,7 +104,7 @@ class PatternMatch(SparseModel):
     sessions: int = Field(description="Number of sessions containing matches.")
     examples: list[str] | None = Field(
         default=None,
-        description="Pipe-delimited: 'session_id|YYYY-MM-DD|excerpt'. Capped to avoid token bloat.",
+        description="Pipe-delimited: 'session|YYYY-MM-DD|excerpt'. Capped to avoid token bloat.",
     )
 
 
@@ -154,17 +154,30 @@ class SearchProjectResponse(SparseModel):
 
 
 class MatchBlock(SparseModel):
-    """A single match with surrounding context turns."""
+    """A single match with surrounding context turns.
 
-    chats: list[str] = Field(
-        description="Pipe-delimited entry lines: timestamp|role|turn_id|full_length|display. Match entry surrounded by context turns.",
+    `before` and `after` are context turns (pipe-delimited entry lines) on
+    either side of the match. `match` is the matching entry itself, rendered
+    with a centered excerpt when truncated so the hit is always visible.
+    """
+
+    before: list[str] = Field(
+        default_factory=list,
+        description="Context turns before the match (pipe-delimited entry lines).",
+    )
+    match: str = Field(
+        description="The matching entry (pipe-delimited entry line). Truncated with a centered excerpt so the pattern hit is visible.",
+    )
+    after: list[str] = Field(
+        default_factory=list,
+        description="Context turns after the match (pipe-delimited entry lines).",
     )
 
 
 class GrepSessionResponse(SparseModel):
     """Matches for a pattern within a single session."""
 
-    session_id: PrefixId = Field(description="Session identifier.")
+    session: PrefixId = Field(description="Session identifier.")
     showing: int = Field(description="Number of matches returned.")
     total_hits: int = Field(description="Total matches found (may exceed showing if overflow).")
     overflow: str | None = Field(
@@ -172,7 +185,7 @@ class GrepSessionResponse(SparseModel):
         description="Hint when results were truncated — narrow your pattern or use read_turn.",
     )
     matches: list[MatchBlock] = Field(
-        description="Match blocks in chronological order, each a window of turns around a hit.",
+        description="Match blocks in chronological order. Each block has before/match/after fields.",
     )
 
     @classmethod
@@ -183,22 +196,32 @@ class GrepSessionResponse(SparseModel):
         total: int,
         limit: int,
         truncate: int,
-        agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+        pattern: str,
+        hide: frozenset[str] = frozenset(),
     ) -> GrepSessionResponse:
 
         overflow = None
         if len(matches) < total:
             overflow = "narrow your pattern or use read_turn for specific entries"
 
+        compiled = re.compile(pattern, re.IGNORECASE)
         match_blocks: list[MatchBlock] = []
         for match in matches:
-            chats: list[str] = [format_entry_line(e, truncate=truncate, agent_content=agent_content) for e in match.context_before]
-            chats.append(format_entry_line(match.entry, truncate=truncate, agent_content=agent_content))
-            chats.extend(format_entry_line(e, truncate=truncate, agent_content=agent_content) for e in match.context_after)
-            match_blocks.append(MatchBlock(chats=chats))
+            before = [
+                format_entry_line(e, truncate=truncate, hide=hide)
+                for e in match.context_before
+            ]
+            match_line = format_entry_line(
+                match.entry, truncate=truncate, hide=hide, center_pattern=compiled
+            )
+            after = [
+                format_entry_line(e, truncate=truncate, hide=hide)
+                for e in match.context_after
+            ]
+            match_blocks.append(MatchBlock(before=before, match=match_line, after=after))
 
         return cls(
-            session_id=PrefixId(session_id),
+            session=PrefixId(session_id),
             showing=len(matches),
             total_hits=total,
             overflow=overflow,
@@ -214,10 +237,10 @@ class GrepSessionResponse(SparseModel):
 class ReadTurnResponse(SparseModel):
     """A specific moment in a conversation at full fidelity."""
 
-    session_id: PrefixId | None = Field(default=None, description="Session identifier.")
-    turn_id: PrefixId = Field(description="Turn identifier.")
+    session: PrefixId | None = Field(default=None, description="Session identifier.")
+    turn: PrefixId = Field(description="Turn identifier.")
     chats: list[str] = Field(
-        description="Pipe-delimited entry lines: timestamp|role|turn_id|full_length|display. Full untruncated text unless limit was set.",
+        description="Pipe-delimited entry lines: timestamp|role|turn_id|full_length|display. Full untruncated text unless truncate was set.",
     )
 
     @classmethod
@@ -227,14 +250,14 @@ class ReadTurnResponse(SparseModel):
         turn: str,
         entries: list,
         truncate: int,
-        agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+        hide: frozenset[str] = frozenset(),
     ) -> ReadTurnResponse:
 
-        chats = [format_entry_line(e, truncate=truncate, agent_content=agent_content) for e in entries]
+        chats = [format_entry_line(e, truncate=truncate, hide=hide) for e in entries]
 
         return cls(
-            session_id=PrefixId(session_info.session_id) if session_info else None,
-            turn_id=PrefixId(turn),
+            session=PrefixId(session_info.session_id) if session_info else None,
+            turn=PrefixId(turn),
             chats=chats,
         )
 
@@ -247,7 +270,7 @@ class ReadTurnResponse(SparseModel):
 class BrowseSessionResponse(SparseModel):
     """First or last N conversation turns from a session."""
 
-    session_id: PrefixId = Field(description="Session identifier.")
+    session: PrefixId = Field(description="Session identifier.")
     position: str = Field(description="'head' or 'tail' — which end was read.")
     showing: int = Field(description="Number of turns returned.")
     total_turns: int = Field(description="Total conversation turns in the session.")
@@ -265,11 +288,11 @@ class BrowseSessionResponse(SparseModel):
         total: int,
         truncate: int,
         anchor: str | None = None,
-        agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+        hide: frozenset[str] = frozenset(),
     ) -> BrowseSessionResponse:
-        chats = [format_entry_line(e, truncate=truncate, agent_content=agent_content) for e in entries]
+        chats = [format_entry_line(e, truncate=truncate, hide=hide) for e in entries]
         return cls(
-            session_id=PrefixId(session_id),
+            session=PrefixId(session_id),
             position=position,
             showing=len(entries),
             total_turns=total,
@@ -316,7 +339,7 @@ class AgentSummary(SparseModel):
 class SessionAgentsResponse(SparseModel):
     """All agents spawned by a specific session."""
 
-    session_id: PrefixId = Field(description="Session identifier.")
+    session: PrefixId = Field(description="Session identifier.")
     date: datetime | None = Field(default=None, description="Timestamp of session start.")
     title: str | None = Field(default=None, description="Session title.")
     total_agents: int = Field(description="Number of agents in this session.")
@@ -329,7 +352,7 @@ class SessionAgentsResponse(SparseModel):
         agents: list[SubagentInfo],
     ) -> SessionAgentsResponse:
         return cls(
-            session_id=target.session_id,
+            session=target.session_id,
             date=target.first_timestamp,
             title=target.title,
             total_agents=len(agents),
@@ -354,7 +377,7 @@ class OutputFileInfo(SparseModel):
 class AgentDetailResponse(SparseModel):
     """Full detail for a single agent: prompt, result, stats, optional trace."""
 
-    session_id: PrefixId = Field(description="Parent session identifier.")
+    session: PrefixId = Field(description="Parent session identifier.")
     date: datetime | None = Field(default=None, description="Timestamp of session start.")
     title: str | None = Field(default=None, description="Session title.")
     agent_id: PrefixId = Field(description="Agent identifier.")
@@ -405,7 +428,7 @@ class AgentDetailResponse(SparseModel):
             )
 
         return cls(
-            session_id=found_session.session_id,
+            session=found_session.session_id,
             date=found_session.first_timestamp,
             title=found_session.title,
             agent_id=found.agent_id,

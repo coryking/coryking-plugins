@@ -1,8 +1,9 @@
-"""Tests for triage/triage_multi with scope=tools.
+"""Tests that matches in tool inputs surface in triage examples.
 
-The bug: when scope=tools, matches are found via extract_tool_text() but
-examples are extracted from extract_text() — which may not contain the match
-at all. Examples should come from whichever text the match was found in.
+The bug: when a match lives inside tool-call content (Bash command, Grep
+pattern, etc.), the example rendered for that hit must actually contain the
+matched text. With exhaustive search, this applies by default to every
+assistant entry — no scope flag needed.
 """
 
 from datetime import datetime, timezone
@@ -20,7 +21,7 @@ from cc_explorer.models import (
     TranscriptStats,
     UserMessageModel,
 )
-from cc_explorer.search import ScopeType, SessionInfo, triage, triage_multi
+from cc_explorer.search import SessionInfo, triage, triage_multi
 from cc_explorer.utils import PrefixId
 
 
@@ -108,8 +109,8 @@ def _patch_entries(entries):
     )
 
 
-class TestToolScopeExamples:
-    """Examples from scope=tools searches should contain the matched tool text."""
+class TestToolContentInExamples:
+    """Matches inside tool inputs should surface in triage examples."""
 
     def test_bash_command_in_example(self):
         """When a Bash command matches, the example should contain the command text."""
@@ -120,8 +121,7 @@ class TestToolScopeExamples:
             results = triage_multi(
                 [_session()],
                 ["comment_count"],
-                entry_types=(AssistantTranscriptEntry,),
-                scope=ScopeType.tools,
+                base_types=(AssistantTranscriptEntry,),
             )
             _, hits = results[0]
             assert len(hits) == 1
@@ -136,8 +136,7 @@ class TestToolScopeExamples:
             results = triage_multi(
                 [_session()],
                 ["facebook"],
-                entry_types=(AssistantTranscriptEntry,),
-                scope=ScopeType.tools,
+                base_types=(AssistantTranscriptEntry,),
             )
             _, hits = results[0]
             assert len(hits) == 1
@@ -152,16 +151,15 @@ class TestToolScopeExamples:
             results = triage_multi(
                 [_session()],
                 ["facebook_scrape"],
-                entry_types=(AssistantTranscriptEntry,),
-                scope=ScopeType.tools,
+                base_types=(AssistantTranscriptEntry,),
             )
             _, hits = results[0]
             assert len(hits) == 1
             assert hits[0].first_match_example  # not empty
             assert "facebook_scrape" in hits[0].first_match_example
 
-    def test_scope_all_prefers_message_text_when_both_match(self):
-        """With scope=all, if the match is in both message text and tool text, example should contain the match regardless."""
+    def test_match_in_text_and_tool_both_surface(self):
+        """When the match appears in both message text and tool text, the example should contain it."""
         entries = [
             _assistant_with_bash(
                 "rg comment_count /tmp/data",
@@ -172,15 +170,14 @@ class TestToolScopeExamples:
             results = triage_multi(
                 [_session()],
                 ["comment_count"],
-                entry_types=(AssistantTranscriptEntry,),
-                scope=ScopeType.all,
+                base_types=(AssistantTranscriptEntry,),
             )
             _, hits = results[0]
             assert len(hits) == 1
             assert "comment_count" in hits[0].first_match_example
 
-    def test_triage_single_also_affected(self):
-        """The same bug exists in triage() — not just triage_multi."""
+    def test_triage_single_also_surfaces_tool_match(self):
+        """The same behavior on single-pattern triage()."""
         entries = [
             _assistant_with_bash("rg -oP 'comment_count' /tmp/data.jsonl"),
         ]
@@ -188,8 +185,22 @@ class TestToolScopeExamples:
             hits = triage(
                 [_session()],
                 "comment_count",
-                entry_types=(AssistantTranscriptEntry,),
-                scope=ScopeType.tools,
+                base_types=(AssistantTranscriptEntry,),
             )
             assert len(hits) == 1
             assert "comment_count" in hits[0].first_match_example
+
+    def test_hiding_inputs_suppresses_tool_match(self):
+        """With hide={'inputs'}, matches only in tool inputs should not surface."""
+        entries = [
+            _assistant_with_bash("rg -oP 'comment_count' /tmp/data.jsonl", text=""),
+        ]
+        with _patch_entries(entries):
+            results = triage_multi(
+                [_session()],
+                ["comment_count"],
+                base_types=(AssistantTranscriptEntry,),
+                hide=frozenset({"inputs"}),
+            )
+            _, hits = results[0]
+            assert len(hits) == 0
