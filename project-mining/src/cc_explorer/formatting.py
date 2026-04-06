@@ -14,10 +14,10 @@ Pipe-delimited entry line format:
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 from .models import (
-    DEFAULT_AGENT_CONTENT,
     AssistantTranscriptEntry,
     BaseTranscriptEntry,
     HumanEntry,
@@ -58,20 +58,35 @@ def format_session_date(timestamp: datetime | None) -> str:
 def format_entry_line(
     entry: TranscriptEntry,
     truncate: int,
-    agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+    hide: frozenset[str] = frozenset(),
+    center_pattern: re.Pattern | None = None,
 ) -> str:
-    """Format entry as pipe-delimited: timestamp|role|turn_id|full_length|display."""
+    """Format entry as pipe-delimited: timestamp|role|turn_id|full_length|display.
+
+    When `center_pattern` is supplied and `truncate` is non-zero, the displayed
+    text is an excerpt centered on the first pattern match rather than the
+    front of the entry. Used for match lines in grep_session output so the
+    matched content is always visible even when it's mid-entry.
+    """
     if not isinstance(entry, BaseTranscriptEntry):
         uuid = getattr(entry, 'uuid', None)
         turn_id = uuid if isinstance(uuid, PrefixId) else PrefixId(uuid or '')
         return f"0|?|{turn_id}|0|[?]"
 
     # Get full display for length calculation
-    full = entry.display(truncate=0, agent_content=agent_content)
+    full = entry.display(truncate=0, hide=hide)
     full_length = len(full)
 
-    # Get display (truncated or full based on param)
-    display = entry.display(truncate=truncate, agent_content=agent_content) if truncate else full
+    # Resolve the displayed text
+    if truncate:
+        if center_pattern is not None:
+            # Center the excerpt on the first match so mid-entry hits stay visible
+            from .search import _match_example
+            display = _match_example(full, center_pattern, width=truncate)
+        else:
+            display = entry.display(truncate=truncate, hide=hide)
+    else:
+        display = full
 
     ts = int(entry.timestamp.timestamp()) if entry.timestamp else 0
     if isinstance(entry, HumanEntry):

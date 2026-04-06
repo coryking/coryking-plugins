@@ -14,7 +14,7 @@ from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from .formatting import matches_id
-from .models import AssistantTranscriptEntry, ToolResultEntry, parse_agent_content
+from .models import parse_hide
 from .utils import PrefixId
 from .responses import (
     AgentDetailResponse,
@@ -29,9 +29,9 @@ from .responses import (
 from .search import (
     ENTRY_TYPE_MAP,
     ConversationRole,
-    ScopeType,
     SessionInfo,
     browse_session_turns,
+    conversation_types_for,
     get_turn_context,
     load_sessions,
     resolve_project,
@@ -136,12 +136,6 @@ def search_project(
             description="Which side of the conversation to search: 'user' for human messages, 'assistant' for agent responses, 'all' for both."
         ),
     ] = ConversationRole.user,
-    scope: Annotated[
-        ScopeType,
-        Field(
-            description="Content scope: 'messages' for conversation text, 'tools' for tool inputs (Bash commands, file paths, grep patterns), 'all' for both. Using 'tools' or 'all' searches both roles regardless of the role parameter."
-        ),
-    ] = ScopeType.messages,
     after: Annotated[
         datetime | None,
         Field(description="Only search sessions after this datetime."),
@@ -157,6 +151,8 @@ def search_project(
 ) -> SearchProjectResponse:
     """Scan a project's chat history for patterns, grouped by pattern with per-pattern hit counts and session breakdowns.
 
+    Search is exhaustive by default: every pattern is checked against conversation text, tool inputs (Bash commands, file paths, grep patterns), tool outputs, and assistant thinking. The pattern is the precision tool — use tight regex (e.g. `\\bword\\b`) to narrow noisy searches instead of a scope flag.
+
     Pass all your candidate search terms at once — each gets its own hit count and session list so you can see which terms are useful and which aren't. Use separate patterns rather than regex OR pipes (e.g. ["facebook.*scrape", "fb_capture"] not "facebook.*scrape|fb_capture") to get this per-term breakdown. Results are sorted by hit count (hottest patterns and sessions first) and include session dates for chronological context. Follow up with grep_session on sessions that look promising.
     """
     proj = resolve_project(project)
@@ -166,14 +162,10 @@ def search_project(
 
     sessions = _filter_by_date(sessions, after, before)
 
-    # --scope tools/all implies searching all entry types
-    if scope in (ScopeType.tools, ScopeType.all):
-        entry_types = ENTRY_TYPE_MAP[ConversationRole.all]
-    else:
-        entry_types = ENTRY_TYPE_MAP[role]
+    base_types = ENTRY_TYPE_MAP[role]
 
     all_results = triage_multi(
-        sessions, patterns, entry_types, example_width=excerpt_width, scope=scope
+        sessions, patterns, base_types=base_types, example_width=excerpt_width
     )
 
     # Check if anything matched
@@ -204,7 +196,7 @@ def grep_session(
     context: Annotated[
         int,
         Field(
-            description="Number of surrounding turns to include with each match (like grep -C).",
+            description="Number of surrounding turns to include with each match (like grep -C). Use `context=N` to widen the radius around each hit.",
             ge=0,
             le=5,
         ),
@@ -215,12 +207,6 @@ def grep_session(
             description="Which side of the conversation to search: 'user' for human messages, 'assistant' for agent responses, 'all' for both."
         ),
     ] = ConversationRole.user,
-    scope: Annotated[
-        ScopeType,
-        Field(
-            description="Content scope: 'messages' for conversation text, 'tools' for tool inputs (Bash commands, file paths, grep patterns), 'all' for both."
-        ),
-    ] = ScopeType.messages,
     limit: Annotated[
         int,
         Field(
@@ -230,22 +216,24 @@ def grep_session(
     truncate: Annotated[
         int,
         Field(
-            description="Truncate each content piece (text, tool inputs/outputs) to N chars. 0 = full content.",
+            description="Truncate each content piece (text, tool inputs/outputs) to N chars. 0 = full content. The `match` line in each block is centered on the pattern hit so mid-entry matches stay visible.",
         ),
     ] = 500,
-    agent_content: Annotated[
+    hide: Annotated[
         str | None,
         Field(
-            description="Comma-separated content to show for assistant turns beyond text: 'thinking', 'inputs' (tool call summaries), 'outputs' (tool results). Default: 'inputs'. Empty string = text only. Pair with truncate when using 'outputs' — tool results can be very large.",
+            description="Comma-separated assistant-turn content to suppress from both search and display. Atoms: 'inputs' (tool calls), 'outputs' (tool results), 'thinking' (reasoning blocks). Default empty = search and show everything. Text is always visible and is not an atom.",
         ),
     ] = None,
 ) -> GrepSessionResponse:
     """Show matches for a pattern within a single conversation, with surrounding context.
 
-    Like `rg -C3` on a single file — returns matching entries with surrounding turns for context. Each entry includes its full character length so you can gauge size before calling read_turn.
+    Like `rg -C3` on a single file — returns matching entries with surrounding turns for context. Search is exhaustive by default across text, tool inputs, tool outputs, and thinking blocks. Each entry includes its full character length so you can gauge size before calling read_turn.
+
+    Match blocks are returned with three fields: `before` (context turns before), `match` (the matching entry, excerpted on the hit so it stays visible even when truncated), and `after` (context turns after).
     """
     try:
-        content_set = parse_agent_content(agent_content)
+        hide_set = parse_hide(hide)
     except ValueError as e:
         raise ToolError(str(e))
     proj = resolve_project(project)
@@ -258,20 +246,15 @@ def grep_session(
     if not sessions:
         raise ToolError(f"No session matching: {session}")
 
-    # --scope tools/all implies searching all entry types
-    if scope in (ScopeType.tools, ScopeType.all):
-        entry_types = ENTRY_TYPE_MAP[ConversationRole.all]
-    else:
-        entry_types = ENTRY_TYPE_MAP[role]
+    base_types = ENTRY_TYPE_MAP[role]
 
     result = do_search(
         sessions,
         pattern,
-        entry_types,
-        context,
+        base_types=base_types,
+        context=context,
         max_results=limit,
-        scope=scope,
-        agent_content=content_set,
+        hide=hide_set,
     )
 
     if not result.matches:
@@ -283,7 +266,8 @@ def grep_session(
         total=result.total_matches,
         limit=limit,
         truncate=truncate,
-        agent_content=content_set,
+        pattern=pattern,
+        hide=hide_set,
     )
 
 
@@ -295,6 +279,12 @@ def read_turn(
             description="Turn UUID or prefix to center on (from grep_session output)."
         ),
     ],
+    session: Annotated[
+        str | None,
+        Field(
+            description="Session ID or prefix. Optional — turn UUIDs are globally unique, but pass this to narrow the search explicitly.",
+        ),
+    ] = None,
     project: Annotated[
         str | None,
         Field(
@@ -303,18 +293,20 @@ def read_turn(
     ] = None,
     context: Annotated[
         int,
-        Field(description="Number of turns before and after to include."),
+        Field(
+            description="Number of turns before and after the anchor to include (radius). Use `context=N` to widen the window on each side.",
+        ),
     ] = 3,
     truncate: Annotated[
         int,
         Field(
-            description="Truncate each content piece (text, tool inputs/outputs) to N chars. 0 = full content.",
+            description="Truncate each content piece (text, tool inputs/outputs) to N chars. 0 = full content. Bump this up when tool outputs are huge — volume lives here, not in `hide`.",
         ),
     ] = 0,
-    agent_content: Annotated[
+    hide: Annotated[
         str | None,
         Field(
-            description="Comma-separated content to show for assistant turns beyond text: 'thinking', 'inputs' (tool call summaries), 'outputs' (tool results). Default: 'inputs'. Empty string = text only. Pair with truncate when using 'outputs' — tool results can be very large.",
+            description="Comma-separated assistant-turn content to suppress from display. Atoms: 'inputs' (tool calls), 'outputs' (tool results), 'thinking' (reasoning blocks). Default empty = show everything. Text is always visible.",
         ),
     ] = None,
 ) -> ReadTurnResponse:
@@ -322,10 +314,12 @@ def read_turn(
 
     Like `sed -n '450,470p'` — reads a specific section without pattern matching. Takes a turn UUID (from grep_session output) and returns the surrounding conversation.
 
-    Use the full_length values from grep_session to gauge entry sizes before reading.
+    The `session` param is optional: turn UUIDs are globally unique across all sessions in a project, so passing just the turn is enough. Supply `session` only to disambiguate or for belt-and-suspenders clarity.
+
+    Use the full_length values from grep_session to gauge entry sizes before reading. Use `context=N` to control the radius (turns on each side of the anchor).
     """
     try:
-        content_set = parse_agent_content(agent_content)
+        hide_set = parse_hide(hide)
     except ValueError as e:
         raise ToolError(str(e))
     proj = resolve_project(project)
@@ -333,12 +327,21 @@ def read_turn(
     if not sessions:
         raise ToolError(f"No conversations found for {proj}")
 
-    session_info, entries = get_turn_context(sessions, turn, context, agent_content=content_set)
+    target_session_id: str | None = None
+    if session:
+        target = [s for s in sessions if PrefixId(s.session_id) == session]
+        if not target:
+            raise ToolError(f"No session matching: {session}")
+        target_session_id = target[0].session_id
+
+    session_info, entries = get_turn_context(
+        sessions, turn, context, hide=hide_set, session_id=target_session_id
+    )
 
     if not entries:
         raise ToolError(f"Turn {turn} not found")
 
-    return ReadTurnResponse.from_entries(session_info, turn, entries, truncate=truncate, agent_content=content_set)
+    return ReadTurnResponse.from_entries(session_info, turn, entries, truncate=truncate, hide=hide_set)
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -363,7 +366,11 @@ def browse_session(
     ] = "head",
     turns: Annotated[
         int,
-        Field(description="Number of conversation turns to return.", ge=1, le=50),
+        Field(
+            description="Number of conversation turns to return (linear window from the position). Use `turns=N` to control window size.",
+            ge=1,
+            le=50,
+        ),
     ] = 10,
     turn: Annotated[
         str | None,
@@ -380,22 +387,24 @@ def browse_session(
     truncate: Annotated[
         int,
         Field(
-            description="Truncate each content piece (text, tool inputs/outputs) to N chars. 0 = full content.",
+            description="Truncate each content piece (text, tool inputs/outputs) to N chars. 0 = full content. Bump this up when tool outputs are huge.",
         ),
     ] = 0,
-    agent_content: Annotated[
+    hide: Annotated[
         str | None,
         Field(
-            description="Comma-separated content to show for assistant turns beyond text: 'thinking', 'inputs' (tool call summaries), 'outputs' (tool results). Default: 'inputs'. Empty string = text only. Pair with truncate when using 'outputs' — tool results can be very large.",
+            description="Comma-separated assistant-turn content to suppress from display. Atoms: 'inputs' (tool calls), 'outputs' (tool results), 'thinking' (reasoning blocks). Default empty = show everything. Text is always visible.",
         ),
     ] = None,
 ) -> BrowseSessionResponse:
     """Read the first or last N turns of a conversation — like head/tail on a session.
 
     Quick orientation tool: see how a conversation started or where it ended up without needing a search pattern. Use 'head' to understand what the session was about, 'tail' to see the conclusion. Pass a turn UUID to anchor and paginate through a session.
+
+    `turns=N` controls how many turns to return from the position (a linear window). This differs from `read_turn` and `grep_session` where `context=N` means a radius around an anchor.
     """
     try:
-        content_set = parse_agent_content(agent_content)
+        hide_set = parse_hide(hide)
     except ValueError as e:
         raise ToolError(str(e))
     if position not in ("head", "tail"):
@@ -410,10 +419,8 @@ def browse_session(
     if not target:
         raise ToolError(f"No session matching: {session}")
 
-    entry_types = ENTRY_TYPE_MAP[role]
-    # Add ToolResultEntry when outputs requested and assistant entries are included
-    if "outputs" in content_set and AssistantTranscriptEntry in entry_types:
-        entry_types = entry_types + (ToolResultEntry,)
+    base_types = ENTRY_TYPE_MAP[role]
+    entry_types = conversation_types_for(hide_set, base_types)
 
     entries, total = browse_session_turns(
         target[0], position, turns, anchor_turn=turn, entry_types=entry_types
@@ -431,7 +438,7 @@ def browse_session(
         total=total,
         truncate=truncate,
         anchor=turn,
-        agent_content=content_set,
+        hide=hide_set,
     )
 
 

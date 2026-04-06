@@ -24,7 +24,6 @@ from cc_explorer.models import (
 from cc_explorer.responses import SearchProjectResponse
 from cc_explorer.search import (
     SessionInfo,
-    ScopeType,
     triage_multi,
 )
 from cc_explorer.utils import PrefixId

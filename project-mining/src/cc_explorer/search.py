@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .models import (
-    DEFAULT_AGENT_CONTENT,
     AssistantTranscriptEntry,
     BaseTranscriptEntry,
     HumanEntry,
@@ -21,21 +20,17 @@ from .models import (
     ToolUseContent,
     TranscriptEntry,
     TranscriptStats,
+    extract_output_text,
+    extract_text,
+    extract_thinking_text,
 )
-from .models import extract_text
 from .parser import load_conversations, load_transcript
 from .utils import smart_truncate
 
 
 # =============================================================================
-# Scope enum and tool text extraction
+# Conversation role
 # =============================================================================
-
-
-class ScopeType(str, Enum):
-    messages = "messages"
-    tools = "tools"
-    all = "all"
 
 
 class ConversationRole(str, Enum):
@@ -166,7 +161,8 @@ PatternTriageResults = list[tuple[str, list[TriageResult]]]
 # Entry type mapping
 # =============================================================================
 
-# Map string names to entry type tuples for scope filtering
+# Map role name to base entry types. ToolResultEntry is added dynamically
+# via conversation_types_for() when outputs are visible and assistant is in scope.
 ENTRY_TYPE_MAP: dict[str, tuple[type, ...]] = {
     "user": (HumanEntry,),
     "human": (HumanEntry,),  # legacy alias
@@ -176,19 +172,20 @@ ENTRY_TYPE_MAP: dict[str, tuple[type, ...]] = {
 
 
 def conversation_types_for(
-    agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+    hide: frozenset[str] = frozenset(),
+    base_types: tuple[type, ...] = (HumanEntry, AssistantTranscriptEntry),
 ) -> tuple[type, ...]:
-    """Determine entry types to include based on agent_content.
+    """Determine entry types to include given `hide` and the caller's base types.
 
-    ToolResultEntry is added when 'outputs' is requested (tool results
-    are assistant-side content). Callers that filter by role should
-    check that AssistantTranscriptEntry is in their entry_types before
-    adding ToolResultEntry — see browse_session in mcp_server.py.
+    ToolResultEntry is a consequence of assistant tool calls — it rides with
+    assistant turns. Include it when:
+      - 'outputs' is not hidden, AND
+      - AssistantTranscriptEntry is in the base types (i.e., the caller wants
+        the assistant side of the conversation).
     """
-    base = (HumanEntry, AssistantTranscriptEntry)
-    if "outputs" in agent_content:
-        return base + (ToolResultEntry,)
-    return base
+    if "outputs" not in hide and AssistantTranscriptEntry in base_types:
+        return base_types + (ToolResultEntry,)
+    return base_types
 
 
 # =============================================================================
@@ -309,30 +306,40 @@ def _match_example(text: str, pattern: re.Pattern, width: int = 150) -> str:
 def _entry_matches(
     entry: TranscriptEntry,
     pattern: re.Pattern,
-    scope: ScopeType = ScopeType.messages,
+    hide: frozenset[str] = frozenset(),
 ) -> bool:
-    """Check if an entry's text content matches the pattern.
+    """Check if an entry's content matches the pattern.
 
-    Scope controls what's searched:
-    - messages: text content only (default, backward-compatible)
-    - tools: tool_use input fields only (Bash commands, file paths, etc.)
-    - all: both text content and tool inputs
+    Search is exhaustive across all content categories not in `hide`:
+    - HumanEntry: text (always searched)
+    - AssistantTranscriptEntry: text + tool inputs (unless 'inputs' in hide)
+      + thinking blocks (unless 'thinking' in hide)
+    - ToolResultEntry: output content (unless 'outputs' in hide)
     """
-    if not isinstance(entry, (HumanEntry, AssistantTranscriptEntry)):
+    if isinstance(entry, HumanEntry):
+        text = extract_text(entry)
+        return bool(pattern.search(text))
+
+    if isinstance(entry, AssistantTranscriptEntry):
+        # Text always searched
+        text = extract_text(entry)
+        if text and pattern.search(text):
+            return True
+        if "inputs" not in hide:
+            tool_text = extract_tool_text(entry)
+            if tool_text and pattern.search(tool_text):
+                return True
+        if "thinking" not in hide:
+            thinking = extract_thinking_text(entry)
+            if thinking and pattern.search(thinking):
+                return True
         return False
 
-    check_messages = scope in (ScopeType.messages, ScopeType.all)
-    check_tools = scope in (ScopeType.tools, ScopeType.all)
-
-    if check_messages:
-        text = extract_text(entry)
-        if pattern.search(text):
-            return True
-
-    if check_tools and isinstance(entry, AssistantTranscriptEntry):
-        tool_text = extract_tool_text(entry)
-        if pattern.search(tool_text):
-            return True
+    if isinstance(entry, ToolResultEntry):
+        if "outputs" in hide:
+            return False
+        output_text = extract_output_text(entry)
+        return bool(output_text and pattern.search(output_text))
 
     return False
 
@@ -341,11 +348,11 @@ def _get_context(
     entries: list[TranscriptEntry],
     idx: int,
     context: int,
-    entry_types: tuple[type, ...],
-    agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+    base_types: tuple[type, ...],
+    hide: frozenset[str] = frozenset(),
 ) -> tuple[list[TranscriptEntry], list[TranscriptEntry]]:
-    """Get context entries around a match, filtered to conversation types."""
-    conv_types = conversation_types_for(agent_content)
+    """Get context entries around a match, filtered to visible conversation types."""
+    conv_types = conversation_types_for(hide, base_types)
 
     before: list[TranscriptEntry] = []
     count = 0
@@ -376,12 +383,18 @@ def _get_context(
 def triage(
     sessions: list[SessionInfo],
     pattern: str,
-    entry_types: tuple[type, ...] = (HumanEntry,),
+    base_types: tuple[type, ...] = (HumanEntry,),
     example_width: int = 150,
-    scope: ScopeType = ScopeType.messages,
+    hide: frozenset[str] = frozenset(),
 ) -> list[TriageResult]:
-    """Count pattern matches per session. Returns sorted by hit count descending."""
+    """Count pattern matches per session. Returns sorted by hit count descending.
+
+    Search is exhaustive across all content not in `hide`. `base_types` controls
+    which sides of the conversation are considered (user / assistant / all);
+    ToolResultEntry rides along when assistant is in scope and 'outputs' is not hidden.
+    """
     compiled = re.compile(pattern, re.IGNORECASE)
+    search_types = conversation_types_for(hide, base_types)
     results: list[TriageResult] = []
 
     for session in sessions:
@@ -389,10 +402,12 @@ def triage(
         count = 0
         first_example = ""
         for entry in entries:
-            if isinstance(entry, entry_types) and _entry_matches(entry, compiled, scope):
+            if isinstance(entry, search_types) and _entry_matches(entry, compiled, hide):
                 count += 1
-                if not first_example and isinstance(entry, (HumanEntry, AssistantTranscriptEntry)):
-                    first_example = _match_example(entry.display(truncate=0), compiled, width=example_width)
+                if not first_example:
+                    first_example = _match_example(
+                        entry.display(truncate=0, hide=hide), compiled, width=example_width
+                    )
         if count > 0:
             results.append(TriageResult(session=session, count=count, first_match_example=first_example))
 
@@ -403,9 +418,9 @@ def triage(
 def triage_multi(
     sessions: list[SessionInfo],
     patterns: list[str],
-    entry_types: tuple[type, ...] = (HumanEntry,),
+    base_types: tuple[type, ...] = (HumanEntry,),
     example_width: int = 150,
-    scope: ScopeType = ScopeType.messages,
+    hide: frozenset[str] = frozenset(),
 ) -> PatternTriageResults:
     """Count matches for multiple patterns in a single pass over each session.
 
@@ -413,6 +428,7 @@ def triage_multi(
     Returns PatternTriageResults — same type consumed by SearchProjectResponse.from_triage.
     """
     compiled = [(pat, re.compile(pat, re.IGNORECASE)) for pat in patterns]
+    search_types = conversation_types_for(hide, base_types)
 
     # Per-pattern accumulators: {pattern_index: {session_index: (count, first_example)}}
     accum: dict[int, dict[int, tuple[int, str]]] = {i: {} for i in range(len(compiled))}
@@ -420,13 +436,15 @@ def triage_multi(
     for si, session in enumerate(sessions):
         entries = load_transcript(session.path)
         for entry in entries:
-            if not isinstance(entry, entry_types):
+            if not isinstance(entry, search_types):
                 continue
             for pi, (_, regex) in enumerate(compiled):
-                if _entry_matches(entry, regex, scope):
+                if _entry_matches(entry, regex, hide):
                     count, example = accum[pi].get(si, (0, ""))
-                    if not example and isinstance(entry, (HumanEntry, AssistantTranscriptEntry)):
-                        example = _match_example(entry.display(truncate=0), regex, width=example_width)
+                    if not example:
+                        example = _match_example(
+                            entry.display(truncate=0, hide=hide), regex, width=example_width
+                        )
                     accum[pi][si] = (count + 1, example)
 
     results: PatternTriageResults = []
@@ -445,19 +463,23 @@ def triage_multi(
 def search(
     sessions: list[SessionInfo],
     pattern: str,
-    entry_types: tuple[type, ...] = (HumanEntry,),
+    base_types: tuple[type, ...] = (HumanEntry,),
     context: int = 1,
     session_id: str | None = None,
     max_results: int = 30,
-    scope: ScopeType = ScopeType.messages,
-    agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+    hide: frozenset[str] = frozenset(),
 ) -> SearchResult:
     """Search for pattern across sessions. Returns matching entries with context.
+
+    Search is exhaustive across all content not in `hide`. `base_types` controls
+    which sides of the conversation are considered; ToolResultEntry rides along
+    when assistant is in scope and 'outputs' is not hidden.
 
     When matches exceed max_results: returns overflow response with a sample
     of hits spread across sessions plus per-session counts (triage data).
     """
     compiled = re.compile(pattern, re.IGNORECASE)
+    search_types = conversation_types_for(hide, base_types)
     all_matches: list[MatchHit] = []
     per_session_counts: list[TriageResult] = []
 
@@ -470,12 +492,12 @@ def search(
         session_matches: list[MatchHit] = []
 
         for idx, entry in enumerate(entries):
-            if not isinstance(entry, entry_types):
+            if not isinstance(entry, search_types):
                 continue
-            if not _entry_matches(entry, compiled, scope):
+            if not _entry_matches(entry, compiled, hide):
                 continue
 
-            before, after = _get_context(entries, idx, context, entry_types, agent_content)
+            before, after = _get_context(entries, idx, context, base_types, hide)
             session_matches.append(
                 MatchHit(
                     session_id=session.session_id,
@@ -530,16 +552,23 @@ def get_turn_context(
     sessions: list[SessionInfo],
     turn_uuid: str,
     context: int = 3,
-    agent_content: frozenset[str] = DEFAULT_AGENT_CONTENT,
+    hide: frozenset[str] = frozenset(),
+    session_id: str | None = None,
 ) -> tuple[SessionInfo | None, list[TranscriptEntry]]:
-    """Find a turn by UUID across all sessions and return surrounding entries.
+    """Find a turn by UUID across sessions and return surrounding entries.
 
-    Turn UUIDs are globally unique — no need to specify session.
+    Turn UUIDs are globally unique — session_id is optional and used only to
+    narrow the search when the caller wants to be explicit.
+
     Returns (session_info, entries) where entries includes context.
     """
-    conv_types = conversation_types_for(agent_content)
+    conv_types = conversation_types_for(hide)
 
-    for session in sessions:
+    target_sessions = sessions
+    if session_id:
+        target_sessions = [s for s in sessions if s.session_id == session_id]
+
+    for session in target_sessions:
         entries = load_transcript(session.path)
         for idx, entry in enumerate(entries):
             if not isinstance(entry, BaseTranscriptEntry):
