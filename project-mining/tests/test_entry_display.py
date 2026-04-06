@@ -1,6 +1,6 @@
 """Tests for TranscriptEntry.display() and format_entry_line integration.
 
-display() returns body text only; format_entry_line adds timestamp|role|turn_id|length.
+display() returns body text only; format_entry_line adds turn_id|timestamp|role|length.
 """
 
 import pytest
@@ -169,5 +169,5 @@ class TestFormatEntryLineNoDuplicateIdentity:
         parts = line.split("|", 4)
         display = parts[4]
         assert "[A:" not in display
-        assert parts[1] == "A"
-        assert parts[2] == "a9529cc1"
+        assert parts[0] == "a9529cc1"
+        assert parts[2] == "A"

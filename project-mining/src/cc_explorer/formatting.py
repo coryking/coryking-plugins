@@ -4,10 +4,11 @@ Entry-line formatting and trace rendering used by response model classmethods.
 Builder logic lives on the response models themselves (responses.py).
 
 Pipe-delimited entry line format:
-  timestamp|role|turn_id|full_length|display
+  turn_id|timestamp|role|full_length|display
+  - turn_id: first 8 chars of turn UUID (via PrefixId.__str__) — leads so it's
+    the first thing grabbed when an agent extracts it for read_turn
   - timestamp: unix epoch seconds
-  - role: U (user) or A (assistant)
-  - turn_id: first 8 chars of turn UUID (via PrefixId.__str__)
+  - role: U (user), A (assistant), or T (tool result)
   - full_length: character count of the full untruncated entry
   - display: body only (truncated text + tool summaries)
 """
@@ -96,7 +97,9 @@ def format_entry_line(
     hide: frozenset[str] = frozenset(),
     center_pattern: re.Pattern | None = None,
 ) -> str:
-    """Format entry as pipe-delimited: timestamp|role|turn_id|full_length|display.
+    """Format entry as pipe-delimited: turn_id|timestamp|role|full_length|display.
+
+    turn_id leads so agents grab it first when extracting for read_turn.
 
     When `center_pattern` is supplied and `truncate` is non-zero, the displayed
     text is an excerpt centered on the first pattern match rather than the
@@ -106,7 +109,7 @@ def format_entry_line(
     if not isinstance(entry, BaseTranscriptEntry):
         uuid = getattr(entry, 'uuid', None)
         turn_id = uuid if isinstance(uuid, PrefixId) else PrefixId(uuid or '')
-        return f"0|?|{turn_id}|0|[?]"
+        return f"{turn_id}|0|?|0|[?]"
 
     # Get full display for length calculation
     full = entry.display(truncate=0, hide=hide)
@@ -131,7 +134,7 @@ def format_entry_line(
         role = "A"
     # Escape newlines for pipe-delimited single-line output
     display = display.replace("\n", "\\n")
-    return f"{ts}|{role}|{entry.uuid}|{full_length}|{display}"
+    return f"{entry.uuid}|{ts}|{role}|{full_length}|{display}"
 
 
 # =============================================================================

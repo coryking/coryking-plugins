@@ -14,18 +14,19 @@ Explores Claude Code chat history stored as JSONL transcripts. MCP tools handle 
 
 ## The conversation exploration tools
 
-Four tools for exploring chat content, each operating at a different scope — like `ls`, `rg -c`, `rg -C3`, and `sed -n` on a set of JSONL files:
+Five tools for exploring chat content, each operating at a different scope — like `ls`, `rg -c`, `rg -C3`, and `sed -n` on a set of JSONL files:
 
 | Tool | Scope | Job |
 |------|-------|-----|
 | `list_project_sessions` | project | Orient — what conversations exist, with stats |
 | `search_project` | project | Scan — which patterns hit, which sessions are hot |
 | `grep_session` | session | Examine — matches with context inside one conversation |
+| `grep_sessions` | sessions | Fan out — same patterns across N sessions in one call |
 | `read_turn` | turn | Read — full fidelity text around a specific moment |
 
 Each step narrows scope and increases fidelity. No tool switches modes or changes output shape based on hit volume.
 
-Entry text in `grep_session`, `read_turn`, and `browse_session` output uses pipe-delimited format: `timestamp|role|turn_id|full_length|display`. Roles: `U` = user, `A` = assistant, `T` = tool result (output from a tool call). The tool descriptions document this format in detail.
+Entry text in `grep_session`, `read_turn`, and `browse_session` output uses pipe-delimited format: `turn_id|timestamp|role|full_length|display`. `turn_id` leads so it's the first field to grab when feeding `read_turn`. Roles: `U` = user, `A` = assistant, `T` = tool result (output from a tool call). The tool descriptions document this format in detail.
 
 ### Controlling assistant turn detail with `hide`
 
@@ -41,11 +42,12 @@ Default is `""` (show and search everything). Pass `hide="outputs"` to suppress 
 
 ## The agent inspection tools
 
-Four tools for tracing subagent execution — a separate axis from conversation content:
+Tools for tracing subagent execution — a separate axis from conversation content:
 
 - **`list_agent_sessions`** — which sessions spawned subagents? Counts and dates.
 - **`list_session_agents`** — what agents did a specific session dispatch? Status, tokens, duration.
 - **`get_agent_detail`** — full prompt, result, stats for specific agent(s). Optional tool trace.
+- **`session_tool_audit`** — for every subagent in a session, tool counts + error rates + chronological tool-call traces. Use this to answer "are my agents using my tools right?" — see which tools land vs fail, where retries happened, which agents over-call.
 
 Use when tracing what an agent did, correlating outputs with sessions, or building timelines that distinguish "discussed doing X" from "dispatched agents to do X."
 
@@ -65,7 +67,7 @@ Use when tracing what an agent did, correlating outputs with sessions, or buildi
 
 Start with `search_project` using all your candidate patterns in one call. The tool accepts an array and scans all sessions in a single pass regardless of pattern count — 20 patterns costs the same as 1. Front-load everything you can think of. The results show which terms land (high hit count) vs dead weight (zero hits, omitted from output). Session IDs include dates, so you can reason about chronology directly without a separate `list_project_sessions` call.
 
-Then `grep_session` on the hot sessions with your best pattern. Matches appear with surrounding context — enough to understand what was happening. When you find the moment you need, `read_turn` gives you the full untruncated text.
+Then `grep_session` on the hot sessions with your best patterns. Like `search_project`, it takes a `patterns` list and returns per-pattern hit counts plus match blocks with surrounding context — front-load all your candidate terms in one call instead of OR-ing them into a kitchen-sink regex. When you find the moment you need, `read_turn` gives you the full untruncated text.
 
 ### The search → grep → read loop
 
@@ -82,4 +84,4 @@ Trace subagent execution top-down: `list_agent_sessions` identifies which sessio
 - Turn UUIDs from grep_session are the bridge to read_turn — grab them when you find something interesting.
 - `full_length` in grep output tells you how big an entry is before you read it. Large values (5000+) mean tool results or long outputs — use `read_turn` with a `limit` to avoid pulling in too much.
 - High agent counts in session listings signal orchestration sessions (fan-out research, multi-step workflows).
-- Search is exhaustive by default — patterns match against text, tool inputs (Bash commands, file paths, grep patterns), tool outputs, and assistant thinking. Write tight regex (e.g. `\bword\b`) to narrow noisy searches.
+- Search is exhaustive by default — patterns match against text, tool inputs (Bash commands, file paths, grep patterns), tool outputs, and assistant thinking. Write tight regex to narrow noisy searches.

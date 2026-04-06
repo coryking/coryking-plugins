@@ -23,12 +23,12 @@ from .conftest import FULL_UUID
 
 class TestFormatEntryLine:
     def test_pipe_format_has_8char_turn_id(self, human_entry):
-        """The turn_id field in pipe output must be 8 chars."""
+        """The turn_id field in pipe output must be 8 chars and lead the line."""
         line = format_entry_line(human_entry, truncate=500)
         parts = line.split("|")
-        # format: timestamp|role|turn_id|full_length|display
+        # format: turn_id|timestamp|role|full_length|display
         assert len(parts) == 5
-        turn_id = parts[2]
+        turn_id = parts[0]
         assert turn_id == "a9529cc1"
         assert len(turn_id) == 8
 
@@ -36,9 +36,9 @@ class TestFormatEntryLine:
         """Verify the overall pipe-delimited structure."""
         line = format_entry_line(human_entry, truncate=500)
         parts = line.split("|")
-        assert parts[0].isdigit()  # timestamp
-        assert parts[1] == "U"  # role
-        assert len(parts[2]) == 8  # turn_id
+        assert len(parts[0]) == 8  # turn_id
+        assert parts[1].isdigit()  # timestamp
+        assert parts[2] == "U"  # role
         assert parts[3].isdigit()  # full_length
 
 
@@ -56,13 +56,10 @@ class TestGrepSessionResponseSerialization:
             context_before=[],
             context_after=[],
         )
-        resp = GrepSessionResponse.from_matches(
+        resp = GrepSessionResponse.from_pattern_results(
             session_id=FULL_UUID,
-            matches=[match],
-            total=1,
-            limit=30,
+            results=[("hello", [match], 1)],
             truncate=500,
-            pattern="hello",
         )
         dumped = resp.model_dump()
         assert len(dumped["session"]) == 8

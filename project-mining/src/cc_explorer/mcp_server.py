@@ -5,6 +5,7 @@ All tools are read-only and return typed Pydantic response models.
 FastMCP auto-generates output schemas from return type annotations.
 """
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
@@ -19,12 +20,16 @@ from .utils import PrefixId
 from .responses import (
     AgentDetailResponse,
     AgentListResponse,
+    AgentToolAudit,
+    AgentToolCall,
     BrowseSessionResponse,
     GrepSessionResponse,
+    GrepSessionsResponse,
     ReadTurnResponse,
     SearchProjectResponse,
     SessionAgentsResponse,
     SessionListResponse,
+    SessionToolAuditResponse,
 )
 from .search import (
     ENTRY_TYPE_MAP,
@@ -35,10 +40,15 @@ from .search import (
     get_turn_context,
     load_sessions,
     resolve_project,
-    search as do_search,
+    search_multi,
     triage_multi,
 )
-from .subagents import extract_subagents, resolve_output_files, scan_output_file_stats
+from .subagents import (
+    extract_agent_tool_audit,
+    extract_subagents,
+    resolve_output_files,
+    scan_output_file_stats,
+)
 
 mcp = FastMCP("cc-explorer")
 
@@ -66,12 +76,36 @@ def _parse_hide_or_raise(value: str | None) -> frozenset[str]:
     """parse_hide that converts ValueError to ToolError for MCP entry points.
 
     Lives here (not in models.py) to keep FastMCP exception types out of the
-    pure-data layer. The three display tools all need this conversion.
+    pure-data layer. Every display tool that accepts `hide` needs this.
     """
     try:
         return parse_hide(value)
     except ValueError as e:
         raise ToolError(str(e))
+
+
+# UUIDs use hex digits and hyphens. The first 8 chars (the prefix form returned
+# by grep_session) are pure hex. Anything else is a hallucination — usually a
+# unix timestamp or a random word the model grabbed from a pipe-delimited line.
+_TURN_ID_PATTERN = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4,12})*$")
+
+
+def _validate_turn_id(turn: str) -> None:
+    """Reject empty or obviously-not-a-UUID turn values at the MCP boundary.
+
+    Catches two real bugs from production: agents passing turn="" and agents
+    passing the unix-timestamp field (e.g. "1775406360") instead of the
+    actual turn UUID. The first 8 chars of a UUID are hex; a 10-digit
+    decimal timestamp fails this regex on the very first character.
+    """
+    if not turn:
+        raise ToolError("turn must be a non-empty UUID or 8+ char prefix")
+    if not _TURN_ID_PATTERN.match(turn):
+        raise ToolError(
+            f"turn {turn!r} is not a valid UUID or prefix — expected hex digits "
+            f"(e.g. 'a1b2c3d4'), not a timestamp or arbitrary string. "
+            f"Grab the turn_id from the start of a pipe-delimited entry line."
+        )
 
 
 # =============================================================================
@@ -163,7 +197,7 @@ def search_project(
 ) -> SearchProjectResponse:
     """Scan a project's chat history for patterns, grouped by pattern with per-pattern hit counts and session breakdowns.
 
-    Search is exhaustive by default: every pattern is checked against conversation text, tool inputs (Bash commands, file paths, grep patterns), tool outputs, and assistant thinking. The pattern is the precision tool — use tight regex (e.g. `\\bword\\b`) to narrow noisy searches instead of a scope flag.
+    Search is exhaustive by default: every pattern is checked against conversation text, tool inputs (Bash commands, file paths, grep patterns), tool outputs, and assistant thinking. The pattern is the precision tool — use tight regex to narrow noisy searches instead of a scope flag.
 
     Pass all your candidate search terms at once — each gets its own hit count and session list so you can see which terms are useful and which aren't. Use separate patterns rather than regex OR pipes (e.g. ["facebook.*scrape", "fb_capture"] not "facebook.*scrape|fb_capture") to get this per-term breakdown. Results are sorted by hit count (hottest patterns and sessions first) and include session dates for chronological context. Follow up with grep_session on sessions that look promising.
     """
@@ -184,7 +218,7 @@ def search_project(
     if not any(r for _, results in all_results for r in results):
         raise ToolError(f"No matches for: {', '.join(patterns)}")
 
-    return SearchProjectResponse.from_triage(all_results, excerpt_width=excerpt_width)
+    return SearchProjectResponse.from_triage(all_results)
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -195,9 +229,11 @@ def grep_session(
             description="Session ID or prefix. Required — use search_project to find session IDs first."
         ),
     ],
-    pattern: Annotated[
-        str,
-        Field(description="Regex pattern to search for (case-insensitive)."),
+    patterns: Annotated[
+        list[str],
+        Field(
+            description="Regex patterns to search for (case-insensitive). Each gets its own hit count and match list. Use separate patterns rather than `|`-OR (e.g. ['fb_capture', 'facebook.*scrape'] not 'fb_capture|facebook.*scrape') so you can see which terms land and which are dead weight."
+        ),
     ],
     project: Annotated[
         str | None,
@@ -222,9 +258,9 @@ def grep_session(
     limit: Annotated[
         int,
         Field(
-            description="Max matches to return (like head -N). Overflow is truncated, not mode-switched."
+            description="Max match blocks to return per pattern (like head -N). Each pattern is capped independently so a noisy term can't drown out productive ones."
         ),
-    ] = 30,
+    ] = 15,
     truncate: Annotated[
         int,
         Field(
@@ -238,12 +274,17 @@ def grep_session(
         ),
     ] = None,
 ) -> GrepSessionResponse:
-    """Show matches for a pattern within a single conversation, with surrounding context.
+    """Show matches for one or more patterns within a single conversation, with surrounding context.
 
-    Like `rg -C3` on a single file — returns matching entries with surrounding turns for context. Search is exhaustive by default across text, tool inputs, tool outputs, and thinking blocks. Each entry includes its full character length so you can gauge size before calling read_turn.
+    Like `rg -C3` on a single file, but pattern-centric: pass all your candidate terms in one call and each gets its own hit count and match blocks. Zero-hit patterns are kept in the response so you see them as dead weight rather than guessing why they're missing.
 
-    Match blocks are returned with three fields: `before` (context turns before), `match` (the matching entry, excerpted on the hit so it stays visible even when truncated), and `after` (context turns after).
+    Search is exhaustive by default across text, tool inputs, tool outputs, and thinking blocks. Each entry includes its full character length so you can gauge size before calling read_turn.
+
+    Match blocks have three fields: `before` (context turns before), `match` (the matching entry, excerpted on the hit so it stays visible even when truncated), and `after` (context turns after).
     """
+    if not patterns:
+        raise ToolError("patterns must contain at least one pattern")
+
     hide_set = _parse_hide_or_raise(hide)
     proj = resolve_project(project)
     sessions = load_sessions(proj)
@@ -257,26 +298,151 @@ def grep_session(
 
     base_types = ENTRY_TYPE_MAP[role]
 
-    result = do_search(
+    # Single-pass over the session's entries — search_multi checks every
+    # pattern per entry instead of re-walking the transcript per pattern.
+    multi_results = search_multi(
         sessions,
-        pattern,
+        patterns,
         base_types=base_types,
         context=context,
-        max_results=limit,
+        max_results_per_pattern=limit,
+        hide=hide_set,
+    )
+    pattern_results = multi_results[sessions[0].session_id]
+
+    if not any(matches for _, matches, _ in pattern_results):
+        raise ToolError(f"No matches for any pattern: {', '.join(patterns)}")
+
+    return GrepSessionResponse.from_pattern_results(
+        session_id=sessions[0].session_id,
+        results=pattern_results,
+        truncate=truncate,
         hide=hide_set,
     )
 
-    if not result.matches:
-        raise ToolError(f"No matches for: {pattern}")
 
-    return GrepSessionResponse.from_matches(
-        session_id=sessions[0].session_id,
-        matches=result.matches,
-        total=result.total_matches,
-        limit=limit,
-        truncate=truncate,
-        pattern=pattern,
+@mcp.tool(annotations=_TOOL_ANNOTATIONS)
+def grep_sessions(
+    sessions: Annotated[
+        list[str],
+        Field(
+            description="Session IDs or prefixes to search. Required — use search_project to find which sessions are hot, then fan out across them in one call instead of looping grep_session."
+        ),
+    ],
+    patterns: Annotated[
+        list[str],
+        Field(
+            description="Regex patterns to search for (case-insensitive). Each gets its own hit count and match list per session. Use separate patterns rather than `|`-OR so you can see which terms land."
+        ),
+    ],
+    project: Annotated[
+        str | None,
+        Field(
+            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
+        ),
+    ] = None,
+    context: Annotated[
+        int,
+        Field(
+            description="Number of surrounding turns to include with each match (like grep -C).",
+            ge=0,
+            le=5,
+        ),
+    ] = 2,
+    role: Annotated[
+        ConversationRole,
+        Field(
+            description="Which side of the conversation to search: 'user' for human messages, 'assistant' for agent responses, 'all' for both."
+        ),
+    ] = ConversationRole.user,
+    limit: Annotated[
+        int,
+        Field(
+            description="Max match blocks to return per pattern per session. Each (session, pattern) cell is capped independently."
+        ),
+    ] = 10,
+    truncate: Annotated[
+        int,
+        Field(
+            description="Truncate each content piece to N chars. 0 = full content. The `match` line in each block is centered on the pattern hit so mid-entry matches stay visible.",
+        ),
+    ] = 500,
+    hide: Annotated[
+        str | None,
+        Field(
+            description="Comma-separated assistant-turn content to suppress. Atoms: 'inputs', 'outputs', 'thinking'. Default empty.",
+        ),
+    ] = None,
+) -> GrepSessionsResponse:
+    """Fan out grep across multiple sessions in one call.
+
+    Use this when you've already identified your hot sessions (via `search_project`) and want context blocks across all of them for the same patterns. One call replaces N `grep_session` calls.
+
+    Returns one entry per session that had at least one match (zero-hit sessions are omitted). Each entry has the same shape as `grep_session` output: per-pattern hit counts and match blocks with surrounding context. Sort order preserves the order of `sessions`.
+    """
+    if not sessions:
+        raise ToolError("sessions must contain at least one session id")
+    if not patterns:
+        raise ToolError("patterns must contain at least one pattern")
+
+    hide_set = _parse_hide_or_raise(hide)
+    proj = resolve_project(project)
+    all_sessions = load_sessions(proj)
+    if not all_sessions:
+        raise ToolError(f"No conversations found for {proj}")
+
+    # Resolve each session prefix to a SessionInfo, preserving input order
+    resolved: list = []
+    not_found: list[str] = []
+    for sid in sessions:
+        match = next((s for s in all_sessions if PrefixId(s.session_id) == sid), None)
+        if match is None:
+            not_found.append(sid)
+        else:
+            resolved.append(match)
+
+    # All-prefix-failure is handled together with all-pattern-failure below,
+    # so the caller gets one consistent error path.
+
+    base_types = ENTRY_TYPE_MAP[role]
+
+    # One single-pass walk per session, all patterns at once.
+    multi_results = search_multi(
+        resolved,
+        patterns,
+        base_types=base_types,
+        context=context,
+        max_results_per_pattern=limit,
         hide=hide_set,
+    )
+
+    session_responses: list[GrepSessionResponse] = []
+    for sess in resolved:  # preserve caller-provided order
+        pattern_results = multi_results.get(sess.session_id, [])
+        if not any(matches for _, matches, _ in pattern_results):
+            continue
+        session_responses.append(
+            GrepSessionResponse.from_pattern_results(
+                session_id=sess.session_id,
+                results=pattern_results,
+                truncate=truncate,
+                hide=hide_set,
+            )
+        )
+
+    if not session_responses:
+        # Distinguish two failure modes in the error text so the caller
+        # can tell a typo (all prefixes unresolved) from a clean miss
+        # (every prefix resolved but no patterns matched anything).
+        if not_found and len(not_found) == len(sessions):
+            raise ToolError(f"No sessions matched: {', '.join(not_found)}")
+        raise ToolError(
+            f"No matches in any session for any pattern: {', '.join(patterns)}"
+        )
+
+    return GrepSessionsResponse(
+        sessions=session_responses,
+        not_found=not_found or None,
     )
 
 
@@ -327,6 +493,7 @@ def read_turn(
 
     Use the full_length values from grep_session to gauge entry sizes before reading. Use `context=N` to control the radius (turns on each side of the anchor).
     """
+    _validate_turn_id(turn)
     hide_set = _parse_hide_or_raise(hide)
     proj = resolve_project(project)
     sessions = load_sessions(proj)
@@ -495,7 +662,6 @@ def list_session_agents(
         str | None,
         Field(description="Directory containing saved .output files."),
     ] = None,
-    compaction: Annotated[bool, Field(description="Show compaction details.")] = False,
 ) -> SessionAgentsResponse:
     """List all agents spawned by a specific session, with stats and output file info."""
     proj = resolve_project(project)
@@ -549,7 +715,6 @@ def get_agent_detail(
         bool,
         Field(description="Omit reasoning text from trace output."),
     ] = False,
-    compaction: Annotated[bool, Field(description="Show compaction details.")] = False,
     truncate: Annotated[
         int,
         Field(
@@ -608,6 +773,106 @@ def _find_agent(sessions, agent_id: str):
             if matches_id(sa, agent_id):
                 return sa, s
     return None, None
+
+
+@mcp.tool(annotations=_TOOL_ANNOTATIONS)
+def session_tool_audit(
+    session: Annotated[
+        str,
+        Field(description="Session ID or prefix to audit."),
+    ],
+    project: Annotated[
+        str | None,
+        Field(
+            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
+        ),
+    ] = None,
+    tool_name_filter: Annotated[
+        str | None,
+        Field(
+            description="Substring filter applied to tool names — e.g. 'cc-explorer' to show only cc-explorer calls. Omit to include every tool. Per-tool counts in `tool_counts` are NOT filtered (so you still see what each agent used overall)."
+        ),
+    ] = None,
+    task_output_dir: Annotated[
+        str | None,
+        Field(description="Directory containing saved .output files."),
+    ] = None,
+    truncate: Annotated[
+        int,
+        Field(
+            description="Truncate each tool input summary and error message to N chars.",
+            ge=20,
+        ),
+    ] = 80,
+) -> SessionToolAuditResponse:
+    """Audit how every subagent in a session used its tools.
+
+    For each subagent in the target session, walks the agent's transcript and returns: tool counts, error rate, and a chronological list of tool calls (optionally filtered by name substring). Each call includes timestamp, tool name, truncated input args, and an error flag set when the tool result was an error or zero-match response.
+
+    Use this to answer 'are my agents using my tools right?' — see which tools land vs fail, where retries happened, and which agents over-call. Replaces hand-rolled scripts that walk the per-agent JSONL files in `<session_dir>/subagents/`.
+    """
+    proj = resolve_project(project)
+    sessions = load_sessions(proj)
+    if not sessions:
+        raise ToolError(f"No conversations found for {proj}")
+
+    target = next((s for s in sessions if PrefixId(s.session_id) == session), None)
+    if target is None:
+        raise ToolError(f"Session {session} not found")
+
+    agents = extract_subagents(target.path)
+    if not agents:
+        raise ToolError(f"Session {session} dispatched no subagents")
+
+    total_dispatched = len(agents)
+
+    output_dir = Path(task_output_dir).expanduser() if task_output_dir else None
+    resolve_output_files(agents, output_dir)
+    entries_map = scan_output_file_stats(agents, keep_entries=True)
+
+    audits: list[AgentToolAudit] = []
+    total_calls = 0
+    total_errors = 0
+    for sa in agents:
+        if not sa.agent_id or sa.agent_id not in entries_map:
+            continue
+
+        entries = entries_map[sa.agent_id]
+        calls, tool_counts, error_count = extract_agent_tool_audit(
+            entries, tool_name_filter=tool_name_filter, truncate=truncate
+        )
+
+        agent_total = sum(tool_counts.values())
+        total_calls += agent_total
+        total_errors += error_count
+
+        audits.append(
+            AgentToolAudit(
+                agent_id=sa.agent_id,
+                type=sa.subagent_type or "",
+                description=sa.description or "",
+                tool_call_count=agent_total,
+                error_count=error_count,
+                tool_counts=tool_counts,
+                calls=[AgentToolCall(**c) for c in calls],
+            )
+        )
+
+    if not audits:
+        raise ToolError(
+            f"Session {session} has subagents but none have accessible output files to audit"
+        )
+
+    return SessionToolAuditResponse(
+        session=PrefixId(target.session_id),
+        title=target.title,
+        total_dispatched=total_dispatched,
+        total_audited=len(audits),
+        total_tool_calls=total_calls,
+        total_errors=total_errors,
+        tool_name_filter=tool_name_filter,
+        agents=audits,
+    )
 
 
 def main():

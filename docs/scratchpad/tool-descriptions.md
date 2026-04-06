@@ -6,10 +6,10 @@ These are the verbatim docstrings and Field descriptions for the executor to use
 
 ```
 Conversation text in results uses pipe-delimited entry line format:
-  timestamp|role|turn_id|full_length|display
+  turn_id|timestamp|role|full_length|display
+  - turn_id: first 8 chars of turn UUID (leads so it's grabbed first for read_turn)
   - timestamp: unix epoch seconds
-  - role: U (user) or A (assistant)
-  - turn_id: first 8 chars of turn UUID
+  - role: U (user), A (assistant), or T (tool result)
   - full_length: character count of the full untruncated entry
   - display: truncated entry text with smart tool call summaries (e.g. → Edit(/path/to/file))
 ```
@@ -106,7 +106,7 @@ Like `rg -C3` on a single file — returns matching entries centered and truncat
 
 Results are grouped into match blocks (like grep's `--` separator between context groups). Each block is a window of turns around a match, returned in chronological order.
 
-Entry format in chats arrays: timestamp|role|turn_id|full_length|display
+Entry format in chats arrays: turn_id|timestamp|role|full_length|display
 """
 ```
 
@@ -151,16 +151,16 @@ limit: Annotated[
   "matches": [
     {
       "chats": [
-        "1710644400|A|7276b50a|3200|Here's the refactored version with the new pattern... → Edit(src/auth.py)",
-        "1710644401|U|d7ab570b|147|ugh, that's not what I meant. I said keep the original structure",
-        "1710644403|A|4743da8f|890|You're right, I apologize. Let me revert to the original... → Edit(src/auth.py)"
+        "7276b50a|1710644400|A|3200|Here's the refactored version with the new pattern... → Edit(src/auth.py)",
+        "d7ab570b|1710644401|U|147|ugh, that's not what I meant. I said keep the original structure",
+        "4743da8f|1710644403|A|890|You're right, I apologize. Let me revert to the original... → Edit(src/auth.py)"
       ]
     },
     {
       "chats": [
-        "1710645100|U|a1b2c3d4|82|can you check if the slashdot import actually finished",
-        "1710645102|A|e5f6a7b8|4832|Let me search for that. → search_chat_history({'patterns': ['slashdot.*finished'...",
-        "1710645104|A|c9d0e1f2|210|The import completed successfully with 2,847 stories imported."
+        "a1b2c3d4|1710645100|U|82|can you check if the slashdot import actually finished",
+        "e5f6a7b8|1710645102|A|4832|Let me search for that. → search_chat_history({'patterns': ['slashdot.*finished'...",
+        "c9d0e1f2|1710645104|A|210|The import completed successfully with 2,847 stories imported."
       ]
     }
   ]
@@ -194,7 +194,7 @@ Like `sed -n '450,470p'` — reads a specific section of the conversation withou
 
 Use the full_length values from grep_session output to gauge how large entries are before reading. If an entry is very large, use the limit parameter to cap per-entry character output.
 
-Entry format in chats array: timestamp|role|turn_id|full_length|display
+Entry format in chats array: turn_id|timestamp|role|full_length|display
 (When limit is not set, display contains the full untruncated text — full_length == len(display).)
 """
 ```
@@ -225,11 +225,11 @@ limit: Annotated[
   "session_id": "4471fb60",
   "turn_id": "d7ab570b",
   "chats": [
-    "1710644390|U|f1e2d3c4|312|I need to figure out why the slashdot import stalled. The logs show it got to about 500 requests and then just stopped without an error.",
-    "1710644392|A|a5b6c7d8|4832|Let me check the import logs. → Bash('tail -50 /var/log/import.log')",
-    "1710644393|A|d7ab570b|890|The import stalled because the rate limiter kicked in at 500 requests. The slashdot API returns 429 after hitting their rate limit, and our fetcher treats 429 as a fatal error instead of backing off.",
-    "1710644410|U|b9c0d1e2|43|ok so we need to add backoff",
-    "1710644412|A|e3f4a5b6|2100|Right. I'll add exponential backoff to the fetcher. → Edit(src/fetcher.py, old_string='if resp.status_code != 200: raise FetchError(f\"HTTP {resp.status_code}\")', new_string='if resp.status_code == 429: ...')"
+    "f1e2d3c4|1710644390|U|312|I need to figure out why the slashdot import stalled. The logs show it got to about 500 requests and then just stopped without an error.",
+    "a5b6c7d8|1710644392|A|4832|Let me check the import logs. → Bash('tail -50 /var/log/import.log')",
+    "d7ab570b|1710644393|A|890|The import stalled because the rate limiter kicked in at 500 requests. The slashdot API returns 429 after hitting their rate limit, and our fetcher treats 429 as a fatal error instead of backing off.",
+    "b9c0d1e2|1710644410|U|43|ok so we need to add backoff",
+    "e3f4a5b6|1710644412|A|2100|Right. I'll add exponential backoff to the fetcher. → Edit(src/fetcher.py, old_string='if resp.status_code != 200: raise FetchError(f\"HTTP {resp.status_code}\")', new_string='if resp.status_code == 429: ...')"
   ]
 }
 ```

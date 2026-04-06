@@ -37,6 +37,11 @@ class PrefixId(str):
     both full UUIDs and short prefixes.
     """
 
+    def __new__(cls, value: str = "") -> PrefixId:
+        # Explicit signature so pyright sees PrefixId(str) -> PrefixId
+        # rather than inheriting str.__new__'s return type.
+        return super().__new__(cls, value)
+
     @property
     def full(self) -> str:
         """The complete value as originally provided."""

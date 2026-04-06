@@ -196,17 +196,15 @@ class TestMatchLineCentered:
             context_after=[],
         )
 
-        resp = GrepSessionResponse.from_matches(
+        resp = GrepSessionResponse.from_pattern_results(
             session_id=SESSION_ID,
-            matches=[hit],
-            total=1,
-            limit=30,
+            results=[("HERE_IS_THE_MATCH", [hit], 1)],
             truncate=500,
-            pattern="HERE_IS_THE_MATCH",
         )
 
-        assert len(resp.matches) == 1
-        block = resp.matches[0]
+        assert len(resp.patterns) == 1
+        assert len(resp.patterns[0].matches) == 1
+        block = resp.patterns[0].matches[0]
         assert "HERE_IS_THE_MATCH" in block.match, (
             f"expected match token visible in centered excerpt, got: {block.match[:200]}..."
         )
@@ -224,15 +222,12 @@ class TestMatchLineCentered:
             context_after=[],
         )
 
-        resp = GrepSessionResponse.from_matches(
+        resp = GrepSessionResponse.from_pattern_results(
             session_id=SESSION_ID,
-            matches=[hit],
-            total=1,
-            limit=30,
+            results=[("HERE_IS_THE_MATCH", [hit], 1)],
             truncate=300,
-            pattern="HERE_IS_THE_MATCH",
         )
-        block = resp.matches[0]
+        block = resp.patterns[0].matches[0]
         assert "HERE_IS_THE_MATCH" in block.match
 
 
@@ -254,15 +249,12 @@ class TestMatchBlockShape:
             )
             assert len(result.matches) == 1
 
-            resp = GrepSessionResponse.from_matches(
+            resp = GrepSessionResponse.from_pattern_results(
                 session_id=SESSION_ID,
-                matches=result.matches,
-                total=1,
-                limit=30,
+                results=[("MATCHTOKEN", result.matches, 1)],
                 truncate=200,
-                pattern="MATCHTOKEN",
             )
-            block = resp.matches[0]
+            block = resp.patterns[0].matches[0]
             assert isinstance(block.before, list)
             assert isinstance(block.match, str)
             assert isinstance(block.after, list)

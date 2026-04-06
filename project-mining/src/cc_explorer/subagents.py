@@ -98,7 +98,7 @@ def _parse_agent_spawn(
     """
     if tool_name == "TaskCreate":
         return SubagentInfo(
-            tool_use_id=tool_id,
+            tool_use_id=PrefixId(tool_id),
             subagent_type="background",
             description=inp.get("subject", inp.get("description", "")),
             prompt=inp.get("description", ""),
@@ -106,7 +106,7 @@ def _parse_agent_spawn(
         )
     # Agent or Task — same shape
     return SubagentInfo(
-        tool_use_id=tool_id,
+        tool_use_id=PrefixId(tool_id),
         subagent_type=inp.get("subagent_type", ""),
         description=inp.get("description", ""),
         prompt=inp.get("prompt", ""),
@@ -155,7 +155,7 @@ def extract_subagents(transcript_path: Path) -> list[SubagentInfo]:
                 matched_id = _find_tool_use_id(content_items, spawns)
                 if matched_id:
                     info = spawns[matched_id]
-                    info.agent_id = tur.get("agentId", "")
+                    info.agent_id = PrefixId(tur.get("agentId", ""))
                     info.status = tur.get("status", "unknown")
                     info.output_file = tur.get("outputFile", "")
 
@@ -177,7 +177,7 @@ def extract_subagents(transcript_path: Path) -> list[SubagentInfo]:
                 if matched_id:
                     task_info = tur["task"]
                     info = spawns[matched_id]
-                    info.agent_id = str(task_info.get("id", ""))
+                    info.agent_id = PrefixId(str(task_info.get("id", "")))
                     info.status = "background"
                     # Build reverse lookup using task ID
                     if info.agent_id:
@@ -418,3 +418,117 @@ def _read_agent_id(path: Path) -> Optional[str]:
     except (json.JSONDecodeError, OSError):
         pass
     return None
+
+
+# Heuristics for "this tool result was an error or zero-hit response."
+# Catches both is_error=True and the no-match ToolError text the cc-explorer
+# tools raise via FastMCP (e.g. "No matches for: pattern").
+_ERROR_MARKERS = (
+    "no matches",
+    "not found",
+    "validation error",
+    "input should be",
+    "missing required",
+    "unexpected keyword",
+    "exceeds maximum",
+)
+
+
+def _result_is_error(text: str, is_error_flag: bool) -> bool:
+    """True when a tool result represents an error or zero-match response."""
+    if is_error_flag:
+        return True
+    if not text:
+        return False
+    head = text[:300].lower()
+    return any(marker in head for marker in _ERROR_MARKERS)
+
+
+def _format_tool_input_summary(input_obj: Any, truncate: int) -> str:
+    """One-line summary of a tool_use input dict, truncated for display."""
+    if not input_obj:
+        return ""
+    try:
+        rendered = json.dumps(input_obj, default=str, separators=(",", ":"))
+    except (TypeError, ValueError):
+        rendered = str(input_obj)
+    rendered = rendered.replace("\n", " ")
+    if truncate and len(rendered) > truncate:
+        rendered = rendered[: truncate - 1] + "…"
+    return rendered
+
+
+def extract_agent_tool_audit(
+    entries: list[TranscriptEntry],
+    tool_name_filter: Optional[str] = None,
+    truncate: int = 80,
+) -> tuple[list[dict[str, Any]], dict[str, int], int]:
+    """Walk a subagent transcript and extract tool calls with error pairing.
+
+    Returns (calls, tool_counts, error_count) where:
+      - calls: list of dicts with time/tool/input_summary/error/error_text,
+        in chronological order, filtered by `tool_name_filter` substring
+      - tool_counts: full per-tool invocation counts (NOT filtered, so the
+        caller can show what was used overall even when filtering display)
+      - error_count: total errors across all tool calls (filtered by filter
+        when filter is set, otherwise across everything)
+    """
+    # Index tool_use blocks by id so we can pair them with later tool_results
+    pending: dict[str, dict[str, Any]] = {}
+    calls: list[dict[str, Any]] = []
+    tool_counts: Counter[str] = Counter()
+    error_count = 0
+
+    for entry in entries:
+        if isinstance(entry, AssistantTranscriptEntry):
+            ts = entry.timestamp.strftime("%H:%M:%S") if entry.timestamp else "        "
+            for item in entry.message.content:
+                if not isinstance(item, ToolUseContent):
+                    continue
+                full_name = item.name
+                short = full_name.split("__")[-1]
+                tool_counts[short] += 1
+
+                if tool_name_filter and tool_name_filter not in full_name:
+                    continue
+
+                call = {
+                    "time": ts,
+                    "tool": short,
+                    "input_summary": _format_tool_input_summary(item.input, truncate),
+                    "error": False,
+                    "error_text": None,
+                }
+                pending[item.id] = call
+                calls.append(call)
+
+        elif isinstance(entry, ToolResultEntry):
+            content = entry.message.content
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, ToolResultContent):
+                    continue
+                call = pending.pop(block.tool_use_id, None)
+                if call is None:
+                    continue
+
+                # Render text from result content
+                text_parts: list[str] = []
+                if isinstance(block.content, str):
+                    text_parts.append(block.content)
+                elif isinstance(block.content, list):
+                    for sub in block.content:
+                        if isinstance(sub, dict) and sub.get("type") == "text":
+                            text_parts.append(sub.get("text", ""))
+                text = " ".join(text_parts)
+
+                if _result_is_error(text, bool(block.is_error)):
+                    call["error"] = True
+                    snippet = text.strip().replace("\n", " ")
+                    if truncate and len(snippet) > truncate:
+                        snippet = snippet[: truncate - 1] + "…"
+                    call["error_text"] = snippet
+                    error_count += 1
+
+    return calls, dict(tool_counts.most_common()), error_count

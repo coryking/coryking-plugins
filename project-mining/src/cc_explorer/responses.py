@@ -5,7 +5,7 @@ These models ARE the output documentation — field names, types, and
 descriptions appear in the tool schema the agent sees.
 
 Conversation text in chats arrays uses pipe-delimited entry line format:
-  timestamp|role|turn_id|full_length|display
+  turn_id|timestamp|role|full_length|display
 """
 
 from __future__ import annotations
@@ -119,7 +119,6 @@ class SearchProjectResponse(SparseModel):
     def from_triage(
         cls,
         all_results: PatternTriageResults,
-        excerpt_width: int = 150,
     ) -> SearchProjectResponse:
         matches: list[PatternMatch] = []
 
@@ -174,59 +173,104 @@ class MatchBlock(SparseModel):
     )
 
 
-class GrepSessionResponse(SparseModel):
-    """Matches for a pattern within a single session."""
+class GrepPatternResult(SparseModel):
+    """Per-pattern results within a single session.
 
-    session: PrefixId = Field(description="Session identifier.")
-    showing: int = Field(description="Number of matches returned.")
-    total_hits: int = Field(description="Total matches found (may exceed showing if overflow).")
+    Mirrors `search_project`'s per-pattern shape so you can see at a glance
+    which terms landed (`hits`) and which were dead weight. The actual context
+    blocks live in `matches`.
+    """
+
+    pattern: str = Field(description="The regex pattern that was searched.")
+    hits: int = Field(description="Total matches in this session for this pattern.")
+    showing: int = Field(description="Number of match blocks returned (after limit).")
     overflow: str | None = Field(
         default=None,
-        description="Hint when results were truncated — narrow your pattern or use read_turn.",
+        description="Hint when results were truncated — narrow this pattern or use read_turn.",
     )
     matches: list[MatchBlock] = Field(
-        description="Match blocks in chronological order. Each block has before/match/after fields.",
+        default_factory=list,
+        description="Match blocks in chronological order. Empty list for zero-hit patterns.",
+    )
+
+
+class GrepSessionResponse(SparseModel):
+    """Matches for one or more patterns within a single session.
+
+    Pattern-centric: each input pattern gets its own hit count and match list,
+    so you can tell which terms are productive without re-running. Zero-hit
+    patterns are kept in the response (with `hits: 0`) so you see them as
+    dead weight rather than guessing why they're missing.
+    """
+
+    session: PrefixId = Field(description="Session identifier.")
+    patterns: list[GrepPatternResult] = Field(
+        description="Per-pattern results, sorted by hit count descending.",
     )
 
     @classmethod
-    def from_matches(
+    def from_pattern_results(
         cls,
         session_id: str,
-        matches: list[MatchHit],
-        total: int,
-        limit: int,
+        results: list[tuple[str, list[MatchHit], int]],
         truncate: int,
-        pattern: str,
         hide: frozenset[str] = frozenset(),
     ) -> GrepSessionResponse:
+        """Build response from a list of (pattern, matches, total_hits) tuples."""
 
-        overflow = None
-        if len(matches) < total:
-            overflow = "narrow your pattern or use read_turn for specific entries"
+        pattern_results: list[GrepPatternResult] = []
+        for pattern, matches, total in results:
+            compiled = re.compile(pattern, re.IGNORECASE)
+            match_blocks: list[MatchBlock] = []
+            for match in matches:
+                before = [
+                    format_entry_line(e, truncate=truncate, hide=hide)
+                    for e in match.context_before
+                ]
+                match_line = format_entry_line(
+                    match.entry, truncate=truncate, hide=hide, center_pattern=compiled
+                )
+                after = [
+                    format_entry_line(e, truncate=truncate, hide=hide)
+                    for e in match.context_after
+                ]
+                match_blocks.append(MatchBlock(before=before, match=match_line, after=after))
 
-        compiled = re.compile(pattern, re.IGNORECASE)
-        match_blocks: list[MatchBlock] = []
-        for match in matches:
-            before = [
-                format_entry_line(e, truncate=truncate, hide=hide)
-                for e in match.context_before
-            ]
-            match_line = format_entry_line(
-                match.entry, truncate=truncate, hide=hide, center_pattern=compiled
+            overflow = None
+            if len(matches) < total:
+                overflow = "narrow this pattern or use read_turn for specific entries"
+
+            pattern_results.append(
+                GrepPatternResult(
+                    pattern=pattern,
+                    hits=total,
+                    showing=len(matches),
+                    overflow=overflow,
+                    matches=match_blocks,
+                )
             )
-            after = [
-                format_entry_line(e, truncate=truncate, hide=hide)
-                for e in match.context_after
-            ]
-            match_blocks.append(MatchBlock(before=before, match=match_line, after=after))
 
-        return cls(
-            session=PrefixId(session_id),
-            showing=len(matches),
-            total_hits=total,
-            overflow=overflow,
-            matches=match_blocks,
-        )
+        pattern_results.sort(key=lambda p: p.hits, reverse=True)
+        return cls(session=PrefixId(session_id), patterns=pattern_results)
+
+
+class GrepSessionsResponse(SparseModel):
+    """Pattern matches across multiple sessions in a single call.
+
+    The fan-out version of `grep_session`: same per-pattern shape per session,
+    but you pass N sessions and N patterns and get back one entry per session
+    that had at least one hit. Sessions with zero matches across all patterns
+    are omitted (intentionally — `not_found` is the way to distinguish a typo
+    from an empty result).
+    """
+
+    sessions: list[GrepSessionResponse] = Field(
+        description="Per-session results, in the order the caller passed them. Only sessions with at least one match across the given patterns are included.",
+    )
+    not_found: list[str] | None = Field(
+        default=None,
+        description="Session prefixes the caller passed that did not resolve to any session. Present only when at least one prefix failed to resolve and at least one resolved — when every prefix fails the tool raises ToolError instead.",
+    )
 
 
 # =============================================================================
@@ -240,7 +284,7 @@ class ReadTurnResponse(SparseModel):
     session: PrefixId | None = Field(default=None, description="Session identifier.")
     turn: PrefixId = Field(description="Turn identifier.")
     chats: list[str] = Field(
-        description="Pipe-delimited entry lines: timestamp|role|turn_id|full_length|display. Full untruncated text unless truncate was set.",
+        description="Pipe-delimited entry lines: turn_id|timestamp|role|full_length|display. Full untruncated text unless truncate was set.",
     )
 
     @classmethod
@@ -276,7 +320,7 @@ class BrowseSessionResponse(SparseModel):
     total_turns: int = Field(description="Total conversation turns in the session.")
     anchor: PrefixId | None = Field(default=None, description="Turn used as anchor, if one was specified.")
     chats: list[str] = Field(
-        description="Pipe-delimited entry lines: timestamp|role|turn_id|full_length|display.",
+        description="Pipe-delimited entry lines: turn_id|timestamp|role|full_length|display.",
     )
 
     @classmethod
@@ -452,3 +496,59 @@ class AgentListResponse(SparseModel):
     """Multiple agent details (when get_agent_detail receives multiple IDs)."""
 
     agents: list[AgentDetailResponse] = Field(description="Detail for each requested agent.")
+
+
+# =============================================================================
+# session_tool_audit
+# =============================================================================
+
+
+class AgentToolCall(SparseModel):
+    """A single tool invocation inside a subagent's transcript."""
+
+    time: str = Field(description="HH:MM:SS local timestamp.")
+    tool: str = Field(description="Short tool name (after the last `__` for MCP tools).")
+    input_summary: str = Field(description="Truncated tool input args, single-line.")
+    error: bool = Field(default=False, description="True when the tool result was an error or no-match.")
+    error_text: str | None = Field(default=None, description="Truncated error message when error=True.")
+
+
+class AgentToolAudit(SparseModel):
+    """Per-agent tool usage audit: counts, error rate, full chronological trace."""
+
+    agent_id: PrefixId = Field(description="Agent identifier.")
+    type: str = Field(description="Subagent type.")
+    description: str = Field(description="Short description passed to the agent.")
+    tool_call_count: int = Field(description="Total tool invocations made by this agent.")
+    error_count: int = Field(description="Tool calls whose result was an error or no-match.")
+    tool_counts: dict[str, int] = Field(description="Short tool name → invocation count.")
+    calls: list[AgentToolCall] = Field(
+        default_factory=list,
+        description="Chronological list of tool calls. Filtered by `tool_name_filter` if provided.",
+    )
+
+
+class SessionToolAuditResponse(SparseModel):
+    """Per-subagent tool usage audit for a single session.
+
+    Built to answer "are my agents using my tools right?" without writing a
+    one-off script. For each subagent in the session, returns tool counts,
+    error rate, and a chronological trace of tool calls (optionally filtered
+    by name substring).
+    """
+
+    session: PrefixId = Field(description="Session identifier.")
+    title: str | None = Field(default=None, description="Session title.")
+    total_dispatched: int = Field(
+        description="Number of subagents the session spawned, regardless of whether their output files were accessible. This is the truth about how much fan-out happened."
+    )
+    total_audited: int = Field(
+        description="Number of subagents this audit could actually inspect — the subset of dispatched agents whose .output files were readable. When this is less than total_dispatched, work was skipped and the agents list reflects only the audited subset."
+    )
+    total_tool_calls: int = Field(description="Aggregate tool calls across all audited agents.")
+    total_errors: int = Field(description="Aggregate error/no-match results across all audited agents.")
+    tool_name_filter: str | None = Field(
+        default=None,
+        description="Substring filter applied to tool names, if any.",
+    )
+    agents: list[AgentToolAudit] = Field(description="Per-agent audits in dispatch order.")

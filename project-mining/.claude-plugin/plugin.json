@@ -1,6 +1,6 @@
 {
   "name": "project-mining",
-  "version": "2.16.1",
+  "version": "2.22.0",
   "description": "Mine project histories for behavioral evidence. Search chat logs, git history, docs, and code for concrete examples of specific patterns, values, or skills.",
   "author": {
     "name": "Cory King",

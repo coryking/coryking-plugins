@@ -239,7 +239,7 @@ def load_transcript(path: Path) -> list[TranscriptEntry]:
     return entries
 
 
-def load_conversations(project_path: str) -> dict[str, Path]:
+def load_conversations(project_path: str) -> dict[PrefixId, Path]:
     """Find all JSONL conversation files for a project.
 
     Returns {session_id: path} mapping where session_id is the UUID
