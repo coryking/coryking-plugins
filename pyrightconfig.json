@@ -1,0 +1,18 @@
+{
+  "include": ["project-mining/src"],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.venv",
+    "**/.*"
+  ],
+  "venvPath": "project-mining",
+  "venv": ".venv",
+  "pythonVersion": "3.12",
+  "executionEnvironments": [
+    {
+      "root": "project-mining/src",
+      "extraPaths": ["project-mining/src"]
+    }
+  ]
+}

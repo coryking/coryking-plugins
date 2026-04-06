@@ -26,7 +26,7 @@ from .models import (
 )
 from .formatting import _match_example
 from .parser import load_conversations, load_transcript
-from .utils import smart_truncate
+from .utils import PrefixId, smart_truncate
 
 
 # =============================================================================
@@ -115,7 +115,7 @@ def extract_tool_text(entry: AssistantTranscriptEntry) -> str:
 class SessionInfo:
     """Metadata about a conversation session."""
 
-    session_id: str
+    session_id: PrefixId
     path: Path
     title: str  # auto-generated from first human message
     first_timestamp: Optional[datetime]
@@ -136,8 +136,8 @@ class TriageResult:
 class MatchHit:
     """A single search match with surrounding context."""
 
-    session_id: str
-    turn_uuid: str
+    session_id: PrefixId
+    turn_uuid: PrefixId
     entry: TranscriptEntry
     context_before: list[TranscriptEntry]
     context_after: list[TranscriptEntry]
@@ -370,7 +370,11 @@ def triage(
         count = 0
         first_example = ""
         for entry in entries:
-            if isinstance(entry, search_types) and _entry_matches(entry, compiled, hide):
+            if not isinstance(entry, search_types):
+                continue
+            if not isinstance(entry, BaseTranscriptEntry):
+                continue
+            if _entry_matches(entry, compiled, hide):
                 count += 1
                 if not first_example:
                     first_example = _match_example(
@@ -406,6 +410,8 @@ def triage_multi(
         for entry in entries:
             if not isinstance(entry, search_types):
                 continue
+            if not isinstance(entry, BaseTranscriptEntry):
+                continue
             for pi, (_, regex) in enumerate(compiled):
                 if _entry_matches(entry, regex, hide):
                     count, example = accum[pi].get(si, (0, ""))
@@ -426,6 +432,69 @@ def triage_multi(
         results.append((pat, session_results))
 
     return results
+
+
+def search_multi(
+    sessions: list[SessionInfo],
+    patterns: list[str],
+    *,
+    base_types: tuple[type, ...] = (HumanEntry,),
+    context: int = 1,
+    max_results_per_pattern: int = 30,
+    hide: frozenset[str] = frozenset(),
+) -> dict[PrefixId, list[tuple[str, list[MatchHit], int]]]:
+    """Search N patterns across N sessions in a single pass per session.
+
+    Mirrors triage_multi's accumulator shape but holds full MatchHit objects
+    (with surrounding context) instead of count-only TriageResult. Each
+    session's transcript is loaded once and every pattern is checked against
+    every entry — vs the alternative of looping the single-pattern `search()`
+    which would re-walk the transcript N times per session.
+
+    Returns: {session_id: [(pattern, matches, total_hits), ...]} where
+    `matches` is capped at `max_results_per_pattern` per (session, pattern)
+    cell and `total_hits` is the uncapped count for that cell so callers can
+    surface overflow.
+    """
+    compiled = [(pat, re.compile(pat, re.IGNORECASE)) for pat in patterns]
+    search_types = conversation_types_for(hide, base_types)
+
+    out: dict[PrefixId, list[tuple[str, list[MatchHit], int]]] = {}
+
+    for session in sessions:
+        entries = load_transcript(session.path)
+        # Per-pattern accumulator for this session: pi -> list[MatchHit]
+        per_pattern: dict[int, list[MatchHit]] = {i: [] for i in range(len(compiled))}
+        per_pattern_totals: dict[int, int] = {i: 0 for i in range(len(compiled))}
+
+        for idx, entry in enumerate(entries):
+            if not isinstance(entry, search_types):
+                continue
+            if not isinstance(entry, BaseTranscriptEntry):
+                continue
+            for pi, (_, regex) in enumerate(compiled):
+                if not _entry_matches(entry, regex, hide):
+                    continue
+                per_pattern_totals[pi] += 1
+                if len(per_pattern[pi]) >= max_results_per_pattern:
+                    continue  # over the cap; only the total grows
+                before, after = _get_context(entries, idx, context, base_types, hide)
+                per_pattern[pi].append(
+                    MatchHit(
+                        session_id=session.session_id,
+                        turn_uuid=PrefixId(getattr(entry, "uuid", "") or ""),
+                        entry=entry,
+                        context_before=before,
+                        context_after=after,
+                    )
+                )
+
+        out[session.session_id] = [
+            (compiled[pi][0], per_pattern[pi], per_pattern_totals[pi])
+            for pi in range(len(compiled))
+        ]
+
+    return out
 
 
 def search(
@@ -469,7 +538,7 @@ def search(
             session_matches.append(
                 MatchHit(
                     session_id=session.session_id,
-                    turn_uuid=getattr(entry, "uuid", ""),
+                    turn_uuid=PrefixId(getattr(entry, "uuid", "") or ""),
                     entry=entry,
                     context_before=before,
                     context_after=after,

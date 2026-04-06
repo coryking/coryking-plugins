@@ -1,12 +1,18 @@
 [project]
 name = "cc-explorer"
-version = "1.16.1"
+version = "1.22.1"
 description = "MCP server for exploring Claude Code chat history — search conversations, quote moments, inspect subagents."
 requires-python = ">=3.11"
-dependencies = ["pydantic>=2.12", "fastmcp>=3.0", "claude-agent-sdk>=0.1.48"]
+dependencies = [
+    "pydantic>=2.12",
+    "fastmcp>=3.0",
+    "claude-agent-sdk>=0.1.48",
+]
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = [
+    "pytest>=8.0",
+]
 
 [project.scripts]
 cc-explorer = "cc_explorer.mcp_server:main"

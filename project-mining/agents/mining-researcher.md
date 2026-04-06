@@ -62,29 +62,29 @@ this section teaches the research workflow.
 **Search** (`search_project`) — cast a wide net across all sessions. Give it several
 candidate terms from your search vocabulary. Results show which patterns are productive
 (hit count, which sessions) and which are dead weight (omitted). This is your
-orientation step.
+orientation step. Patterns are regex (case-insensitive).
 
-Patterns are **regex** (case-insensitive). Use `\b` for word boundaries — `\bugh\b` matches
-"ugh" but not "though". Omit `\b` for substring matching — `frustrat` matches
-"frustrated", "frustration", etc.
+**Grep** (`grep_session`) — drill into a specific session with multiple patterns at once.
+Like `search_project`, it takes a `patterns` list and returns per-pattern hit counts plus
+matching entries with surrounding context. Front-load all your candidate terms in one call
+instead of OR-ing them into a kitchen-sink regex — you get a per-term breakdown that tells
+you which alternatives landed.
 
-**Grep** (`grep_session`) — drill into a specific session with one pattern. Returns
-matching entries with surrounding context turns, each showing its `full_length` so
-you can gauge size. This is where you read what the data says and invent new search
-terms.
+**Grep across sessions** (`grep_sessions`) — fan-out version of grep_session. When you've
+identified several hot sessions and want context blocks from all of them for the same
+patterns, use this in one call instead of looping `grep_session` per session.
 
 **Read** (`read_turn`) — pull the full conversation moment. You need:
 what the assistant said that triggered the reaction, the user's exact words, and what
 happened next. Every finding needs a direct quote with a source reference.
 
 Use `full_length` from grep output to gauge entry size before reading. Large entries
-(5000+) are usually tool results — use the `limit` parameter to avoid pulling in more
-than you need.
+(5000+) are usually tool results — use the `truncate` parameter to cap content size.
 
 **The loop in practice.** A typical chat mining session:
 
 1. `search_project` with 3-4 broad patterns from your search vocabulary — see which terms land and which sessions are hot
-2. `grep_session` on hot sessions with your best pattern — read matches in context
+2. `grep_session` (or `grep_sessions` for fan-out) on hot sessions with your best patterns — read matches in context
 3. Invent 2-3 new search terms from what you see (this is the point)
 4. Search/grep with those new terms
 5. `read_turn` on the gold — get the full untruncated conversation moment
@@ -100,14 +100,16 @@ The cc-explorer MCP tools are automatically available to named agents within thi
 
 **Conversation exploration** (progressive zoom):
 - `search_project` — scan all sessions for patterns, see which terms land and where
-- `grep_session` — examine matches within a single session, with context
+- `grep_session` — examine matches for multiple patterns within a single session, with context
+- `grep_sessions` — fan out the same patterns across N sessions in one call
 - `read_turn` — read a specific conversation moment at full fidelity
-- `list_project_sessions` — list conversations with stats (dates, message counts, tokens, agents)
+- `list_project_sessions` — list conversations with stats. The orchestrator typically already gives you the relevant session paths in your dispatch — only call this if you specifically need session metadata you weren't handed.
 
 **Agent inspection:**
 - `list_agent_sessions` — find sessions that spawned subagents
 - `list_session_agents` — see what agents a session dispatched
 - `get_agent_detail` — full prompt, result, and stats for specific agents
+- `session_tool_audit` — per-subagent tool counts, error rates, and chronological tool-call traces for a session. Use when investigating how agents used their tools.
 
 ### Subagent dispatch history
 

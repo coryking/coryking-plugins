@@ -205,7 +205,7 @@ class ToolResultEntry(BaseTranscriptEntry):
     message: UserMessageModel
     toolUseResult: Optional[ToolUseResult] = None
     isMeta: Optional[bool] = None
-    agentId: Optional[str] = None
+    # agentId is inherited from BaseTranscriptEntry — do not redeclare
 
     def display(
         self,
