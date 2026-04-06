@@ -434,6 +434,13 @@ def grep_sessions(
         # Distinguish two failure modes in the error text so the caller
         # can tell a typo (all prefixes unresolved) from a clean miss
         # (every prefix resolved but no patterns matched anything).
+        #
+        # Note: in the partial-resolve + all-miss case, `not_found` is
+        # intentionally discarded — we raise the clean-miss ToolError so
+        # the caller gets a single consistent "nothing to return" signal,
+        # matching every other empty-result tool in this file. If you want
+        # the typo diagnostic surfaced even on all-miss, switch this branch
+        # to return an empty-sessions response with not_found populated.
         if not_found and len(not_found) == len(sessions):
             raise ToolError(f"No sessions matched: {', '.join(not_found)}")
         raise ToolError(
@@ -858,10 +865,11 @@ def session_tool_audit(
             )
         )
 
-    if not audits:
-        raise ToolError(
-            f"Session {session} has subagents but none have accessible output files to audit"
-        )
+    # When total_dispatched > 0 but total_audited == 0, return the response
+    # anyway with empty agents — that asymmetry IS the signal the new
+    # total_dispatched/total_audited fields exist to surface. Only the
+    # zero-dispatched case (handled above) raises ToolError, since there
+    # genuinely isn't anything to report on.
 
     return SessionToolAuditResponse(
         session=PrefixId(target.session_id),

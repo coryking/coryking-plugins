@@ -316,6 +316,44 @@ class TestSessionToolAuditCountsReflectSkippedAgents:
         )
         assert len(resp.agents) == 1
 
+    def test_zero_audited_returns_response_not_raises(self):
+        """When dispatched > 0 but every output file is missing, the tool
+        returns the response with empty agents — it does NOT raise. The
+        total_dispatched > 0 / total_audited == 0 asymmetry is exactly the
+        signal these new fields exist to surface; raising would hide it.
+        """
+        from cc_explorer.mcp_server import session_tool_audit
+        from cc_explorer.subagents import SubagentInfo
+
+        target_id = "aaaaaaaa-1111-2222-3333-444444444444"
+        sessions = [_build_session(target_id, "audit")]
+
+        # Two dispatched agents, neither has an output file
+        all_agents = [
+            SubagentInfo(
+                tool_use_id=PrefixId("11111111-aaaa-bbbb-cccc-dddddddddddd"),
+                agent_id=PrefixId("aaaaaaa1-aaaa-bbbb-cccc-dddddddddddd"),
+                subagent_type="researcher",
+                description="missing one",
+            ),
+            SubagentInfo(
+                tool_use_id=PrefixId("22222222-aaaa-bbbb-cccc-dddddddddddd"),
+                agent_id=PrefixId("aaaaaaa2-aaaa-bbbb-cccc-dddddddddddd"),
+                subagent_type="researcher",
+                description="missing two",
+            ),
+        ]
+
+        with patch("cc_explorer.mcp_server.load_sessions", return_value=sessions), \
+             patch("cc_explorer.mcp_server.extract_subagents", return_value=all_agents), \
+             patch("cc_explorer.mcp_server.resolve_output_files", side_effect=lambda *a, **k: None), \
+             patch("cc_explorer.mcp_server.scan_output_file_stats", return_value={}):
+            resp = session_tool_audit(session="aaaaaaaa", project="/tmp/fake")
+
+        assert resp.total_dispatched == 2
+        assert resp.total_audited == 0
+        assert resp.agents == []
+
 
 # =============================================================================
 # grep_sessions: ordering and omission
