@@ -49,6 +49,10 @@ class SessionSummary(SparseModel):
     session: PrefixId = Field(description="Session identifier — pass this back as the `session` param to other tools.")
     date: datetime | None = Field(default=None, description="Timestamp of first message.")
     title: str | None = Field(default=None, description="Auto-generated title from first human message.")
+    worktree: str | None = Field(
+        default=None,
+        description="Git worktree name this session lived in. Absent for the main worktree; present (e.g. 'happy-lehmann') for linked worktrees, which includes Claude Desktop dispatched sessions under `.claude-worktrees/`. Labeled sessions are often programmatically dispatched rather than interactively typed — calibrate signal accordingly.",
+    )
     messages: int = Field(description="Total message count.")
     agents: int = Field(description="Number of subagent dispatches.")
     context_tokens: int = Field(description="Last assistant turn's input tokens (context window size).")
@@ -61,6 +65,7 @@ class SessionSummary(SparseModel):
             session=s.session_id,
             date=s.first_timestamp,
             title=s.title,
+            worktree=s.worktree,
             messages=s.message_count,
             agents=s.stats.agent_count,
             context_tokens=s.stats.context_tokens,
@@ -204,6 +209,10 @@ class GrepSessionResponse(SparseModel):
     """
 
     session: PrefixId = Field(description="Session identifier.")
+    worktree: str | None = Field(
+        default=None,
+        description="Git worktree name this session lived in, if not the main one. Labeled sessions are often dispatch-driven rather than interactively typed.",
+    )
     patterns: list[GrepPatternResult] = Field(
         description="Per-pattern results, sorted by hit count descending.",
     )
@@ -215,6 +224,7 @@ class GrepSessionResponse(SparseModel):
         results: list[tuple[str, list[MatchHit], int]],
         truncate: int,
         hide: frozenset[str] = frozenset(),
+        worktree: str | None = None,
     ) -> GrepSessionResponse:
         """Build response from a list of (pattern, matches, total_hits) tuples."""
 
@@ -251,7 +261,11 @@ class GrepSessionResponse(SparseModel):
             )
 
         pattern_results.sort(key=lambda p: p.hits, reverse=True)
-        return cls(session=PrefixId(session_id), patterns=pattern_results)
+        return cls(
+            session=PrefixId(session_id),
+            worktree=worktree,
+            patterns=pattern_results,
+        )
 
 
 class GrepSessionsResponse(SparseModel):
@@ -282,6 +296,10 @@ class ReadTurnResponse(SparseModel):
     """A specific moment in a conversation at full fidelity."""
 
     session: PrefixId | None = Field(default=None, description="Session identifier.")
+    worktree: str | None = Field(
+        default=None,
+        description="Git worktree name this session lived in, if not the main one.",
+    )
     turn: PrefixId = Field(description="Turn identifier.")
     chats: list[str] = Field(
         description="Pipe-delimited entry lines: turn_id|timestamp|role|full_length|display. Full untruncated text unless truncate was set.",
@@ -301,6 +319,7 @@ class ReadTurnResponse(SparseModel):
 
         return cls(
             session=PrefixId(session_info.session_id) if session_info else None,
+            worktree=session_info.worktree if session_info else None,
             turn=PrefixId(turn),
             chats=chats,
         )
@@ -315,6 +334,10 @@ class BrowseSessionResponse(SparseModel):
     """First or last N conversation turns from a session."""
 
     session: PrefixId = Field(description="Session identifier.")
+    worktree: str | None = Field(
+        default=None,
+        description="Git worktree name this session lived in, if not the main one.",
+    )
     position: str = Field(description="'head' or 'tail' — which end was read.")
     showing: int = Field(description="Number of turns returned.")
     total_turns: int = Field(description="Total conversation turns in the session.")
@@ -333,10 +356,12 @@ class BrowseSessionResponse(SparseModel):
         truncate: int,
         anchor: str | None = None,
         hide: frozenset[str] = frozenset(),
+        worktree: str | None = None,
     ) -> BrowseSessionResponse:
         chats = [format_entry_line(e, truncate=truncate, hide=hide) for e in entries]
         return cls(
             session=PrefixId(session_id),
+            worktree=worktree,
             position=position,
             showing=len(entries),
             total_turns=total,
@@ -384,6 +409,10 @@ class SessionAgentsResponse(SparseModel):
     """All agents spawned by a specific session."""
 
     session: PrefixId = Field(description="Session identifier.")
+    worktree: str | None = Field(
+        default=None,
+        description="Git worktree name this session lived in, if not the main one.",
+    )
     date: datetime | None = Field(default=None, description="Timestamp of session start.")
     title: str | None = Field(default=None, description="Session title.")
     total_agents: int = Field(description="Number of agents in this session.")
@@ -397,6 +426,7 @@ class SessionAgentsResponse(SparseModel):
     ) -> SessionAgentsResponse:
         return cls(
             session=target.session_id,
+            worktree=target.worktree,
             date=target.first_timestamp,
             title=target.title,
             total_agents=len(agents),
@@ -422,6 +452,10 @@ class AgentDetailResponse(SparseModel):
     """Full detail for a single agent: prompt, result, stats, optional trace."""
 
     session: PrefixId = Field(description="Parent session identifier.")
+    worktree: str | None = Field(
+        default=None,
+        description="Git worktree name the parent session lived in, if not the main one.",
+    )
     date: datetime | None = Field(default=None, description="Timestamp of session start.")
     title: str | None = Field(default=None, description="Session title.")
     agent_id: PrefixId = Field(description="Agent identifier.")
@@ -473,6 +507,7 @@ class AgentDetailResponse(SparseModel):
 
         return cls(
             session=found_session.session_id,
+            worktree=found_session.worktree,
             date=found_session.first_timestamp,
             title=found_session.title,
             agent_id=found.agent_id,
@@ -538,6 +573,10 @@ class SessionToolAuditResponse(SparseModel):
     """
 
     session: PrefixId = Field(description="Session identifier.")
+    worktree: str | None = Field(
+        default=None,
+        description="Git worktree name this session lived in, if not the main one.",
+    )
     title: str | None = Field(default=None, description="Session title.")
     total_dispatched: int = Field(
         description="Number of subagents the session spawned, regardless of whether their output files were accessible. This is the truth about how much fan-out happened."

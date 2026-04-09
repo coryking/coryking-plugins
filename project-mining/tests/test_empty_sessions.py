@@ -20,6 +20,7 @@ from cc_explorer.models import (
     TranscriptStats,
     UserMessageModel,
 )
+from cc_explorer.parser import ConversationRef
 from cc_explorer.search import load_sessions
 
 
@@ -58,7 +59,10 @@ def _assistant(text: str = "", uuid: str = "22222222-aaaa-bbbb-cccc-dddddddddddd
 
 def _patch_conversations_and_transcripts(sessions: dict[str, list]):
     """Patch both load_conversations and load_transcript."""
-    conversations = {sid: Path(f"{sid}.jsonl") for sid in sessions}
+    conversations = {
+        sid: ConversationRef(path=Path(f"{sid}.jsonl"), worktree=None)
+        for sid in sessions
+    }
 
     def _load_transcript(path):
         sid = path.stem

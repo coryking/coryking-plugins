@@ -1,6 +1,6 @@
 [project]
 name = "cc-explorer"
-version = "1.22.1"
+version = "1.23.0"
 description = "MCP server for exploring Claude Code chat history — search conversations, quote moments, inspect subagents."
 requires-python = ">=3.11"
 dependencies = [

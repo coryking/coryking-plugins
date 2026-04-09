@@ -113,7 +113,13 @@ def extract_tool_text(entry: AssistantTranscriptEntry) -> str:
 
 @dataclass
 class SessionInfo:
-    """Metadata about a conversation session."""
+    """Metadata about a conversation session.
+
+    `worktree` is the git worktree name the session lived in, or None for
+    the project's main worktree. Claude Desktop dispatch creates linked
+    worktrees under `<project>/.claude-worktrees/<name>/`, so dispatched
+    sessions come back labeled with their basename (e.g. 'happy-lehmann').
+    """
 
     session_id: PrefixId
     path: Path
@@ -121,6 +127,7 @@ class SessionInfo:
     first_timestamp: Optional[datetime]
     message_count: int
     stats: TranscriptStats = field(default_factory=TranscriptStats)
+    worktree: Optional[str] = None
 
 
 @dataclass
@@ -223,8 +230,8 @@ def load_sessions(project_path: str) -> list[SessionInfo]:
     conversations = load_conversations(project_path)
     sessions: list[SessionInfo] = []
 
-    for session_id, path in conversations.items():
-        entries = load_transcript(path)
+    for session_id, ref in conversations.items():
+        entries = load_transcript(ref.path)
         if not entries:
             continue
 
@@ -250,11 +257,12 @@ def load_sessions(project_path: str) -> list[SessionInfo]:
         sessions.append(
             SessionInfo(
                 session_id=session_id,
-                path=path,
+                path=ref.path,
                 title=title,
                 first_timestamp=first_ts,
                 message_count=message_count,
                 stats=stats,
+                worktree=ref.worktree,
             )
         )
 

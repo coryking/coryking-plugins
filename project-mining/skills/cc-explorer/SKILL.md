@@ -51,6 +51,14 @@ Tools for tracing subagent execution — a separate axis from conversation conte
 
 Use when tracing what an agent did, correlating outputs with sessions, or building timelines that distinguish "discussed doing X" from "dispatched agents to do X."
 
+## Worktree pooling
+
+Sessions from every git worktree of a project are pooled under one project. Claude Desktop dispatch creates real git worktrees under `<project>/.claude-worktrees/<name>/`, so dispatched work shows up alongside interactive sessions automatically — no need to specify a worktree or know which branch work happened on.
+
+Each session carries a `worktree` field: absent for the main worktree, set to the worktree's directory basename (e.g. `happy-lehmann`) for linked worktrees. `list_project_sessions`, `grep_session`, `read_turn`, `browse_session`, `list_session_agents`, `get_agent_detail`, and `session_tool_audit` all surface it.
+
+**Why it matters for mining:** labeled sessions are usually dispatch-driven, meaning the "user" turn is often a programmatically-constructed prompt, not a human typing in-the-moment. Weight signal accordingly — dispatch sessions are weaker evidence for "user's own words" but stronger evidence for "what the agent decided autonomously." The worktree label also doubles as a git branch bridge: `happy-lehmann` in the session metadata points you at the `happy-lehmann` branch when cross-referencing with git history.
+
 ## When to use what
 
 **"What conversations exist?"** → `list_project_sessions`. Stats (message count, agent count, dates) help you decide where to look.

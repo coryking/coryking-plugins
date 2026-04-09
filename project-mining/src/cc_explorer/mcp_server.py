@@ -318,6 +318,7 @@ def grep_session(
         results=pattern_results,
         truncate=truncate,
         hide=hide_set,
+        worktree=sessions[0].worktree,
     )
 
 
@@ -427,6 +428,7 @@ def grep_sessions(
                 results=pattern_results,
                 truncate=truncate,
                 hide=hide_set,
+                worktree=sess.worktree,
             )
         )
 
@@ -616,6 +618,7 @@ def browse_session(
         truncate=truncate,
         anchor=turn,
         hide=hide_set,
+        worktree=target[0].worktree,
     )
 
 
@@ -873,6 +876,7 @@ def session_tool_audit(
 
     return SessionToolAuditResponse(
         session=PrefixId(target.session_id),
+        worktree=target.worktree,
         title=target.title,
         total_dispatched=total_dispatched,
         total_audited=len(audits),

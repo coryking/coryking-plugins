@@ -4,14 +4,15 @@
 
 Core functions:
 - load_transcript(path) — parse a JSONL file into typed entries
-- load_conversations(project_path) — find all JSONL files for a project
+- load_conversations(project_path) — find all JSONL files for a project,
+  pooled across git worktrees
 - extract_text — re-exported from models.py
 """
 
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence, Union, cast
+from typing import Any, Optional, Sequence, Union, cast
 
 from pydantic import BaseModel
 
@@ -239,29 +240,76 @@ def load_transcript(path: Path) -> list[TranscriptEntry]:
     return entries
 
 
-def load_conversations(project_path: str) -> dict[PrefixId, Path]:
-    """Find all JSONL conversation files for a project.
+@dataclass(frozen=True)
+class ConversationRef:
+    """A located JSONL conversation, plus which worktree it came from.
 
-    Returns {session_id: path} mapping where session_id is the UUID
-    from the filename (without .jsonl extension).
-
-    Uses the Claude Agent SDK for path resolution — handles long paths
-    with hash suffixes, Bun/Node hash mismatches, CLAUDE_CONFIG_DIR,
-    and git worktree scanning.
+    `worktree=None` means the session belongs to the main worktree of the
+    project (the one `git worktree list` reports first — the repo root).
+    `worktree="<name>"` is the basename of a linked worktree directory
+    (e.g. `"happy-lehmann"` for `<project>/.claude-worktrees/happy-lehmann`).
+    Claude Desktop dispatch creates these as real git worktrees, so they
+    appear in `git worktree list` automatically.
     """
-    from claude_agent_sdk._internal.sessions import _canonicalize_path, _find_project_dir
+
+    path: Path
+    worktree: Optional[str]
+
+
+def load_conversations(project_path: str) -> dict[PrefixId, ConversationRef]:
+    """Find all JSONL conversation files for a project, pooled across worktrees.
+
+    Returns {session_id: ConversationRef} where session_id is the UUID from
+    the filename. Sessions from every git worktree of the project are merged
+    into one pool — the main worktree gets `worktree=None`, linked worktrees
+    get labeled with their directory basename.
+
+    Uses the Claude Agent SDK for path resolution (handles long-path hash
+    suffixes, Bun/Node hash mismatches, CLAUDE_CONFIG_DIR) and for the
+    `git worktree list --porcelain` shell-out that discovers worktree paths.
+
+    When git is unavailable or `project_path` is not inside a repo, falls
+    back to scanning the single project directory (all sessions get
+    `worktree=None`).
+    """
+    from claude_agent_sdk._internal.sessions import (
+        _canonicalize_path,
+        _find_project_dir,
+        _get_worktree_paths,
+    )
 
     project_path_resolved = str(Path(project_path).expanduser().resolve())
     canonical = _canonicalize_path(project_path_resolved)
-    claude_dir = _find_project_dir(canonical)
 
-    if claude_dir is None or not claude_dir.exists():
-        return {}
+    # Worktree paths from `git worktree list --porcelain`. The main worktree
+    # is always first in git's output — we use that ordering to decide which
+    # sessions are "main" (worktree=None) vs labeled.
+    worktree_paths = _get_worktree_paths(canonical)
 
-    result: dict[PrefixId, Path] = {}
-    for jsonl_path in claude_dir.glob("*.jsonl"):
-        session_id = PrefixId(jsonl_path.stem)
-        result[session_id] = jsonl_path
+    # Fallback: no git / not a repo / scan failed → single-dir behavior.
+    if not worktree_paths:
+        claude_dir = _find_project_dir(canonical)
+        if claude_dir is None or not claude_dir.exists():
+            return {}
+        return {
+            PrefixId(jsonl.stem): ConversationRef(path=jsonl, worktree=None)
+            for jsonl in claude_dir.glob("*.jsonl")
+        }
+
+    result: dict[PrefixId, ConversationRef] = {}
+    for i, wt_path in enumerate(worktree_paths):
+        claude_dir = _find_project_dir(wt_path)
+        if claude_dir is None or not claude_dir.exists():
+            continue
+        label: Optional[str] = None if i == 0 else Path(wt_path).name
+        for jsonl in claude_dir.glob("*.jsonl"):
+            session_id = PrefixId(jsonl.stem)
+            # First-wins on dupes. A session UUID should only exist in one
+            # worktree's project dir, but if the same file somehow appears
+            # in multiple (shared cache, weird symlink), keep the earlier
+            # one — main worktree (i=0) takes priority by construction.
+            if session_id not in result:
+                result[session_id] = ConversationRef(path=jsonl, worktree=label)
     return result
 
 

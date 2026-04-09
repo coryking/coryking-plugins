@@ -94,6 +94,13 @@ The `session:xxx/turn:yyy` references are stable — they point to the immutable
 JSONL entry, not a line number in a derived file. Use them in your findings'
 Source field.
 
+**Worktree-labeled sessions.** Every session carries a `worktree` field. Absent means the session happened in the project's main worktree; set (e.g. `happy-lehmann`) means a linked git worktree — typically a Claude Desktop dispatched session under `.claude-worktrees/`. Calibrate signal:
+
+- **Dispatched sessions are weaker "user's own words" evidence.** The "user" turn may be a programmatically-constructed prompt, not something someone typed in frustration. Don't mistake it for authentic in-the-moment voice.
+- **Dispatched sessions are stronger "agent autonomy" evidence.** They show what the agent decided on its own, how it interpreted an ambiguous brief, what it chose to do without a human steering mid-flight.
+- **The worktree name is a git branch bridge.** `happy-lehmann` in metadata → look at commits on the `happy-lehmann` branch to cross-reference chat evidence with the code that actually landed.
+- **Parallel fan-out is architectural evidence.** Multiple worktrees active in the same timeframe = deliberate parallelism, a real decision worth noting in findings.
+
 ## Tool Access
 
 The cc-explorer MCP tools are automatically available to named agents within this plugin. The tool descriptions document parameters, output format, and usage — refer to them for mechanics.
