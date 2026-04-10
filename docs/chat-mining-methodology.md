@@ -1,119 +1,163 @@
-# Chat Mining Methodology: search→quote
+# Mining Methodology
 
-How mining-researcher agents search Claude Code chat logs for behavioral evidence. Derived from field observations across 12 subagents and 3 mining sessions (see `investigation-reports/mining-researcher-field-observations.md` for the raw data).
+How the project-mining system searches project histories for behavioral evidence. Covers the three-corpora topology, the research loop, what separates good from mediocre researchers, observed failure modes, and open design questions.
 
-## The research loop
+Derived from field observations across 12+ subagents and 4 mining sessions, plus a full six-project field test of the three-corpora topology (April 2026).
 
-Chat log mining is iterative, not linear. The best researchers follow a two-stage loop:
+## The three-corpora topology
 
-**Search** (`search_project`) — orient across all sessions. Start broad with multiple patterns to see which terms land and which sessions are hot. Each round of reading should produce new search terms the researcher didn't start with — "intellectual humility" shows up as "wait, is our judge actually trustworthy?"
+Evidence about a project lives in three places, and each requires a different kind of reading:
 
-**Grep** (`grep_session`) — examine matches in context within a single session. This is where you read the data and invent new search terms.
+- **Process corpus** (chat logs + git history) — how things got built, what decisions were made, what was tried and abandoned. Mined by the **process-analyst** (Sonnet). The richest source for decision-making, struggles, pivots, and human judgment under ambiguity.
+- **Codebase corpus** (source, config, architecture, docs) — what was built, how it's structured, what the code itself demonstrates. Mined by the **codebase-analyst** (Opus). The primary source for architectural judgment, implementation quality, and technical depth.
+- **Output corpus** (databases, generated media, logs, UI, hardware behavior) — what the running system actually produces. Mined by the **output-analyst** (Sonnet). Labels every finding on a five-rung evidence ladder from direct observation down to inference-from-code.
 
-**Read** (`read_turn`) — extract the full conversation moment. Once a researcher has found something worth reporting, they need: what the assistant said that triggered the reaction, the user's exact words, and what happened next. A finding without a direct quote is a claim without evidence.
+A **project-scout** (Haiku) runs first per project, producing a compact orientation brief: what exists, how much of it, where it lives, what's reachable. The scout is a map-maker, not an analyst — it does not produce findings or evaluate evidence quality against the lens.
 
-The cycle: search with 3-4 broad patterns → grep hot sessions → read what the data says → invent 2-3 new search categories from what appears → search/grep those → find the gold → read the specific moments → write the finding.
+The **orchestrator** (Opus, the user's session) runs two phases: a planning phase that shapes the lens through dialogue with the user, then an execution phase that dispatches researchers, tracks progress, and synthesizes findings.
+
+### Why three corpora instead of one researcher
+
+The predecessor system used a single `mining-researcher` agent that inherited a process-biased worldview: "artifacts are byproducts, only the process is evidence." A user's complaint triggered the split: "sometimes the artifact IS also the evidence." A README that calls something a weekend hack has no bearing on whether the code rises to the level the lens describes — but a single agent steeped in chat logs would absorb that framing.
+
+The split dissolves the false dichotomy. Corpus weighting is lens-dependent: "assess against a staff-engineer rubric" → codebase-analyst primary. "How does the user work with AI" → process-analyst primary. "What does the system actually do" → output-analyst primary.
+
+## The research loop (process-analyst)
+
+Chat log mining is iterative, not linear. The process-analyst uses cc-explorer MCP tools at three zoom levels:
+
+**Search** (`search_project`) — cast a wide net across all sessions with several candidate patterns. Results show which terms land and which sessions are hot. Orientation step.
+
+**Grep** (`grep_session` / `grep_sessions`) — drill into specific sessions with multiple patterns. Front-load all candidates in one call to get per-pattern breakdowns.
+
+**Read** (`read_turn`) — pull a specific conversation moment at full fidelity. Every finding needs a direct quote or close paraphrase with a `session:turn` reference.
+
+**The cycle:** search with 3-4 broad patterns → grep hot sessions → read what the data says → invent 2-3 new search categories from what appears → search/grep those → find the gold → read the specific moments → write the finding.
 
 ## What separates good from mediocre researchers
-
-The field data reveals a clear spectrum across 12 agents:
 
 ### Vocabulary expansion is the key differentiator
 
 Every researcher receives search vocabulary from the orchestrator. The quality difference is whether they expand beyond it.
 
-**Low-expansion researchers** stayed close to orchestrator terms. BT2's product-direction agent searched for `YAGNI|rabbit hole|over-engineer|keep it simple` — nearly verbatim from the dispatch prompt. It found what those words pointed to and stopped. This is grep with extra steps.
+**Low-expansion researchers** stay close to orchestrator terms. Searching for `YAGNI|rabbit hole|over-engineer` — nearly verbatim from the dispatch prompt. This is grep with extra steps.
 
-**High-expansion researchers** built new search categories from data signals. SMH's large-file researcher found correction signals, then asked "corrections about WHAT?" and invented purpose-specific vocabularies:
-
+**High-expansion researchers** build new search categories from data signals. Finding correction signals, then asking "corrections about WHAT?" and inventing purpose-specific vocabularies:
 - Output quality critique: `catalog|summariz|not interpret|editorializ|dry|academic`
-- Context contamination: `don't pull|don't read|spoil|blow our context|contamina`
 - Protective corrections: `leave that|restore|don't re-anal|don't change|keep it as`
 - Delegation refusal: `your job|synthesis$|just write|that is your job`
 
-BT1's state-machines agent pivoted from generic architecture terms to domain-specific ones after early hits, then traced the full git evolution across 10 commits and recognized that the architecture is deliberately NOT a state machine while solving state machine problems — an inferential leap no search term could produce.
+In the April 2026 field test, the jobsearch-buddy process-analyst showed strong expansion: started with scout-flagged terms, then invented creative patterns to find decision moments — `"that won't scale|doesn't"`, `"that's not right|no"`, `"what are we actually trying|what"`. Those find pushback and ambiguity, not keywords.
 
 ### The inferential depth spectrum
 
 Findings fall into three tiers:
 
-**Keyword match** — found the search term and quoted it. Searching for "YAGNI" and finding a CLAUDE.md line that says "YAGNI." This is grep output, not research.
+**Keyword match** — found the search term and quoted it. This is grep output, not research.
 
-**Contextual match** — found the term and understood the surrounding context. Finding an auth error in a chat log and understanding it was about EasyAuth vs custom JWT validation.
+**Contextual match** — found the term and understood the surrounding context.
 
 **Inferential leap** — found evidence of the behavioral pattern without the search term being present. Recognizing that a `SecurityError` exposing `chrome://juggler` in a stack trace is a bot detection fingerprint leak, and connecting it to the reverse engineering narrative. None of the search terms would find this; the researcher had to understand the domain.
 
-Expansion quality correlates with inferential depth. Agents that invented search categories from data signals produced more inferential leaps.
+Vocabulary expansion correlates with inferential depth. Agents that invented search categories from data signals produced more inferential leaps.
 
-### Cross-source synthesis is rare but valuable
+### Cross-corpus synthesis
 
-Chat-log researchers almost never corroborate findings with git history or project docs. They stay in their lane. The standout exception was SMH's git/docs researcher, which synthesized across 4 sources (two agent definitions, a process doc, and a memory file) for a single finding. Chat is one source among several — git, docs, code, and Cursor history all carry evidence. The best findings combine multiple sources.
+The topology's value proposition: findings a single researcher couldn't produce. A codebase-analyst finding about `worker/dispatcher.py` and a process-analyst finding about the session where that architecture was chosen are the same finding with two evidence legs. The synthesis step merges them.
+
+In the field test, the codebase-analyst independently discovered a branch-merge thread assembly algorithm with a convergence loop that nobody flagged during scouting. This is the kind of finding that justifies the codebase-analyst's independent read — but it only happened in 3 of 10 substantive findings. The other 7 confirmed scout opinions. See "scout bias" below.
 
 ## Failure modes observed in production
 
+### Scout bias flowing into researcher dispatch
+
+**Observed in the April 2026 field test.** Scouts produced evaluative conclusions ("best evidence for X," "focus especially on Y," research suggestions). The orchestrator passed these verbatim to researchers. Result: 7 of 10 substantive findings from the social-media-history codebase-analyst were on topics the scout had pre-flagged. Only 3 were genuinely independent discoveries.
+
+**Root cause chain:** Scout prompt didn't structurally enforce "map only, no findings" → scouts went deep and editorialized (53 tool calls for one project, 196 seconds) → orchestrator treated scout opinions as ground truth → researchers confirmed scout conclusions instead of discovering independently.
+
+**Fix applied:** SKILL.md now instructs the orchestrator to pass only structural facts from scout briefs (what exists, how big, where it is, landmines) and strip evaluative conclusions. The scout prompt also needs tightening — scouts were adding "Next steps for research agents" and "Bottom line" sections beyond their template.
+
+### The planning phase is where quality leverage lives
+
+**Observed in the April 2026 field test.** The alignment conversation was one-shot — orchestrator read the docs, restated the lens, said "ready to go?" The user had to catch that the scout step was skipped. The output was organized by lens signal when the user needed by-project grouping for resume use. This debate should have happened during planning.
+
+A good lens produces good findings almost mechanically. A bad lens produces padding no matter how good the researchers are. Properties of a good lens:
+- Points at **observable behaviors**, not abstract qualities
+- **Specific enough to guide search** but open enough for inferential leaps
+- **Matches the available corpora** — calibrated by scout briefs
+- **Calibrated to the output destination** — resume bullets need different evidence grain than STAR episodes
+
+**Fix applied:** SKILL.md rewritten with a planning phase (Phase 1) that shapes the lens through focused dialogue, dispatches scouts immediately to inform the conversation, uses AskUserQuestion for genuine choices (output organization, citation depth, evidence grain), and has a hard gate before dispatch.
+
+### Padding despite anti-padding instructions
+
+Across 12 agents and 3 mining sessions (pre-topology era), no agent returned fewer than 8 findings despite explicit anti-padding instructions ("asymmetric returns are normal — if your assignment only has 2 strong findings, return 2"). Some agents carved a single user message into 3-5 separate findings. Some counted raw commit counts as "velocity signals." The anti-padding instruction needs stronger framing or structural enforcement.
+
 ### Silent evidence loss from externalized results
 
-The biggest problem across all sessions: 38 externalized result files totaling ~4.5MB, almost none read back. When a Bash `rg` command returns too much output, Claude Code writes it to a `tool-results/*.txt` file and gives the agent a 2KB stub. The agent sees the stub and moves on. Evidence gone.
+The biggest problem in the pre-cc-explorer era: 38 externalized result files totaling ~4.5MB, almost none read back. When a Bash `rg` command returns too much output, Claude Code writes it to a file and gives the agent a 2KB stub. Evidence gone.
 
-BT2's cross-functional agent had 1.5MB of externalized evidence (11 files) that never made it into findings. It produced the longest final output of any agent in its session, but the patterns in those 1.5MB were invisible to it.
-
-cc-explorer solves this by controlling output size — grep_session truncates to a configurable limit and includes overflow hints, and read_turn accepts a per-entry character limit.
+cc-explorer solves this by controlling output size — grep_session truncates to a configurable limit with overflow hints, read_turn accepts a per-entry character limit. No shell commands, no externalization risk.
 
 ### Shell state doesn't persist between Bash calls
 
-One agent (BT1 state-machines) used a shell variable `$STRIP_DIR` that didn't persist between Bash invocations. The variable resolved to empty, causing `rg` to search from the filesystem root: 8 minutes wasted, 482 streaming progress records, laptop heating. The agent detected the problem, fixed it, and still produced the best findings in its session — but the wasted effort is avoidable.
+One agent used a shell variable `$STRIP_DIR` that didn't persist between Bash invocations. The variable resolved to empty, causing `rg` to search from the filesystem root. cc-explorer takes `project` as a parameter (defaulting to CWD), eliminating the variable persistence problem.
 
-cc-explorer takes `project` as a parameter (defaulting to CWD), eliminating the variable persistence problem.
+### Project Content as Tainted Data
 
-### Progress line bloat in JSONL transcripts
+LLM context is flat — skill instructions, project docs, and scanned artifacts all sit at the same level with no privilege separation. Project content can bias analytical behavior the same way unsanitized input biases a SQL query.
 
-One agent's 2.6MB JSONL file was 87.7% `progress` type streaming records — UI artifacts with zero analytical value. The actual content was 336KB. Anyone analyzing subagent transcripts needs to filter these out.
+Three observed failure modes:
+1. **Identity adoption** — bluetaka's CLAUDE.md said "scrappy, not enterprise" and the agent filtered out sophisticated engineering patterns.
+2. **Content short-circuit** — a project contained career docs that literally described what the agent was asked to find. It reported doc content as findings instead of examining the process.
+3. **Premature scope expansion** — seeing career docs about other projects caused the agent to plan mining those projects instead of staying in scope.
 
-### Findings delivery is fragile
+The agent prompts address this with the "visiting analyst, not resident developer" framing and the distinction between operational facts (use for navigation) and development posture (examine, don't adopt).
 
-In the SMH session, 27 structured findings from the best researcher were lost through conversation rewinds. Researcher findings exist only in the task handle / conversation context. If the orchestrator's context loses them (through branching, compaction, or task handle severing), they are gone. The orchestrator spent 20+ tool calls trying to reconstruct from raw files on disk.
+### Sycophancy noise in chat logs
 
-### Padding despite explicit anti-padding instructions
+Chat logs are 50%+ AI being agreeable. Without explicit filtering, agents treat AI praise as corroboration of the human's ideas. The process-analyst prompt includes a sycophancy noise filter naming specific trained behaviors to read past: AI praise is not evidence of idea quality, AI agreement is not evidence of framing correctness, AI enthusiasm is not evidence of direction soundness.
 
-The agent definition says "asymmetric returns are normal — if your assignment only has 2 strong findings, return 2." Despite this, no agent across any session returned fewer than 8 findings. Some agents carved a single user message into 3-5 separate findings. Some counted raw commit counts as "velocity signals." The anti-padding instruction needs stronger framing or structural enforcement (e.g., requiring a strength self-assessment per finding).
-
-## How the tools map to the loop
-
-cc-explorer exposes MCP tools that match the research workflow:
+## How the tools map to the research loop
 
 | Stage | Tool | Scope | What it does |
 |-------|------|-------|-------------|
 | Orient | `list_project_sessions` | project | What conversations exist, with stats |
 | Search | `search_project` | project | Which patterns hit, which sessions are hot |
-| Grep | `grep_session` | session | Matches with surrounding context in one conversation |
+| Grep | `grep_session` / `grep_sessions` | session(s) | Matches with surrounding context |
 | Read | `read_turn` | turn | Full fidelity text around a specific moment |
 | Inspect | `list_agent_sessions` / `list_session_agents` / `get_agent_detail` | varies | Agent inspection at manifest/session/detail levels |
 
-Each step narrows scope and increases fidelity — like `ls`, `rg -c`, `rg -C3`, and `sed -n` on JSONL files. No tool switches modes based on hit volume.
+Each step narrows scope and increases fidelity. No tool switches modes based on hit volume. The corpus is one pool identified by session UUIDs and turn UUIDs.
 
-The corpus is treated as one pool of data. Sessions are identified by short UUID + auto-generated title (first human message, truncated) + date — not filenames. Every hit includes a `session:xxx/turn:yyy` reference that points to the immutable JSONL entry.
-
-`project` defaults to CWD — only needed when inspecting a different project's history.
-
-### Progressive zoom design
-
-`search_project` returns pattern-centric results: each pattern shows its hit count, which sessions contain it, and centered excerpts. Researchers start broad to see which terms land, then `grep_session` on hot sessions to see matches in context. `read_turn` pulls the full moment when the evidence is found. Each tool has one output shape — no mode switching.
-
-### Tool call visibility in output
-
-Assistant entries in search and quote output include inline tool call summaries: `→ ToolName(key="value", ...)`. This shows what agents actually did — Bash commands run, files read/edited, MCP tools invoked — alongside what they said. In search output, tool summaries are subject to the same truncation as text; in quote output (truncate=0), full parameters are shown.
-
-### Searching tool inputs
-
-`scope: "tools"` (on both `search_project` and `grep_session`) searches inside tool_use blocks — Bash commands, Read/Edit file paths, Grep patterns, Agent prompts. This surfaces what agents *did*, not just what was *said*. `scope: "all"` searches both messages and tool inputs. When using tools/all scope, the role filter automatically includes both user and assistant entries.
+The process-analyst also uses git (`git log`, `git show`, `git diff`, `git log -S`) for commit history evidence. When multi-human, scope with `git log --author=<subject>`.
 
 ## What these tools don't cover
 
-Chat mining is one part of the researcher's toolkit. Researchers also need:
+- **Source code** — direct `Read` of modules, schemas, handlers. The codebase-analyst's primary source.
+- **System outputs** — databases, fixtures, screenshots, running services. The output-analyst's primary source.
+- **Cursor/IDE chat** — separate scripts (`cursor_search_prompts.py`, `cursor_pull_conversation.py`). User-value evidence often lives in Cursor conversations.
 
-- **Git history** — `git log`, `git show`, `git diff` for tracing architectural evolution. Some of the strongest findings come from git (BT1 state-machines traced 10 commits to reconstruct an architecture's evolution).
-- **Source code** — direct `Read` of modules, schemas, handlers. BT1's Mozicode agent read 25 Perl modules.
-- **Project docs** — CLAUDE.md, architecture decisions, design docs. Often the "why" behind code changes.
-- **Cursor/IDE chat** — separate scripts (`cursor_search_prompts.py`, `cursor_pull_conversation.py`). User value evidence often lives in Cursor conversations where the user corrects copy or argues about UX.
+## Open design questions
 
-These remain separate tools with their own access patterns. cc-explorer handles the chat log part of the loop.
+### Synthesis independence
+
+The orchestrator does everything: planning conversation, scout reading, researcher dispatch, progress narration to the user, and final synthesis. By synthesis time, its context is loaded with accumulated state — user framing, scout opinions, dispatch decisions, progressive highlights. The accumulated context is both a strength (deep understanding) and a liability (can't read findings fresh, anchoring on earlier conclusions).
+
+Would synthesis be better from a separate agent with a clean context window that receives only the findings and the lens? That agent would need a durable plan document capturing planning-phase decisions (output organization, citation depth, etc.) — a real architectural change. The concern is real but the scope creep is significant.
+
+### Lens quality meta-knowledge
+
+The skill should understand what makes a lens work well — not just accept what the user hands it. Properties of effective lenses (observable behaviors, corpus-calibrated, output-destination-calibrated) should inform the planning conversation. The skill should act like a reference librarian helping frame the question, not a form accepting a search query.
+
+### Scout scope and editorializing
+
+Scouts are meant to be fast map-makers. In practice they go deep (53 tool calls, 196 seconds) and editorialize. Haiku should help (less inclined to over-elaborate), but the prompt also needs structural enforcement: "your output is exactly the brief template. Do not add sections." The `tools` allowlist (Read, Glob, Grep, Bash, list_project_sessions) constrains what tools are available but doesn't constrain depth of reading.
+
+### Output organization as a planning decision
+
+The field test produced by-lens-signal organization when the user needed by-project for resume use. This is a genuine choice that depends on downstream use — the skill can't prescribe it. The planning phase should surface the options when the answer isn't obvious from context.
+
+### Per-agent progress highlights
+
+As researchers complete, the orchestrator should surface one-line highlights against the lens — what was found, not how many tool calls it took. The accumulation of highlights builds a picture but also creates anchoring bias for the synthesis step. Tension between keeping the user informed and keeping the synthesizer fresh.
