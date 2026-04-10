@@ -150,7 +150,7 @@ Each researcher assignment passes:
 1. **Lens slice** — the specific facet this researcher is looking for, in concrete terms. Do NOT pass per-shard "look for these keywords" checklists; the agent prompts already contain the analytical guidance. You translate the lens into a concrete facet; the researcher does the finding.
 2. **Task boundaries** — "you are looking for X, not Y" to prevent sibling overlap.
 3. **Project path** and **subject human** (when multi-human).
-4. **Orientation brief** — the scout's output for this project, passed verbatim.
+4. **Orientation brief — structural facts only.** Pass the scout's factual orientation (what the project is, repo metadata, corpus availability ratings, landmines, file paths) but **strip evaluative conclusions**. Do NOT pass "best evidence for," "focus especially on," research suggestions, or the scout's assessment of what's interesting. The researchers must discover what matters through their own reading — the scout provides a map of what exists, not a guide to what's important. If the scout's brief contains a "next steps" or "research focus" or "bottom line" section, do not include it.
 5. **For output-analyst specifically:** the highest ladder rung the scout identified as reachable, plus any heroics the scout flagged (credentials needed, how to connect to the database, etc.).
 
 **Model tiering:**
