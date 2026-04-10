@@ -83,7 +83,7 @@ The scout flags multi-human projects in its brief. During alignment, you name th
 
 This skill has two phases with a hard gate between them. **No dispatch until the plan is approved.** The planning phase is where all the quality leverage is — a good lens produces good findings almost mechanically; a bad lens produces padding no matter how good the researchers are.
 
-Start your first response with: `project-mining v{version from plugin.json}`
+Start your first response with: `project-mining build 2`
 
 ### When to skip the topology entirely
 
@@ -185,6 +185,16 @@ Whatever structure was agreed, these principles apply:
 - **Source footnotes, when included, are an index** — not verification. They exist so the reader can drill back into the artifact months later. `path/to/file.py:45`, commit `abc1234`, `session:xxx/turn:yyy`. Whether to include them is a planning decision based on the output's purpose.
 - **Every output needs an honest gaps section.** What the lens asked about but the evidence didn't support. What couldn't be fully analyzed. This is calibration, not apology.
 - **You are invisible scaffolding.** No "the codebase-analyst found," no "per the scout brief," no agent-type words in the final output. No internal vocabulary (rungs, tiers, corpora). Write as the analyst who did the work, not as the orchestrator who dispatched it.
+
+## Communicating with the user during execution
+
+The user is waiting while researchers run. Keep them in the loop with findings, not mechanics.
+
+**As researchers complete:** Surface a one-line highlight filtered through the lens — "bluetaka: strongest finding so far is the reactive handler architecture and the MFA bridge via Service Bus." Not "8 findings, 72 tool calls." The user cares about what was found, not how many agents ran. Remember: you are invisible scaffolding. No agent-type names, no internal vocabulary in user-facing communication.
+
+As highlights accumulate, note corroboration: "just found the session where the reactive architecture was designed — that corroborates the code evidence." This builds a picture incrementally.
+
+**When synthesis is complete:** Lead with the gold, not the table of contents. The user waited 20 minutes — show them the 3-4 findings that made the whole run worth it. The surprising things. The evidence they didn't know about their own work. Then say where the full doc lives and give a brief structural overview. A table of contents is what they see when they open the file; the completion message should make them *want* to open it.
 
 ## Anti-patterns
 
