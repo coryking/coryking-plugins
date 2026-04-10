@@ -12,6 +12,10 @@ Act as the engineer, not just the implementer. The user describes what to build;
 
 Before adding functionality, read the existing models and type hierarchy first — they are the architecture. New behavior belongs on existing types when it fits. If a model stores data in a weaker type than you need, evolve the model.
 
+## Dogfooding cc-explorer
+
+We own cc-explorer in this repo. Use it directly (via MCP tools) when exploring chat history — don't shell out to grep JSONL files. If something doesn't do what you want (a missing parameter, confusing output, a bug, or a bug you see another agent encounter while using the tool), propose a fix to the user immediately. Every session working on this repo is a field test of the tools we ship.
+
 ## Principles
 
 - **Summary info at the top of output.** Tools (Claude Code, other LLMs, shell pipelines) truncate from the bottom — `head`, context window limits, UI collapsing. Any tool we build should put match counts, overflow hints, and actionable metadata in the first lines, not the last. The stuff at the bottom gets cut; the stuff at the top survives.
