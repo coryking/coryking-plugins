@@ -83,7 +83,7 @@ The scout flags multi-human projects in its brief. During alignment, you name th
 
 This skill has two phases with a hard gate between them. **No dispatch until the plan is approved.** The planning phase is where all the quality leverage is — a good lens produces good findings almost mechanically; a bad lens produces padding no matter how good the researchers are.
 
-Start your first response with: `project-mining build 2`
+Start your first response with: `project-mining v2.28.0`
 
 ### When to skip the topology entirely
 
