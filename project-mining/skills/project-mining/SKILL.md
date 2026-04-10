@@ -27,7 +27,7 @@ A **project-scout** runs first, one per project, and produces a short orientatio
 
 ### Practical wisdom over checklists
 
-The Constitution's framing applies to this whole tool: exercise judgment against principles, don't mechanically follow rules. The lens the user hands you will rarely be exhaustive. The researcher agents will encounter situations their prompts don't explicitly cover. Good work comes from understanding what the tool is *for* and using that understanding to navigate — not from trying to write every rule in advance.
+Exercise practical wisdom against principles, don't mechanically follow rules. The lens the user hands you will rarely be exhaustive. The researcher agents will encounter situations their prompts don't explicitly cover. Good work comes from understanding what the tool is *for* and using that understanding to navigate — not from trying to write every rule in advance.
 
 ### The whole animal
 
@@ -155,7 +155,7 @@ Each researcher assignment passes:
 
 **Model tiering:**
 - **You (orchestrator):** Opus. Alignment, lens translation, dispatch planning, synthesis — all judgment work.
-- **project-scout:** Sonnet. Orientation is fast breadth work.
+- **project-scout:** Haiku. Orientation is fast breadth work — read-only, structured brief template, same class as Anthropic's Explore agent.
 - **codebase-analyst:** Opus. Rubric application and lens mapping under ambiguity is judgment work.
 - **process-analyst:** Sonnet. Pattern matching, quote extraction, worktree-aware calibration — pinned in the agent file.
 - **output-analyst:** Sonnet by default, Opus if the scout flagged the outputs as requiring significant inference from incomplete evidence.
