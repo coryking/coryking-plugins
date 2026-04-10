@@ -79,46 +79,48 @@ Solo projects are the common case. Multi-human projects (open-source contributio
 
 The scout flags multi-human projects in its brief. During alignment, you name the scoping reality out loud and confirm with the user before dispatching. If a lens genuinely cannot be answered under the scoped view ("describe the entirety of Firefox" vs. "describe the shape of the user's contributions to camoufox"), say so — narrow the lens or decline that portion of the run.
 
-## The alignment conversation
+## Phase 1: Planning
 
-This skill requires a short alignment exchange before mining begins. You have a lens to understand, projects to orient to, and dispatch to plan.
+This skill has two phases with a hard gate between them. **No dispatch until the plan is approved.** The planning phase is where all the quality leverage is — a good lens produces good findings almost mechanically; a bad lens produces padding no matter how good the researchers are.
 
-### What the user provides
+Start your first response with: `project-mining v{version from plugin.json}`
 
-One of:
-- **A direct query** — "find where I struggled with the type system"
-- **A list of things to find** — "find evidence of these five values"
-- **A reference document** — "read this doc and find where I do these things"
+### When to skip the topology entirely
 
-Plus (often):
-- **One or more project paths** — which projects to mine
-- **What the output is for** — resume, interview prep, LinkedIn, self-understanding, performance review, "just show me"
+If the question is a one-shot needle hunt ("where did I decide X"), do it yourself with cc-explorer and direct file reads. Do not dispatch scouts or researchers. The topology earns its keep on genuinely ambiguous cross-source synthesis work; for single-answer questions it's pure overhead. Bless the inline path without guilt.
 
-### What you do before dispatching
+### Build your context
 
-1. **Read any reference document carefully.** Understand what it's actually asking for, not just the surface labels. If the user handed you three docs, read all three and synthesize what lens they collectively describe.
+Read whatever the user prompted you with — reference documents, file references, inline descriptions. Infer intent from the environment: what project are you in? What kind of work happens here? A user in the resume project probably wants job-search-related evidence. A user in a project's own working directory probably wants self-understanding or feature description. Use context to fill gaps the user didn't spell out, not to override what they said.
 
-2. **Restate the lens in your own words.** Show the user how you understand it. One paragraph, concrete. This catches miscommunication before it costs researcher tokens.
+### Dispatch scouts immediately
 
-3. **Name the primary corpora.** For this lens and these projects, which of the three corpora are primary and which are supporting? This is the decision that determines which agents you dispatch and in what proportion. Examples:
-   - "Assess these four projects against a staff-engineer rubric" → codebase-analyst primary on all four, output-analyst primary where reachable, process-analyst corroborating.
-   - "How does the user interact with AI and demonstrate safety thinking" → process-analyst primary (AI turns are co-evidence here, not just context), codebase corroborating where decisions landed in code.
-   - "What does bluetaka do" → codebase-analyst + output-analyst primary, process-analyst skipped or minimal.
-   - "Find STAR-shaped episodes" → process-analyst primary (situation and action live in sessions), codebase and output for the "result" leg.
+Don't wait until after alignment to scout. Dispatch one **project-scout** (haiku) per project in scope as soon as you know which projects are involved — even before the lens is finalized. Scouts are cheap and fast. Their briefs inform the planning conversation: which corpora are available, how rich the history is, what's reachable. You need this information to have a useful conversation about the lens.
 
-4. **Name the scoping reality.** Solo or multi-human per project. If multi-human, how you'll scope. If any project has an unreachable output corpus, what rung the scout will probably land on.
+### Shape the lens through focused dialogue
 
-5. **Name the output destination.** A mining doc at `docs/mining/<slug>.md`, direct presentation in chat, or both. Default to a file for anything non-trivial; direct presentation is for quick exploratory runs.
+The user's initial prompt is rarely a finished lens. Your job is to sharpen it — not by asking a million questions, but by surfacing the choices that matter. Use AskUserQuestion to present concrete options when there are genuine alternatives the user should weigh.
 
-6. **Check the "not appropriate for" list.** If the ask falls into one of the out-of-scope buckets, say so and either redirect or narrow the ask before proceeding.
+**What makes a good lens:**
+- Points at **observable behaviors**, not abstract qualities. "Systems thinking at scale" is abstract; "moments where architectural constraints forced a design decision" is observable and searchable.
+- **Specific enough to guide search but open enough for inferential leaps.** Too narrow = grep with extra steps. Too broad = researchers pad to fill the space.
+- **Matches the available corpora.** A process-heavy lens on a project with 2 chat sessions won't work. Use scout briefs to calibrate — tell the user "bluetaka has almost no chat history, so process evidence will be thin; the code is where the evidence lives."
+- **Calibrated to the output destination.** Mining for a staff-engineer rubric needs different evidence grain than mining for "find me STAR-shaped episodes."
 
-7. **Get confirmation.** User says "go" or corrects the frame. Then you dispatch.
+**Choices to surface (use AskUserQuestion when the answer isn't obvious from context):**
 
-### When to skip dispatch entirely
+- **Output organization** — by lens signal (shows cross-project patterns, good for narrative synthesis), by project (good for per-project resume sections, portfolio entries), or hybrid (by signal with clear project labels on each finding). If the user is building a resume, by-project is probably right. If they're looking for cross-cutting patterns, by-signal is probably right. Don't default silently — surface the choice if it's not obvious.
+- **Citation depth** — footnoted source references (file:line, session:turn, commit hashes) serve as an index for the user to drill back into the artifacts later. Some outputs need them (investigation, evidence gathering), some don't (quick summary, brainstorming). Ask if unclear.
+- **Evidence grain** — does the user want 5 deep findings or 20 breadth findings? Rich narrative or terse bullets? This shapes how many researchers you dispatch and what you tell them.
+- **Output destination** — file at `docs/mining/<slug>.md`, direct presentation in chat, or both.
 
-If the question is a one-shot needle hunt ("where did I decide X"), do it yourself with cc-explorer and direct file reads. Do not dispatch a scout, do not dispatch researchers. The topology earns its keep on genuinely ambiguous cross-source synthesis work; for single-answer questions it's pure overhead. Bless the inline path without guilt.
+Don't ask about things you can infer. Don't ask about internal mechanics (corpus weighting, model tiering, dispatch strategy). The user doesn't need to know about rungs, tiers, or agent types. Present choices in terms of what the output will look like, not how the system works.
 
-## Dispatch: scout first, then the research wave
+### Get approval, then dispatch
+
+Present a short plan: "Here's what I understand, here's what the scouts told me about these projects, here's how I'll organize the output, here's roughly how many researchers I'll dispatch. Go?" The user says go or corrects. Then Phase 2 begins.
+
+## Phase 2: Execution — dispatch the research wave
 
 Dispatch agents via the Agent tool with `subagent_type` set to the qualified agent name:
 - `project-mining:project-scout`
@@ -126,22 +128,22 @@ Dispatch agents via the Agent tool with `subagent_type` set to the qualified age
 - `project-mining:process-analyst`
 - `project-mining:output-analyst`
 
-Use TaskCreate to track each assignment so the user has visibility into progress.
+### Progress tracking
 
-### Wave 0: Scouts (parallel, one per project)
+Use TaskCreate to give the user visibility into *where you are in the workflow*, not what you dispatched. Create tasks for the workflow phases, not per-agent:
 
-For each project in scope, dispatch a **project-scout**. Each scout gets:
+- **Planning** — while shaping the lens and waiting for scouts
+- **Researching** — while research agents are running (update description with count: "N agents across M projects")
+- **Synthesizing** — when all findings are in and you're weaving
+- **Writing output** — when you're producing the final document
 
-- Project path (absolute)
-- The lens (so it can tune emphasis) — you may pass a slice rather than the full lens if the full lens is large
-- Sibling project names (if multi-project run)
-- AI-assistance footprint request (only if the lens cares about it)
+Mark each completed as you move to the next. The user can already see individual background agents in the UI — tasks should show the forest, not duplicate the trees.
 
-Scouts return orientation briefs. Read them before planning Wave 1. The briefs tell you corpus availability per project, landmines, the highest reachable rung for output analysis, multi-human status, and hosting/visibility metadata.
+### Scouts (already dispatched during planning)
 
-If a scout's brief reveals the project is a bad fit for the lens — thin corpus, wrong shape, unreachable outputs on a lens that needs them — say so during a brief check-in with the user before dispatching Wave 1. Don't burn researcher tokens on a project that can't pay.
+Scout briefs arrived during Phase 1. You already used them to inform the lens conversation. If the user added projects after planning, dispatch scouts for the new ones now.
 
-### Wave 1: Research agents (parallel fan-out)
+### Research agents (parallel fan-out)
 
 Decompose the lens into researcher assignments and dispatch per project, per corpus. An assignment is a single researcher's scope: one project, one agent type, one facet of the lens.
 
@@ -170,47 +172,25 @@ This is the part the topology exists to serve. Researcher findings are *input* t
 
 **The weave is the point.** A codebase-analyst finding about `worker/dispatcher.py` and a process-analyst finding about the session where that dispatcher's architecture was chosen are *the same finding with two evidence legs*. Merge them. A codebase-analyst observation about a feature and an output-analyst observation of that feature actually running are the same finding from both directions. Merge them. The synthesis's job is to produce findings the user couldn't have gotten from any single researcher — cross-corpus corroboration is the value proposition.
 
-Organize by the lens, not by researcher, not by project, not by chronology (unless the lens is temporal).
+Organize by whatever structure was agreed during planning — not by researcher, not by corpus.
 
 ## Output structure
 
-Default output location: `docs/mining/<project-or-cluster-slug>-<lens-slug>-YYYY-MM.md`, or direct presentation in chat for exploratory runs. Confirm during alignment.
+The output organization, citation depth, and section structure are **decided during planning**, not hardcoded here. The planning phase should have already settled: organize by project or by lens signal or hybrid? Include source footnotes or not? Rich narrative or terse bullets?
 
-```markdown
-# [Lens title]
+Whatever structure was agreed, these principles apply:
 
-**Lens:** [One or two sentences describing what was searched for]
-**Scope:** [Projects, date ranges, subject human if multi-human]
-**Generated:** [Date]
-
-## What these projects are
-[One short paragraph per project. Not a README — just enough to understand what was built and what the scale/stakes are. Pull from scout briefs but write in your own voice.]
-
-## Findings, organized by the lens
-[Thematic sections driven by the lens. Each finding is woven across corpora where possible — codebase evidence + process corroboration + output observation merged into one claim with multiple evidence legs. Use footnotes for source traceability: file:line, commit hashes, session:turn refs.]
-
-## Key evidence summary
-[The strongest 5–10 findings with enough context for a 2-minute interview story or a paragraph of writing. These are standalone anecdotes the user can pull verbatim.]
-
-## Raw material
-[Bullet seeds, story hooks, angles. 2–3 sentence candidates that could become resume bullets, LinkedIn posts, interview answers, performance review evidence. Not finished artifacts — rich raw material.]
-
-## Honest gaps
-[Facets of the lens that produced thin or no findings. Projects that couldn't be fully analyzed (unreachable outputs, multi-human scoping limits). What a different lens or more data would reveal. This is calibration, not apology.]
-
-## Appendix
-[Scale numbers, technical stack summaries, file locations, timeline if useful, footnotes collected here if not inline.]
-```
-
-**Footnotes for traceability.** Every evidence-backed claim gets a footnote linking to the source: `path/to/file.py:45`, commit `abc1234`, `session:xxx/turn:yyy`. Narrative reads clean; footnotes are there for the user to drill in months later.
-
-**You are invisible scaffolding.** No "the codebase-analyst found," no "per the scout brief," no agent-type words in the final output at all. Write as the analyst who did the work, not as the orchestrator who dispatched it.
+- **Weave, don't staple.** A codebase finding and a process finding about the same subsystem are the same finding with two evidence legs. Merge them.
+- **Dates refer to when the work happened**, not when the analysis ran. Project timelines, commit dates, session dates — these help the reader understand sequences. "Analyzed on April 10" is noise.
+- **Source footnotes, when included, are an index** — not verification. They exist so the reader can drill back into the artifact months later. `path/to/file.py:45`, commit `abc1234`, `session:xxx/turn:yyy`. Whether to include them is a planning decision based on the output's purpose.
+- **Every output needs an honest gaps section.** What the lens asked about but the evidence didn't support. What couldn't be fully analyzed. This is calibration, not apology.
+- **You are invisible scaffolding.** No "the codebase-analyst found," no "per the scout brief," no agent-type words in the final output. No internal vocabulary (rungs, tiers, corpora). Write as the analyst who did the work, not as the orchestrator who dispatched it.
 
 ## Anti-patterns
 
 - Don't dispatch when a one-shot inline answer would do. The topology is for ambiguous cross-source work.
 - Don't pass per-shard "look for these keywords" checklists to researchers. The agent prompts own methodology; you own assignment.
-- Don't organize synthesis by researcher or by corpus. Organize by the lens.
+- Don't organize synthesis by researcher or by corpus. Organize by whatever structure was agreed during planning.
 - Don't staple researcher outputs together and call it synthesis. Weave.
 - Don't let AI-authorship dispositions discount findings. Humans are the author of record.
 - Don't let project self-narration ("just a hobby") lower the bar on what the work demonstrates. Judge the work.
