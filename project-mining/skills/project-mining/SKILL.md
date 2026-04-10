@@ -83,7 +83,7 @@ The scout flags multi-human projects in its brief. During alignment, you name th
 
 This skill has two phases with a hard gate between them. **No dispatch until the plan is approved.** The planning phase is where all the quality leverage is — a good lens produces good findings almost mechanically; a bad lens produces padding no matter how good the researchers are.
 
-Start your first response with: `project-mining v2.30.0`
+Start your first response with: `project-mining v2.31.0`
 
 ### When to skip the topology entirely
 
@@ -93,32 +93,37 @@ If the question is a one-shot needle hunt ("where did I decide X"), do it yourse
 
 Read whatever the user prompted you with — reference documents, file references, inline descriptions. Infer intent from the environment: what project are you in? What kind of work happens here? A user in the resume project probably wants job-search-related evidence. A user in a project's own working directory probably wants self-understanding or feature description. Use context to fill gaps the user didn't spell out, not to override what they said.
 
-### Dispatch scouts immediately
+### Dispatch one scout immediately
 
-Don't wait until after alignment to scout. Dispatch one **project-scout** (haiku) per project in scope as soon as you know which projects are involved — even before the lens is finalized. Scouts are cheap and fast. Their briefs inform the planning conversation: which corpora are available, how rich the history is, what's reachable. You need this information to have a useful conversation about the lens.
+As soon as you know which projects are in scope, dispatch a single **project-scout** (haiku) covering all of them. The scout sweeps the full landscape in one pass — what exists, how much, what's dangerous. It does NOT receive the lens (it's dispatched before the lens is finalized) and it does NOT rate corpus quality or suggest research directions. It produces raw inventory.
 
-### Shape the lens through focused dialogue
+Pass only the list of project paths and the subject human. Do not prescribe the scout's output format — the scout agent has its own brief template. Do not ask it for corpus ratings, key file paths, or research suggestions.
 
-The user's initial prompt is rarely a finished lens. Your job is to sharpen it — not by asking a million questions, but by surfacing the choices that matter. Use AskUserQuestion to present concrete options when there are genuine alternatives the user should weigh.
+### Shape the lens through dialogue — you MUST ask questions
+
+The user's initial prompt is rarely a finished lens. Your job is to sharpen it through actual conversation — not by reading the docs and saying "Go?"
+
+**You must ask the user at least one question before presenting a dispatch plan.** This is a hard gate. Do not skip it. Do not bury questions in a wall of text the user has to parse. Use AskUserQuestion so the conversation pauses and waits for their answer.
+
+Your tendency will be to read the reference docs, build a signal table in your own head, make every decision yourself, and present a finished plan. That is the failure mode this section exists to prevent. The user is the expert on what they need — you are the expert on what's minable. The dialogue is where those meet.
 
 **What makes a good lens:**
 - Points at **observable behaviors**, not abstract qualities. "Systems thinking at scale" is abstract; "moments where architectural constraints forced a design decision" is observable and searchable.
 - **Specific enough to guide search but open enough for inferential leaps.** Too narrow = grep with extra steps. Too broad = researchers pad to fill the space.
-- **Matches the available corpora.** A process-heavy lens on a project with 2 chat sessions won't work. Use scout briefs to calibrate — tell the user "bluetaka has almost no chat history, so process evidence will be thin; the code is where the evidence lives."
 - **Calibrated to the output destination.** Mining for a staff-engineer rubric needs different evidence grain than mining for "find me STAR-shaped episodes."
 
-**Choices to surface (use AskUserQuestion when the answer isn't obvious from context):**
+**Choices to surface via AskUserQuestion (when not obvious from context):**
 
-- **Output organization** — by lens signal (shows cross-project patterns, good for narrative synthesis), by project (good for per-project resume sections, portfolio entries), or hybrid (by signal with clear project labels on each finding). If the user is building a resume, by-project is probably right. If they're looking for cross-cutting patterns, by-signal is probably right. Don't default silently — surface the choice if it's not obvious.
-- **Citation depth** — footnoted source references (file:line, session:turn, commit hashes) serve as an index for the user to drill back into the artifacts later. Some outputs need them (investigation, evidence gathering), some don't (quick summary, brainstorming). Ask if unclear.
-- **Evidence grain** — does the user want 5 deep findings or 20 breadth findings? Rich narrative or terse bullets? This shapes how many researchers you dispatch and what you tell them.
-- **Output destination** — file at `docs/mining/<slug>.md`, direct presentation in chat, or both.
+- **Output organization** — by project (good for resume sections), by lens signal (good for cross-cutting patterns), or hybrid. If the user is building a resume, by-project is probably right. Don't default silently.
+- **Evidence grain** — deep findings or breadth? Rich narrative or terse bullets?
+- **Output destination** — file, chat, or both? If updating an existing file, confirm.
+- **Citation depth** — source footnotes or not? Depends on whether this is evidence-gathering or quick summary.
 
-Don't ask about things you can infer. Don't ask about internal mechanics (corpus weighting, model tiering, dispatch strategy). The user doesn't need to know about rungs, tiers, or agent types. Present choices in terms of what the output will look like, not how the system works.
+Don't ask about things you can infer. Don't ask about internal mechanics. Present choices in terms of what the output will look like, not how the system works.
 
 ### Get approval, then dispatch
 
-Present a short plan: "Here's what I understand, here's what the scouts told me about these projects, here's how I'll organize the output, here's roughly how many researchers I'll dispatch. Go?" The user says go or corrects. Then Phase 2 begins.
+Once the scout brief is back and you've had the dialogue, present a short plan: what you understand the lens to be, what the scout found across the landscape, how you'll organize the output, roughly how many researchers. The user says go or corrects. Then Phase 2 begins.
 
 ## Phase 2: Execution — dispatch the research wave
 
@@ -139,9 +144,9 @@ Use TaskCreate to give the user visibility into *where you are in the workflow*,
 
 Mark each completed as you move to the next. The user can already see individual background agents in the UI — tasks should show the forest, not duplicate the trees.
 
-### Scouts (already dispatched during planning)
+### Scout (already dispatched during planning)
 
-Scout briefs arrived during Phase 1. You already used them to inform the lens conversation. If the user added projects after planning, dispatch scouts for the new ones now.
+The scout's landscape brief arrived during Phase 1. You used it to inform the dialogue. If the user added projects after planning, re-dispatch the scout with the expanded list.
 
 ### Research agents (parallel fan-out)
 
@@ -152,15 +157,15 @@ Each researcher assignment passes:
 1. **Lens slice** — the specific facet this researcher is looking for, in concrete terms. Do NOT pass per-shard "look for these keywords" checklists; the agent prompts already contain the analytical guidance. You translate the lens into a concrete facet; the researcher does the finding.
 2. **Task boundaries** — "you are looking for X, not Y" to prevent sibling overlap.
 3. **Project path** and **subject human** (when multi-human).
-4. **Orientation brief — structural facts only.** Pass the scout's factual orientation (what the project is, repo metadata, corpus availability ratings, landmines, file paths) but **strip evaluative conclusions**. Do NOT pass "best evidence for," "focus especially on," research suggestions, or the scout's assessment of what's interesting. The researchers must discover what matters through their own reading — the scout provides a map of what exists, not a guide to what's important. If the scout's brief contains a "next steps" or "research focus" or "bottom line" section, do not include it.
-5. **For output-analyst specifically:** the highest ladder rung the scout identified as reachable, plus any heroics the scout flagged (credentials needed, how to connect to the database, etc.).
+4. **Landscape context** — from the scout brief, pass the raw inventory for this project: what it is, commit count, session count, notable directories, footguns. Do NOT add your own interpretation or emphasis. The researchers discover what matters through their own reading.
+5. **For output-analyst specifically:** what the scout noted about observable outputs (fixtures, screenshots, databases), plus any footguns about destructive commands.
 
 **Model tiering:**
 - **You (orchestrator):** Opus. Alignment, lens translation, dispatch planning, synthesis — all judgment work.
-- **project-scout:** Haiku. Orientation is fast breadth work — read-only, structured brief template, same class as Anthropic's Explore agent.
+- **project-scout:** Haiku. One scout sweeps all projects — fast inventory, no analysis.
 - **codebase-analyst:** Opus. Rubric application and lens mapping under ambiguity is judgment work.
 - **process-analyst:** Sonnet. Pattern matching, quote extraction, worktree-aware calibration — pinned in the agent file.
-- **output-analyst:** Sonnet by default, Opus if the scout flagged the outputs as requiring significant inference from incomplete evidence.
+- **output-analyst:** Sonnet by default, Opus if outputs require significant inference from incomplete evidence.
 
 ### Wave 2: Gap filling (optional)
 
