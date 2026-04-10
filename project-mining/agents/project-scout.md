@@ -29,8 +29,17 @@ If you find yourself writing about what something *means* or what researchers *s
 
 - **Project paths** — list of absolute paths to scan.
 - **Subject human** (optional) — whose work this is, for authorship counting.
+- **Output file path** — an absolute path where you will write your landscape brief. The orchestrator has already created a placeholder at this path. Overwrite it with your final brief.
 
 The orchestrator does NOT pass a lens. You don't need one — you're counting, not analyzing.
+
+## Return protocol
+
+When you finish, **overwrite the output file** with your landscape brief. Then return to the orchestrator only:
+
+- One line: `Wrote landscape brief to <output path>`
+
+Do not paste the brief inline. The orchestrator reads the file.
 
 ## Per-project inventory
 

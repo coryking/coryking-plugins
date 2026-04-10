@@ -83,7 +83,7 @@ The scout flags multi-human projects in its brief. During alignment, you name th
 
 This skill has two phases with a hard gate between them. **No dispatch until the plan is approved.** The planning phase is where all the quality leverage is — a good lens produces good findings almost mechanically; a bad lens produces padding no matter how good the researchers are.
 
-Start your first response with: `project-mining v2.31.0`
+Start your first response with: `project-mining v2.32.0`
 
 ### When to skip the topology entirely
 
@@ -93,11 +93,35 @@ If the question is a one-shot needle hunt ("where did I decide X"), do it yourse
 
 Read whatever the user prompted you with — reference documents, file references, inline descriptions. Infer intent from the environment: what project are you in? What kind of work happens here? A user in the resume project probably wants job-search-related evidence. A user in a project's own working directory probably wants self-understanding or feature description. Use context to fill gaps the user didn't spell out, not to override what they said.
 
+### Create the run directory
+
+Before dispatching the scout, pick an output location and create the run directory.
+
+- If the user has named an output file (e.g., `docs/mining/swe-resume-evidence-2026-04.md`), the run directory is the sibling directory with the same slug: `docs/mining/swe-resume-evidence-2026-04/`.
+- If the output destination isn't settled yet, use a working slug: `docs/mining/<short-slug>-<YYYY-MM-DD>/`. The user can confirm the final output filename during planning.
+
+Create the directory with `mkdir -p`. Write a `# placeholder` line to `<run-dir>/scout.md` so the scout has a pre-authorized write target.
+
 ### Dispatch one scout immediately
 
-As soon as you know which projects are in scope, dispatch a single **project-scout** (haiku) covering all of them. The scout sweeps the full landscape in one pass — what exists, how much, what's dangerous. It does NOT receive the lens (it's dispatched before the lens is finalized) and it does NOT rate corpus quality or suggest research directions. It produces raw inventory.
+As soon as you know which projects are in scope, dispatch a single **project-scout** (haiku) covering all of them. The scout sweeps the full landscape in one pass — what exists, how much, what's dangerous. It does NOT receive the lens (it's dispatched before the lens is finalized) and it does NOT rate corpus quality or suggest research directions.
 
-Pass only the list of project paths and the subject human. Do not prescribe the scout's output format — the scout agent has its own brief template. Do not ask it for corpus ratings, key file paths, or research suggestions.
+**Use this scout dispatch template verbatim. Fill only the slots. Do not add sections.**
+
+````markdown
+## Assignment
+
+**Projects to scout:**
+- `<absolute path 1>`
+- `<absolute path 2>`
+- ...
+
+**Subject human:** `<name>` (omit if solo across all projects)
+
+**Output file:** `<absolute path to <run-dir>/scout.md>` — write your landscape brief here. The orchestrator has created a placeholder at this path; overwrite it.
+````
+
+Do not add "look for", "rate these corpora", or any guidance about what's interesting. The scout agent prompt is complete; this dispatch is just an assignment.
 
 ### Shape the lens through dialogue — you MUST ask questions
 
@@ -114,7 +138,8 @@ Your tendency will be to read the reference docs, build a signal table in your o
 
 **Choices to surface via AskUserQuestion (when not obvious from context):**
 
-- **Output organization** — by project (good for resume sections), by lens signal (good for cross-cutting patterns), or hybrid. If the user is building a resume, by-project is probably right. Don't default silently.
+- **Project grouping** — when multiple projects are related (shared stack, same domain, one project depends on another), ask whether the user wants them analyzed together as a group or separately. A group is dispatched as one researcher trio (one codebase-analyst, one process-analyst, one output-analyst) covering all projects in the group, enabling cross-project findings. Example: `camoufox`, `camoufox-135`, `stealth-research`, and `bluetaka` might form a "scraping stack" group. Related projects surfaced in the scout brief are candidates. Don't guess — ask.
+- **Output organization** — by project/group (good for resume sections), by lens signal (good for cross-cutting patterns), or hybrid. If the user is building a resume, by-project is probably right. Don't default silently.
 - **Evidence grain** — deep findings or breadth? Rich narrative or terse bullets?
 - **Output destination** — file, chat, or both? If updating an existing file, confirm.
 - **Citation depth** — source footnotes or not? Depends on whether this is evidence-gathering or quick summary.
@@ -124,6 +149,23 @@ Don't ask about things you can infer. Don't ask about internal mechanics. Presen
 ### Get approval, then dispatch
 
 Once the scout brief is back and you've had the dialogue, present a short plan: what you understand the lens to be, what the scout found across the landscape, how you'll organize the output, roughly how many researchers. The user says go or corrects. Then Phase 2 begins.
+
+### Write the lens file and create placeholders
+
+The run directory already exists (you created it before dispatching the scout). Now populate it for the research wave.
+
+**Write `<run-dir>/lens.md`** — the full lens text verbatim: the user's reference documents, the rubric, any scoping decisions from the planning dialogue ("focus on IC-level signals, not management"), the output destination, and the organization choice. Do not paraphrase. Do not summarize into a signals table. Researchers will read this file as their first step — they need to see what the user actually handed you, not your interpretation of it.
+
+**Pre-create placeholder findings files** — one per (group, corpus) pair you plan to dispatch. Naming: `<run-dir>/<group-slug>-<corpus>.md` where `<corpus>` is `codebase`, `process`, or `output`.
+
+```
+bluetaka-codebase.md
+bluetaka-process.md
+scraping-stack-codebase.md      # when a group covers multiple projects
+mozicode-codebase.md
+```
+
+Write a `# placeholder` line to each file. This triggers the Write permission prompt once up front — background agents that try to Write to a new path without prior permission get denied silently and their work is lost.
 
 ## Phase 2: Execution — dispatch the research wave
 
@@ -148,17 +190,45 @@ Mark each completed as you move to the next. The user can already see individual
 
 The scout's landscape brief arrived during Phase 1. You used it to inform the dialogue. If the user added projects after planning, re-dispatch the scout with the expanded list.
 
-### Research agents (parallel fan-out)
+### Research agents — dispatch template
 
-Decompose the lens into researcher assignments and dispatch per project, per corpus. An assignment is a single researcher's scope: one project, one agent type, one facet of the lens.
+Decompose the lens into researcher assignments: one group of projects × one corpus = one researcher. A "group" is one or more related project paths analyzed together (e.g., `bluetaka` alone, or `camoufox` + `camoufox-135` + `stealth-research` + `bluetaka` as a "scraping stack" group). Dispatch researchers in parallel.
 
-Each researcher assignment passes:
+**Copy this template verbatim into every research agent dispatch. Fill in only the angle-bracketed slots. Do not add sections. Do not add "look for" bullets. Do not add your own summary of the lens. The template is the whole prompt.**
 
-1. **Lens slice** — the specific facet this researcher is looking for, in concrete terms. Do NOT pass per-shard "look for these keywords" checklists; the agent prompts already contain the analytical guidance. You translate the lens into a concrete facet; the researcher does the finding.
-2. **Task boundaries** — "you are looking for X, not Y" to prevent sibling overlap.
-3. **Project path** and **subject human** (when multi-human).
-4. **Landscape context** — from the scout brief, pass the raw inventory for this project: what it is, commit count, session count, notable directories, footguns. Do NOT add your own interpretation or emphasis. The researchers discover what matters through their own reading.
-5. **For output-analyst specifically:** what the scout noted about observable outputs (fixtures, screenshots, databases), plus any footguns about destructive commands.
+````markdown
+## Assignment
+
+**Lens file:** `<absolute path to lens.md>` — read this first. It contains the full lens, the user's reference documents, and the output/organization decisions. Form your own reading from the file, not from this dispatch.
+
+**Projects:**
+- `<absolute path to project 1>`
+- `<absolute path to project 2>` (omit if only one)
+- ...
+
+**Group slug:** `<group-slug>` — use this in the output file path and when referring to the group in your findings.
+
+**Subject human:** `<name>` (omit if solo-project or not applicable)
+
+**Output file:** `<absolute path to <group-slug>-<corpus>.md in the run directory>` — write your findings here. The orchestrator has already created a placeholder at this path. Overwrite it with your final findings document.
+
+**Sibling boundaries:** `<only when multiple researchers share this group — e.g., "you own the process corpus; the codebase-analyst owns source files">` (omit otherwise)
+
+## Landscape (from scout)
+
+<paste the scout inventory lines for THIS group verbatim — what each project is, commit count, session count, notable directories, footguns. Do not interpret, summarize, or emphasize.>
+````
+
+That's the whole template. If your dispatch is longer, you're prescribing methodology — delete everything that isn't a slot in the template.
+
+**Do NOT add** anything resembling:
+- "Mine git history and chat logs" — the agent decides its own data sources.
+- "Look for:" bullet lists — narrows analytical scope and kills discovery.
+- Your own decomposition of the lens into signals — pass the lens file; let the researcher read it fresh.
+- Evaluative framing like "this project has the richest process corpus" — biases toward confirming your guess.
+- Specific inquiry hooks ("schema evolution visible in 23 migrations") — if the researcher finds those on their own, the finding is real; if you hand it to them, they're running your checklist.
+
+The reasoning: researcher agents already contain all the analytical guidance for their corpus. When you add methodology to the dispatch, you override the agent prompt with your own guesses about what's interesting — that's the bias pipeline we're trying to eliminate.
 
 **Model tiering:**
 - **You (orchestrator):** Opus. Alignment, lens translation, dispatch planning, synthesis — all judgment work.
@@ -171,9 +241,13 @@ Each researcher assignment passes:
 
 After Wave 1 findings are in, identify gaps: facets of the lens with no evidence, inconsistencies between researchers, subsystems multiple researchers partially touched. Optionally dispatch a narrow second wave. Don't do this just to be thorough — every follow-up costs tokens and time. Do it when the first-pass findings point at something worth chasing.
 
-### Wave 3: Synthesis (serial, in your head)
+### Wave 3: Synthesis (serial, reading files)
 
-This is the part the topology exists to serve. Researcher findings are *input* to synthesis, not the output itself. You are the editorial layer. Do not dump researcher outputs into the final doc organized by researcher — that is stapling, not synthesis.
+This is the part the topology exists to serve. Researcher findings are *input* to synthesis, not the output itself. You are the editorial layer.
+
+**Read the findings files one at a time** from the run directory. The researchers wrote their full findings to `<run-dir>/<group-slug>-<corpus>.md` — you have top-line highlights in your conversation history but not the full detail. Open each file as you work through synthesis; don't try to hold them all in context at once.
+
+Do not dump researcher outputs into the final doc organized by researcher — that is stapling, not synthesis.
 
 **The weave is the point.** A codebase-analyst finding about `worker/dispatcher.py` and a process-analyst finding about the session where that dispatcher's architecture was chosen are *the same finding with two evidence legs*. Merge them. A codebase-analyst observation about a feature and an output-analyst observation of that feature actually running are the same finding from both directions. Merge them. The synthesis's job is to produce findings the user couldn't have gotten from any single researcher — cross-corpus corroboration is the value proposition.
 
@@ -195,7 +269,9 @@ Whatever structure was agreed, these principles apply:
 
 The user is waiting while researchers run. Keep them in the loop with findings, not mechanics.
 
-**As researchers complete:** Surface a one-line highlight filtered through the lens — "bluetaka: strongest finding so far is the reactive handler architecture and the MFA bridge via Service Bus." Not "8 findings, 72 tool calls." The user cares about what was found, not how many agents ran. Remember: you are invisible scaffolding. No agent-type names, no internal vocabulary in user-facing communication.
+**As researchers complete:** Each researcher returns a short message — a confirmation, a 2-3 sentence top-line highlight, and any gaps. Pass that highlight through to the user, stripped of any agent-type language. Example: "bluetaka: strongest finding so far is the reactive handler architecture and the MFA bridge via Service Bus." Not "8 findings, 72 tool calls." The user cares about what was found, not how many agents ran. Remember: you are invisible scaffolding. No agent-type names, no internal vocabulary in user-facing communication.
+
+Do not open the full findings files for progress highlights — the agents' return messages are designed to give you what you need without spending context on the full documents. Save the file reads for the synthesis pass.
 
 As highlights accumulate, note corroboration: "just found the session where the reactive architecture was designed — that corroborates the code evidence." This builds a picture incrementally.
 
