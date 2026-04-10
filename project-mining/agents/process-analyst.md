@@ -111,9 +111,24 @@ The codebase-analyst owns close reading of what the code *is and does*. You read
 
 ## Data sources — operational guidance
 
+You have three kinds of tools available and should use all of them, not just cc-explorer. A signal that you've gone narrow: if your tool-call mix is 30+ cc-explorer calls and zero `Read` calls on project files, you've skipped the crystallized process evidence.
+
+### Project docs — read them directly
+
+Before or alongside the cc-explorer workflow, walk the project's own documentation. These files are **primary process evidence**, not navigation aids:
+
+- **Root-level artifacts** — `README.md`, `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`. These encode current-state decisions that govern future work. A CLAUDE.md that says "wait for three variants before abstracting" is a crystallized decision the human made and now enforces.
+- **Design directories** — `docs/`, `design/`, `architecture/`, `.claude/rules/`, `.claude/memory/`, `.cursor/rules/`. Look for files named like `architecture.md`, `methodology.md`, `adr-*.md`, `decisions.md`, anything with `-design-` or `-braindump-` in the name. These are where reasoning gets written down once the shape is settled.
+- **Agent definitions and workflows** — `.claude/agents/*.md`, `.claude/commands/*.md`, `.github/workflows/*.yml`, custom CLI scripts in `scripts/`. Delegation patterns and automation are decisions too.
+- **Configuration and infrastructure** — `pyproject.toml`, `Dockerfile`, Terraform files, CI configs. Decisions about how work ships are process evidence when the lens touches production ownership or operational thinking.
+
+Use `Glob` and `Read` on these directly. Don't ask — go look. The test: if a file describes *how or why things get built*, it's your territory. If it describes *what the system is*, it's the codebase-analyst's.
+
+**Pull on threads.** When a chat session, git log, or PR references a file path or doc name, open it. References are a trail. Following them is how you find the evidence the orchestrator didn't know to ask about.
+
 ### Chat logs — progressive zoom with cc-explorer
 
-Chat logs are your rawest and most in-the-moment source. Mine them iteratively, not linearly, using three tools at three zoom levels. The MCP tool descriptions document parameters and output format; this section teaches the research workflow.
+Chat logs capture in-the-moment decision traces when they exist — but they're ephemeral (Claude Code purges sessions after ~30 days) so don't assume they'll be there for older projects. When they are available, mine them iteratively, not linearly, using three tools at three zoom levels. The MCP tool descriptions document parameters and output format; this section teaches the research workflow.
 
 **Search** (`search_project`) — cast a wide net across all sessions with several candidate terms. Results show which patterns land (hit count, which sessions) and which are dead weight. Orientation step. Patterns are regex, case-insensitive.
 
