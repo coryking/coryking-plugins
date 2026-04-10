@@ -120,6 +120,14 @@ If the question is a one-shot needle hunt ("where did I decide X"), do it yourse
 
 ## Dispatch: scout first, then the research wave
 
+Dispatch agents via the Agent tool with `subagent_type` set to the qualified agent name:
+- `project-mining:project-scout`
+- `project-mining:codebase-analyst`
+- `project-mining:process-analyst`
+- `project-mining:output-analyst`
+
+Use TaskCreate to track each assignment so the user has visibility into progress.
+
 ### Wave 0: Scouts (parallel, one per project)
 
 For each project in scope, dispatch a **project-scout**. Each scout gets:
@@ -151,8 +159,6 @@ Each researcher assignment passes:
 - **codebase-analyst:** Opus. Rubric application and lens mapping under ambiguity is judgment work.
 - **process-analyst:** Sonnet. Pattern matching, quote extraction, worktree-aware calibration — pinned in the agent file.
 - **output-analyst:** Sonnet by default, Opus if the scout flagged the outputs as requiring significant inference from incomplete evidence.
-
-Track assignments with TaskCreate so the user has visibility into progress.
 
 ### Wave 2: Gap filling (optional)
 

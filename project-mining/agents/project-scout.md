@@ -1,7 +1,7 @@
 ---
 name: project-scout
 description: >
-  Internal subagent dispatched by the project-mining orchestrator via Task tool
+  Internal subagent dispatched by the project-mining orchestrator via Agent tool
   BEFORE the research wave. Produces a compact orientation brief about a single
   project so the orchestrator can plan dispatch without polluting its own context
   with exploratory reading. One scout per project; runs in parallel when multiple

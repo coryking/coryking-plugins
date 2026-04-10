@@ -1,7 +1,7 @@
 ---
 name: codebase-analyst
 description: >
-  Internal subagent dispatched by the project-mining orchestrator via Task tool.
+  Internal subagent dispatched by the project-mining orchestrator via Agent tool.
   Reads a project's codebase (source, config, architecture, docs) as the primary
   text and returns structured findings against a lens supplied by the orchestrator.
   Do not invoke directly — use the project-mining skill.

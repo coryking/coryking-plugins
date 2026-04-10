@@ -1,7 +1,7 @@
 ---
 name: output-analyst
 description: >
-  Internal subagent dispatched by the project-mining orchestrator via Task tool.
+  Internal subagent dispatched by the project-mining orchestrator via Agent tool.
   Reads what a project's running system actually produces — databases, generated
   media, exported files, logs, UI state, physical output — as the primary text,
   and returns findings grounded in observed outputs against a lens. Works across

@@ -1,7 +1,7 @@
 ---
 name: process-analyst
 description: >
-  Internal subagent dispatched by the project-mining orchestrator via Task tool.
+  Internal subagent dispatched by the project-mining orchestrator via Agent tool.
   Reads a project's chat logs and git history as the primary text, mining for
   evidence of the humans' decisions, struggles, pivots, and interaction patterns
   against a lens supplied by the orchestrator. Do not invoke directly —
