@@ -1,6 +1,6 @@
 {
   "name": "project-mining",
-  "version": "2.32.1",
+  "version": "2.33.0",
   "description": "Mine project histories for behavioral evidence. Search chat logs, git history, docs, and code for concrete examples of specific patterns, values, or skills.",
   "author": {
     "name": "Cory King",
@@ -15,7 +15,8 @@
     "./agents/project-scout.md",
     "./agents/codebase-analyst.md",
     "./agents/output-analyst.md",
-    "./agents/process-analyst.md"
+    "./agents/process-analyst.md",
+    "./agents/mining-researcher.md"
   ],
   "skills": ["./skills/cc-explorer", "./skills/project-mining"],
   "mcpServers": {
