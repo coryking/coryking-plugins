@@ -12,6 +12,17 @@ Act as the engineer, not just the implementer. The user describes what to build;
 
 Before adding functionality, read the existing models and type hierarchy first — they are the architecture. New behavior belongs on existing types when it fits. If a model stores data in a weaker type than you need, evolve the model.
 
+## GitHub workflow
+
+The backlog is GitHub Issues at `coryking/coryking-plugins`. **This is a public repo** — never include conversation content, personal data, or export files in issues or PRs.
+
+**Every session:**
+1. **Start:** Check `gh issue list --state open` for context on open work.
+2. **While working:** See tech debt, a bug, or a design question? `gh issue create` immediately. Right when you see it. Don't batch.
+3. **Before starting a ticket:** Scan the issue queue — check if your task is a symptom of something bigger. If multiple issues would benefit from the same foundational change, file a foundational issue and label it `needs-cory`.
+
+**Labels:** `cc-explorer`, `project-mining`, `tech-debt`, `enhancement`, `spike`, `needs-cory`, `process`
+
 ## Dogfooding cc-explorer
 
 We own cc-explorer in this repo. Use it directly (via MCP tools) when exploring chat history — don't shell out to grep JSONL files. If something doesn't do what you want (a missing parameter, confusing output, a bug, or a bug you see another agent encounter while using the tool), propose a fix to the user immediately. Every session working on this repo is a field test of the tools we ship.
