@@ -154,7 +154,9 @@ Once the scout brief is back and you've had the dialogue, present a short plan: 
 
 The run directory already exists (you created it before dispatching the scout). Now populate it for the research wave.
 
-**Write `<run-dir>/lens.md`** — the full lens text verbatim: the user's reference documents, the rubric, any scoping decisions from the planning dialogue ("focus on IC-level signals, not management"), the output destination, and the organization choice. Do not paraphrase. Do not summarize into a signals table. Researchers will read this file as their first step — they need to see what the user actually handed you, not your interpretation of it.
+**Write `<run-dir>/lens.md`** — the shaped lens, produced through the planning dialogue. This section is pending rework; see the open note below.
+
+> **TODO — lens shape under discussion.** The reference documents the user supplies are *input to* shaping the lens, not the lens itself. The orchestrator's job during planning is to work with the user to produce a shaped lens that captures what they actually want mined — not to paraphrase the reference docs, and not to hand the raw reference docs to researchers. This section needs a rewrite to describe what a shaped lens looks like and how the planning dialogue produces it. Do not infer structure from the old text; wait for the rewrite.
 
 **Pre-create placeholder findings files** — one per (group, corpus) pair you plan to dispatch. Naming: `<run-dir>/<group-slug>-<corpus>.md` where `<corpus>` is `codebase`, `process`, or `output`.
 
