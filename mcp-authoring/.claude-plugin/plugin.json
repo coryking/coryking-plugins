@@ -1,0 +1,15 @@
+{
+  "name": "mcp-authoring",
+  "version": "0.1.0",
+  "description": "Reference guidance for writing MCP tool descriptions, server instructions, parameter schemas, output schemas, and annotations that LLMs actually use well.",
+  "author": {
+    "name": "Cory King",
+    "email": "me@coryk.ing",
+    "url": "https://github.com/coryking"
+  },
+  "homepage": "https://github.com/coryking/coryking-plugins",
+  "repository": "https://github.com/coryking/coryking-plugins",
+  "license": "MIT",
+  "keywords": ["mcp", "fastmcp", "tool-descriptions", "prompt-engineering", "authoring"],
+  "skills": ["./skills/tool-descriptions"]
+}
