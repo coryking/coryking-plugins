@@ -9,6 +9,7 @@ build/
 # Virtual environments
 .venv/
 venv/
+.orphaned_at
 
 # Claude Code local state
 .claude/
