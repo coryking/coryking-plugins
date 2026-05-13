@@ -1,6 +1,6 @@
 {
   "name": "engineering-loop",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Slim parallel-review and curated research agents for solo development. The parts of compound-engineering's workflow that actually compound for a single operator, without the team-scale scaffolding.",
   "author": {
     "name": "Cory King",
@@ -24,7 +24,13 @@
     "./agents/reliability-reviewer.md",
     "./agents/adversarial-reviewer.md",
     "./agents/julik-frontend-races-reviewer.md",
-    "./agents/previous-comments-reviewer.md"
+    "./agents/previous-comments-reviewer.md",
+    "./agents/api-contract-reviewer.md",
+    "./agents/data-migrations-reviewer.md",
+    "./agents/agent-native-reviewer.md",
+    "./agents/kieran-python-reviewer.md",
+    "./agents/kieran-typescript-reviewer.md",
+    "./agents/deployment-verification-agent.md"
   ],
   "skills": ["./skills/review"]
 }

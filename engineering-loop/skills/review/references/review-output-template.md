@@ -130,6 +130,8 @@ This fails because: no pipe-delimited tables, no severity-grouped `###` headers,
 - **Applied Fixes section** -- include only when a fix phase ran in this review invocation
 - **Residual Actionable Work section** -- include only when unresolved actionable findings were handed off for later work
 - **Pre-existing section** -- separate table, no confidence column (these are informational)
+- **Agent-Native Gaps section** -- results from `agent-native-reviewer` when it ran. Omit if the agent did not run or found no gaps.
+- **Deployment Notes section** -- Go/No-Go runbook items from `deployment-verification-agent` when it ran. Omit if the agent did not run.
 - **Coverage section** -- suppressed count, residual risks, testing gaps, failed reviewers
 - **Summary uses blockquotes** for verdict, reasoning, and fix order
 - **Horizontal rule** (`---`) separates findings from verdict

@@ -21,22 +21,28 @@ See [docs/process/2026-05-13-compound-engineering-audit.md](../../Mozicode/docs/
 
 ## Status
 
-**v0.2.0** — research agents + slim parallel-review skill shipped.
+**v0.3.0** — research agents + parallel-review skill + 17 reviewer personas.
 
 Roadmap:
 - [x] `web-researcher` agent (forked, tool-restriction removed)
 - [x] `best-practices-researcher` agent (forked, skill-mapping de-namespaced)
-- [x] `/engineering-loop:review` skill — slim parallel-review pipeline (5 always-on personas + 6 conditional)
-- [x] 11 forked reviewer-persona agents backing the slim review skill
+- [x] `/engineering-loop:review` skill — parallel-review pipeline
+- [x] 17 forked reviewer-persona agents backing the slim review skill
 - [ ] Optional: `/engineering-loop:plan`, `/engineering-loop:brainstorm`, `/engineering-loop:ideate` if they earn their token weight after `/review` has been used in real work
 
 ### Personas shipped with `/engineering-loop:review`
 
 **Always-on (5):** `correctness`, `testing`, `maintainability`, `code-simplicity`, `project-standards`
 
-**Conditional (6):** `security`, `performance`, `reliability`, `adversarial`, `julik-frontend-races`, `previous-comments`
+**Cross-cutting conditional (8):** `security`, `performance`, `reliability`, `adversarial`, `api-contract`, `data-migrations`, `agent-native`, `previous-comments`
 
-Upstream ships 18 personas plus 4 CE always-on agents and 2 CE conditional agents. We dropped: `agent-native-reviewer`, `learnings-researcher` (audit-validated dead for this fork's target audience), `api-contract-reviewer`, `data-migrations-reviewer`, `dhh-rails-reviewer`, `kieran-rails-reviewer`, `kieran-python-reviewer`, `kieran-typescript-reviewer`, `swift-ios-reviewer`, `schema-drift-detector`, `deployment-verification-agent`. Re-add any of them later by porting from `compound-engineering-v3.8.1` and adding to `plugin.json` + `persona-catalog.md` + `SKILL.md`.
+**Stack-specific conditional (3):** `kieran-python`, `kieran-typescript`, `julik-frontend-races`
+
+**CE conditional (1):** `deployment-verification-agent` — emits a Go/No-Go runbook (markdown, not JSON findings) when the diff has risky data changes.
+
+Upstream ships 18 personas plus 4 CE always-on agents and 2 CE conditional agents. We dropped: `learnings-researcher` (audit-validated dead — see Mozicode `docs/process/2026-05-13-compound-engineering-audit.md`), `dhh-rails-reviewer`, `kieran-rails-reviewer`, `swift-ios-reviewer` (stack-mismatch for our projects), and `schema-drift-detector` (Rails-specific `db/schema.rb` cross-reference). Re-add any of them later by porting from `compound-engineering-v3.8.1` and adding to `plugin.json` + `persona-catalog.md` + `SKILL.md`.
+
+We moved `agent-native-reviewer` from upstream's always-on tier into conditional — most projects don't ship agent features, so always-on would burn an agent dispatch on every review for a no-op triage. Conditional means the orchestrator fires it only when the diff touches LLM/MCP/tool-definition code.
 
 ## What's different from upstream
 
@@ -47,7 +53,7 @@ Ported from `compound-engineering-v3.8.1`. We start as a straight-laced port of 
 | Agent namespace | `ce-X` prefix | bare slug (`X`) |
 | Tool restriction on research agents | `tools: WebSearch, WebFetch` (or restricted list) | unrestricted — research subagents can also write their findings |
 | Skill cross-references in prompts | references `ce-X` skills | hardcoded name lookups replaced with semantic-matching prose; dead integration-point sections removed |
-| Review persona roster | 18 personas + 4 CE always-on agents + 2 CE conditional agents | 11 personas (5 always-on + 6 conditional), no CE always-on or conditional agents |
+| Review persona roster | 18 personas + 4 CE always-on agents + 2 CE conditional agents | 17 personas (5 always-on + 8 cross-cutting conditional + 3 stack-specific conditional) + 1 CE conditional agent. Dropped Rails/Swift personas and `learnings-researcher`/`schema-drift-detector`. |
 | Compound deposit loop | always-on `learnings-researcher` in every review | removed (audit-validated dead for solo use) |
 
 ## Attribution

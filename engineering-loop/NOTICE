@@ -56,8 +56,8 @@ Review skill (slim port of upstream's parallel-review pipeline):
 - skills/review/references/validator-template.md (verbatim)
 - skills/review/references/walkthrough.md (verbatim)
 
-Reviewer persona agents (11 — all renamed from `ce-X-reviewer.agent.md`
-to `X-reviewer.md`; otherwise verbatim unless noted):
+Reviewer persona agents (17 — all renamed from `ce-X.agent.md`
+to `X.md`; otherwise verbatim unless noted):
 - agents/correctness-reviewer.md (verbatim)
 - agents/testing-reviewer.md (verbatim)
 - agents/maintainability-reviewer.md (verbatim)
@@ -75,6 +75,12 @@ to `X-reviewer.md`; otherwise verbatim unless noted):
   don't ship)
 - agents/julik-frontend-races-reviewer.md (verbatim)
 - agents/previous-comments-reviewer.md (verbatim)
+- agents/api-contract-reviewer.md (verbatim)
+- agents/data-migrations-reviewer.md (verbatim)
+- agents/agent-native-reviewer.md (verbatim)
+- agents/kieran-python-reviewer.md (verbatim)
+- agents/kieran-typescript-reviewer.md (verbatim)
+- agents/deployment-verification-agent.md (verbatim)
 
 Modifications: see git history of this repository.
 

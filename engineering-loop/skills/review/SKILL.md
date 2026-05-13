@@ -127,7 +127,7 @@ Routing rules:
 
 ## Reviewers
 
-11 reviewer personas in two layers. See the persona catalog included below for the full catalog.
+17 reviewer personas across three layers, plus one CE conditional agent. See the persona catalog included below for the full catalog.
 
 **Always-on (every review):**
 
@@ -139,7 +139,7 @@ Routing rules:
 | `code-simplicity-reviewer` | YAGNI violations, unnecessary abstractions, over-engineering |
 | `project-standards-reviewer` | CLAUDE.md and AGENTS.md compliance -- frontmatter, references, naming, portability |
 
-**Conditional (selected per diff):**
+**Cross-cutting conditional (selected per diff):**
 
 | Agent | Select when diff touches... |
 |-------|---------------------------|
@@ -147,12 +147,28 @@ Routing rules:
 | `performance-reviewer` | DB queries, data transforms, caching, async |
 | `reliability-reviewer` | Error handling, retries, timeouts, background jobs |
 | `adversarial-reviewer` | Diff >=50 changed non-test/non-generated/non-lockfile lines, or auth, payments, data mutations, external APIs |
-| `julik-frontend-races-reviewer` | DOM event wiring, timers, async UI flows, animations, or frontend state transitions with race potential (React, Stimulus/Turbo, vanilla JS) |
+| `api-contract-reviewer` | Routes, serializers, type signatures, versioning, response shapes |
+| `data-migrations-reviewer` | Migration files, schema changes, backfill scripts, ID/enum mappings |
+| `agent-native-reviewer` | LLM tool definitions, system prompt construction, MCP servers, agent integration code |
 | `previous-comments-reviewer` | Reviewing a PR that has existing review comments or threads |
+
+**Stack-specific conditional (selected per diff):**
+
+| Agent | Select when diff touches... |
+|-------|---------------------------|
+| `kieran-python-reviewer` | Python modules, endpoints, services, scripts, or typed domain code |
+| `kieran-typescript-reviewer` | TypeScript components, services, hooks, utilities, or shared types |
+| `julik-frontend-races-reviewer` | DOM event wiring, timers, async UI flows, animations, or frontend state transitions with race potential (React, Stimulus/Turbo, vanilla JS) |
+
+**CE conditional (migration-specific, unstructured output):**
+
+| Agent | Select when diff... |
+|-------|--------------------|
+| `deployment-verification-agent` | Includes risky data changes (migrations, backfills, irreversible DDL) that warrant a Go/No-Go runbook with verification queries and rollback procedures |
 
 ## Review Scope
 
-Every review spawns all 5 always-on personas, then adds whichever conditionals fit the diff. The model naturally right-sizes: a small config change triggers 0 conditionals = 5 reviewers. An auth feature with concurrent UI work might trigger security + reliability + julik-frontend-races + adversarial = 9 reviewers.
+Every review spawns all 5 always-on personas, then adds whichever cross-cutting, stack-specific, and CE conditionals fit the diff. The model naturally right-sizes: a small config change triggers 0 conditionals = 5 reviewers. A TypeScript auth feature with concurrent UI work might trigger security + reliability + kieran-typescript + julik-frontend-races + adversarial = 10 reviewers.
 
 ## Protected Artifacts
 
@@ -361,7 +377,11 @@ Read the diff and file list from Stage 1. The 5 always-on personas are automatic
 
 Skip it for standalone branch reviews with no associated PR, and skip it for PRs with no prior feedback yet -- there is nothing for the persona to verify, and a spawned subagent that returns empty findings still costs the full subagent startup overhead (persona spec, diff, schema, plus its own gh calls).
 
-Conditional personas are additive. A frontend change touching async DOM behavior may warrant `julik-frontend-races` plus `reliability`; an auth-touching diff may warrant `security` plus `adversarial` plus `previous-comments` (when reviewing a PR).
+Conditional personas are additive. A frontend change touching async DOM behavior may warrant `julik-frontend-races` plus `reliability`; an auth-touching diff may warrant `security` plus `adversarial` plus `previous-comments` (when reviewing a PR); a TypeScript service refactor may warrant `kieran-typescript` plus `api-contract` plus `reliability`.
+
+For stack-specific personas, use file extensions and changed patterns as a starting point, then decide whether the diff actually introduces meaningful work for that reviewer. Do not spawn language-specific reviewers just because one config or generated file happens to match the extension.
+
+For the CE conditional `deployment-verification-agent`, spawn it when the diff includes destructive or risky data-layer changes — `NOT NULL` additions on populated tables, type changes that can lose precision, bulk backfills, irreversible DDL — and the operator wants an executable Go/No-Go runbook (SQL invariant queries, deploy steps with rollback per step, post-deploy monitoring plan). Not every migration warrants it; reserve it for changes where guessing at launch time is unacceptable.
 
 Announce the team before spawning:
 
@@ -373,10 +393,13 @@ Review team:
 - code-simplicity (always)
 - project-standards (always)
 - security -- new endpoint accepts user-provided redirect URL
-- reliability -- adds retry loop around external API call
+- api-contract -- response shape of /api/foo changed
+- data-migrations -- 20260513_backfill_users.sql
+- kieran-typescript -- frontend service refactor in src/lib/api.ts
 - julik-frontend-races -- React island wires multiple async event sources
 - adversarial -- diff is 80+ lines and touches auth boundary
 - previous-comments -- PR has 4 prior review threads
+- deployment-verification-agent -- migration adds NOT NULL on populated 170k-row table
 ```
 
 This is progress reporting, not a blocking confirmation.
@@ -461,6 +484,8 @@ Each persona sub-agent writes full JSON (all schema fields) to `/tmp/engineering
 
 Detail-tier fields (`why_it_matters`, `evidence`) are in the artifact file only. `suggested_fix` is optional in both tiers -- included in compact returns when present so the orchestrator has fix context for auto-apply decisions. If the file write fails, the compact return still provides everything the merge needs.
 
+**Unstructured-output agents.** Two agents in this fork emit markdown reports rather than findings JSON: `agent-native-reviewer` (Capability Map + categorized findings) and `deployment-verification-agent` (Go/No-Go runbook with SQL queries and rollback procedures). Dispatch them through the same bounded parallel scheduler as the persona reviewers and give them the same review context bundle: entry mode, any PR metadata gathered in Stage 1, intent summary, review base branch name when known, `BASE:` marker, file list, diff, and `UNTRACKED:` scope notes. Do not invoke them with a generic "review this" prompt. Their output is preserved as-is and surfaced in dedicated Stage 6 sections (`Agent-Native Gaps`, `Deployment Notes`) — it does not flow through the Stage 5 merge/dedup pipeline.
+
 ### Stage 5: Merge findings
 
 Convert multiple reviewer compact JSON returns into one deduplicated, confidence-gated finding set. The compact returns contain merge-tier fields (title, severity, file, line, confidence, autofix_class, owner, requires_verification, pre_existing) plus the optional suggested_fix. Detail-tier fields (why_it_matters, evidence) are on disk in the per-agent artifact files and are not loaded at this stage.
@@ -517,6 +542,7 @@ Demotion is intentionally narrow. The conservative scope (testing/maintainabilit
    - report-only queue: `advisory` findings plus anything owned by `human` or `release`
 9. **Sort and number.** Order by severity (P0 first) -> anchor (descending) -> file path -> line number, then assign monotonically increasing `#` values across the full primary finding set in that sorted order. Do not restart numbering inside each severity table or autofix/routing bucket. If later sections repeat a finding (for example Residual Actionable Work after `safe_auto` fixes are applied), reuse the same stable `#` so users -- and any downstream skill that consumes findings by `#` -- can reference them after the autofix loop rewrites the report. Renumbering after autofix invalidates any prior reference: copied snippets, follow-up prompts citing `#3`, or tickets filed against an earlier render.
 10. **Collect coverage data.** Union residual_risks and testing_gaps across reviewers.
+11. **Preserve unstructured agent output.** Keep the `agent-native-reviewer` and `deployment-verification-agent` markdown outputs alongside the merged finding set. They do not match the persona JSON schema and are surfaced in dedicated Stage 6 sections rather than the findings table.
 
 ### Stage 5b: Validation pass (externalizing modes only)
 
@@ -572,8 +598,10 @@ Assemble the final report using **pipe-delimited markdown tables for findings** 
 4. **Applied Fixes.** Include only if a fix phase ran in this invocation.
 5. **Residual Actionable Work.** Include when unresolved actionable findings were handed off or should be handed off.
 6. **Pre-existing.** Separate section, does not count toward verdict.
-7. **Coverage.** Suppressed count by anchor (e.g., "N findings suppressed at anchor 50, M at anchor 25"), mode-aware demotion count (interactive/report-only) or suppression count (headless/autofix), validator drop count and reasons (when Stage 5b ran), validator over-budget drops (when the 15-cap fired), residual risks, testing gaps, failed/timed-out reviewers, and any intent uncertainty carried by non-interactive modes.
-8. **Verdict.** Ready to merge / Ready with fixes / Not ready. Fix order if applicable. When an `explicit` plan has unaddressed requirements or implementation units, the verdict must reflect it — a PR that's code-clean but missing planned requirements is "Not ready" unless the omission is intentional. When an `inferred` plan has unaddressed requirements or implementation units, note it in the verdict reasoning but do not block on it alone.
+7. **Agent-Native Gaps.** Surface `agent-native-reviewer` results when that agent ran. Include its Capability Map and categorized findings as-rendered. Omit section entirely if the agent did not run or found no gaps.
+8. **Deployment Notes.** Surface `deployment-verification-agent` results when that agent ran. Include the Go/No-Go checklist: blocking pre-deploy SQL queries, deploy steps with rollback per step, post-deploy monitoring focus areas. Keep the checklist actionable rather than dropping it into Coverage. Omit section entirely if the agent did not run.
+9. **Coverage.** Suppressed count by anchor (e.g., "N findings suppressed at anchor 50, M at anchor 25"), mode-aware demotion count (interactive/report-only) or suppression count (headless/autofix), validator drop count and reasons (when Stage 5b ran), validator over-budget drops (when the 15-cap fired), residual risks, testing gaps, failed/timed-out reviewers, and any intent uncertainty carried by non-interactive modes.
+10. **Verdict.** Ready to merge / Ready with fixes / Not ready. Fix order if applicable. When an `explicit` plan has unaddressed requirements or implementation units, the verdict must reflect it — a PR that's code-clean but missing planned requirements is "Not ready" unless the omission is intentional. When an `inferred` plan has unaddressed requirements or implementation units, note it in the verdict reasoning but do not block on it alone.
 
 Do not include time estimates.
 
@@ -616,6 +644,12 @@ Advisory findings (report-only):
 Pre-existing issues:
 [P2][gated_auto -> downstream-resolver] File: <file:line> -- <title> (<reviewer>, confidence <N>)
   Why: <why_it_matters>
+
+Agent-Native Gaps:
+- <gap description>
+
+Deployment Notes:
+- <key checklist item>
 
 Residual risks:
 - <risk>
