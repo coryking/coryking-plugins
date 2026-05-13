@@ -1,0 +1,18 @@
+{
+  "name": "engineering-loop",
+  "version": "0.1.0",
+  "description": "Slim parallel-review and curated research agents for solo development. The parts of compound-engineering's workflow that actually compound for a single operator, without the team-scale scaffolding.",
+  "author": {
+    "name": "Cory King",
+    "email": "me@coryk.ing",
+    "url": "https://github.com/coryking"
+  },
+  "homepage": "https://github.com/coryking/coryking-plugins",
+  "repository": "https://github.com/coryking/coryking-plugins",
+  "license": "MIT",
+  "keywords": ["code-review", "research", "subagents", "solo-developer", "claude-code"],
+  "agents": [
+    "./agents/web-researcher.md",
+    "./agents/best-practices-researcher.md"
+  ]
+}

@@ -14,6 +14,11 @@
       "name": "mcp-authoring",
       "source": "./mcp-authoring",
       "description": "Reference guidance for writing MCP tool descriptions, server instructions, parameter schemas, output schemas, and annotations that LLMs actually use well."
+    },
+    {
+      "name": "engineering-loop",
+      "source": "./engineering-loop",
+      "description": "Slim parallel-review and curated research agents for solo development. The parts of compound-engineering's workflow that actually compound for a single operator, without the team-scale scaffolding."
     }
   ]
 }
