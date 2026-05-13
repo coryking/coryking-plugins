@@ -6,6 +6,8 @@ Portions of this plugin are derived from EveryInc/compound-engineering-plugin
 License. The upstream copyright notice is preserved below as required.
 
 Specifically derived from upstream at tag compound-engineering-v3.8.1:
+
+Research agents:
 - agents/web-researcher.md (from agents/ce-web-researcher.agent.md;
   changes: renamed `ce-web-researcher` → `web-researcher`; dropped the
   `tools: WebSearch, WebFetch` frontmatter restriction so the agent can
@@ -17,6 +19,62 @@ Specifically derived from upstream at tag compound-engineering-v3.8.1:
   dropped the `tools:` frontmatter restriction; replaced the hardcoded
   ce-* skill-name mappings with a semantic-matching instruction;
   removed the GitHub-issue-specific Special Cases section)
+
+Review skill (slim port of upstream's parallel-review pipeline):
+- skills/review/SKILL.md (from skills/ce-code-review/SKILL.md; changes:
+  renamed `ce-code-review` → `review`; rewrote the Reviewers section to
+  list only the 11 personas we ship instead of upstream's 18 + 4 CE
+  agents; removed the CE always-on agent dispatch block (agent-native,
+  learnings-researcher) from Stage 4; removed the CE conditional agent
+  dispatch block (schema-drift, deployment-verification) from Stage 4;
+  removed Stage 5 step 11 "Preserve CE agent artifacts"; removed Stage 6
+  output sections 7–10 (Learnings & Past Solutions, Agent-Native Gaps,
+  Schema Drift Check, Deployment Notes); pruned the same sections from
+  the headless output envelope; replaced run-artifact path
+  `/tmp/compound-engineering/ce-code-review/<run-id>/` with
+  `/tmp/engineering-loop/review/<run-id>/`; replaced `.context/...`
+  artifact path equivalently; removed inert mentions of ce-work, lfg,
+  slfg, ce-resolve-pr-feedback, ce-polish-beta from prose; updated
+  Stage 3 announce-team example to use our personas; updated Protected
+  Artifacts framing to drop the "created by ce-X" attributions)
+- skills/review/references/persona-catalog.md (rewritten from
+  skills/ce-code-review/references/persona-catalog.md; changes: dropped
+  CE always-on agents block, dropped Stack-Specific Conditional section
+  entirely, dropped CE Conditional Agents section entirely, added
+  code-simplicity to always-on layer, rewrote Selection rules to match
+  the 5+6 structure)
+- skills/review/references/review-output-template.md (from
+  skills/ce-code-review/references/review-output-template.md; changes:
+  removed the four bullet-list lines describing Learnings & Past
+  Solutions, Agent-Native Gaps, Schema Drift Check, and Deployment Notes
+  sections)
+- skills/review/references/bulk-preview.md (verbatim)
+- skills/review/references/diff-scope.md (verbatim)
+- skills/review/references/findings-schema.json (verbatim)
+- skills/review/references/subagent-template.md (verbatim)
+- skills/review/references/tracker-defer.md (verbatim)
+- skills/review/references/validator-template.md (verbatim)
+- skills/review/references/walkthrough.md (verbatim)
+
+Reviewer persona agents (11 — all renamed from `ce-X-reviewer.agent.md`
+to `X-reviewer.md`; otherwise verbatim unless noted):
+- agents/correctness-reviewer.md (verbatim)
+- agents/testing-reviewer.md (verbatim)
+- agents/maintainability-reviewer.md (verbatim)
+- agents/code-simplicity-reviewer.md (rewrote one line: replaced
+  "ce-plan/ce-work pipeline artifacts" framing with generic "planning /
+  knowledge-store artifacts" protection language)
+- agents/project-standards-reviewer.md (rewrote one line: the
+  "Broken cross-references" example used a self-referential typo from
+  upstream; replaced with a generic example)
+- agents/security-reviewer.md (verbatim)
+- agents/performance-reviewer.md (verbatim)
+- agents/reliability-reviewer.md (verbatim)
+- agents/adversarial-reviewer.md (removed two "owns these" lines for
+  api-contract-reviewer and data-migrations-reviewer — personas we
+  don't ship)
+- agents/julik-frontend-races-reviewer.md (verbatim)
+- agents/previous-comments-reviewer.md (verbatim)
 
 Modifications: see git history of this repository.
 

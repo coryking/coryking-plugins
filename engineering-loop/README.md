@@ -21,14 +21,22 @@ See [docs/process/2026-05-13-compound-engineering-audit.md](../../Mozicode/docs/
 
 ## Status
 
-**v0.1.0** — scaffold + research agents only.
+**v0.2.0** — research agents + slim parallel-review skill shipped.
 
 Roadmap:
 - [x] `web-researcher` agent (forked, tool-restriction removed)
 - [x] `best-practices-researcher` agent (forked, skill-mapping de-namespaced)
-- [ ] `/engineering-loop:review` skill — slim parallel-review with 7–8 reviewer personas (correctness, security, testing, maintainability, performance, reliability, code-simplicity, julik-frontend-races)
-- [ ] Forked review-persona agents to back the slim review skill
-- [ ] Optional: `/engineering-loop:plan`, `/engineering-loop:brainstorm`, `/engineering-loop:ideate` if they earn their token weight after `/review` is shipped
+- [x] `/engineering-loop:review` skill — slim parallel-review pipeline (5 always-on personas + 6 conditional)
+- [x] 11 forked reviewer-persona agents backing the slim review skill
+- [ ] Optional: `/engineering-loop:plan`, `/engineering-loop:brainstorm`, `/engineering-loop:ideate` if they earn their token weight after `/review` has been used in real work
+
+### Personas shipped with `/engineering-loop:review`
+
+**Always-on (5):** `correctness`, `testing`, `maintainability`, `code-simplicity`, `project-standards`
+
+**Conditional (6):** `security`, `performance`, `reliability`, `adversarial`, `julik-frontend-races`, `previous-comments`
+
+Upstream ships 18 personas plus 4 CE always-on agents and 2 CE conditional agents. We dropped: `agent-native-reviewer`, `learnings-researcher` (audit-validated dead for this fork's target audience), `api-contract-reviewer`, `data-migrations-reviewer`, `dhh-rails-reviewer`, `kieran-rails-reviewer`, `kieran-python-reviewer`, `kieran-typescript-reviewer`, `swift-ios-reviewer`, `schema-drift-detector`, `deployment-verification-agent`. Re-add any of them later by porting from `compound-engineering-v3.8.1` and adding to `plugin.json` + `persona-catalog.md` + `SKILL.md`.
 
 ## What's different from upstream
 
@@ -39,7 +47,7 @@ Ported from `compound-engineering-v3.8.1`. We start as a straight-laced port of 
 | Agent namespace | `ce-X` prefix | bare slug (`X`) |
 | Tool restriction on research agents | `tools: WebSearch, WebFetch` (or restricted list) | unrestricted — research subagents can also write their findings |
 | Skill cross-references in prompts | references `ce-X` skills | hardcoded name lookups replaced with semantic-matching prose; dead integration-point sections removed |
-| Review persona roster | 17 personas + Every-internal flavor (DHH, Kieran, every-style) | 7–8 stack-agnostic personas (planned) |
+| Review persona roster | 18 personas + 4 CE always-on agents + 2 CE conditional agents | 11 personas (5 always-on + 6 conditional), no CE always-on or conditional agents |
 | Compound deposit loop | always-on `learnings-researcher` in every review | removed (audit-validated dead for solo use) |
 
 ## Attribution
