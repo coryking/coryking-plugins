@@ -17,11 +17,11 @@ What doesn't compound for solo work (audit-validated against 30+ days of session
 - The stack-specific persona reviewers (Rails/Ruby/Python flavors) when your stack is something else.
 - The editorial pipeline (brainstorm→plan→work→review→compound). Imposes process overhead that hobby-project motivation can't sustain.
 
-See [docs/process/2026-05-13-compound-engineering-audit.md](../../Mozicode/docs/process/2026-05-13-compound-engineering-audit.md) (private) for the audit that drove the slimming decision.
+See [NOTICE](NOTICE) for the upstream provenance and the slimming ledger (which agents were dropped, demoted, or had restrictions removed).
 
 ## Status
 
-**v0.3.0** — research agents + parallel-review skill + 17 reviewer personas.
+**v0.3.2** — research agents + parallel-review skill + 17 reviewer personas. Skill exposed as `/el:review`.
 
 Roadmap:
 - [x] `web-researcher` agent (forked, tool-restriction removed)
@@ -40,7 +40,7 @@ Roadmap:
 
 **CE conditional (1):** `deployment-verification-agent` — emits a Go/No-Go runbook (markdown, not JSON findings) when the diff has risky data changes.
 
-Upstream ships 18 personas plus 4 CE always-on agents and 2 CE conditional agents. We dropped: `learnings-researcher` (audit-validated dead — see Mozicode `docs/process/2026-05-13-compound-engineering-audit.md`), `dhh-rails-reviewer`, `kieran-rails-reviewer`, `swift-ios-reviewer` (stack-mismatch for our projects), and `schema-drift-detector` (Rails-specific `db/schema.rb` cross-reference). Re-add any of them later by porting from `compound-engineering-v3.8.1` and adding to `plugin.json` + `persona-catalog.md` + `SKILL.md`.
+Upstream ships 18 personas plus 4 CE always-on agents and 2 CE conditional agents. We dropped: `learnings-researcher` (audit-validated dead for solo use), `dhh-rails-reviewer`, `kieran-rails-reviewer`, `swift-ios-reviewer` (stack-mismatch for our projects), and `schema-drift-detector` (Rails-specific `db/schema.rb` cross-reference). Re-add any of them later by porting from `compound-engineering-v3.8.1` and adding to `plugin.json` + `persona-catalog.md` + `SKILL.md`.
 
 We moved `agent-native-reviewer` from upstream's always-on tier into conditional — most projects don't ship agent features, so always-on would burn an agent dispatch on every review for a no-op triage. Conditional means the orchestrator fires it only when the diff touches LLM/MCP/tool-definition code.
 

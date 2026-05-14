@@ -1,5 +1,5 @@
 ---
-name: review
+name: el:review
 description: "Structured code review using tiered persona agents, confidence-gated findings, and a merge/dedup pipeline. Use when reviewing code changes before creating a PR."
 argument-hint: "[blank to review current branch, or provide PR link]"
 ---
@@ -98,14 +98,7 @@ Sequence:
 
 ## Severity Scale
 
-All reviewers use P0-P3:
-
-| Level | Meaning | Action |
-|-------|---------|--------|
-| **P0** | Critical breakage, exploitable vulnerability, data loss/corruption | Must fix before merge |
-| **P1** | High-impact defect likely hit in normal usage, breaking contract | Should fix |
-| **P2** | Moderate issue with meaningful downside (edge case, perf regression, maintainability trap) | Fix if straightforward |
-| **P3** | Low-impact, narrow scope, minor improvement | User's discretion |
+All reviewers use P0-P3. See the canonical definition in the Review Output Template reference (inlined below under "Included References").
 
 ## Action Routing
 

@@ -59,6 +59,14 @@ coryking-plugins/
 │   ├── scripts/
 │   │   └── cursor_*.py               # Cursor SQLite scripts for IDE chat mining
 │   └── src/cc_explorer/              # MCP server + typed JSONL toolkit
+├── mcp-authoring/                    # plugin: MCP tool-description guidance
+├── engineering-loop/                 # plugin: forked from compound-engineering v3.8.1
+│   ├── .claude-plugin/plugin.json
+│   ├── NOTICE                        # upstream provenance + slimming ledger
+│   ├── agents/                       # 19 agents: 2 research + 17 review/verify personas
+│   └── skills/el-review/             # `/el:review` orchestrator (name has literal `:`)
+│       ├── SKILL.md
+│       └── references/               # 9 inlined reference files (@./references/<name>)
 └── docs/                             # design docs and reference material
 ```
 
@@ -111,6 +119,28 @@ Mines project histories (docs, git, chat logs, artifacts) for evidence of specif
 - `scripts/cursor_*.py` — Cursor SQLite scripts for IDE chat mining
 
 **Output:** user-confirmed during alignment.
+
+### engineering-loop
+
+Forked/slimmed from compound-engineering v3.8.1. A parallel code-review orchestrator plus two curated research agents, sized for a single operator (no team-scale scaffolding). The review skill is exposed as `/el:review` — the `el:` prefix is encoded literally in the skill's frontmatter `name:` field, mirroring upstream's `ce:review` trick to avoid colliding with Claude Code's built-in `/review`.
+
+**Workflow (the "engineering loop"):** detect diff scope → select reviewer personas by tier → dispatch parallel sub-agents that each emit JSON findings → merge + dedup → apply safe autofixes → route residual findings (interactive walkthrough / file tickets / report-only) → optional post-fix validators. Two unstructured-output agents (`agent-native-reviewer`, `deployment-verification-agent`) bypass the merge pipeline and surface in their own report sections.
+
+**Components:**
+- `.claude-plugin/plugin.json` — plugin metadata. Skill path is `./skills/el-review`; *directory* is `el-review` but skill `name:` is `el:review`.
+- `skills/el-review/SKILL.md` — orchestrator skill. Supports `mode:headless` for skill-to-skill invocation with a structured JSON return envelope. Has a `bulk-preview` gate when 10+ files change.
+- `skills/el-review/references/` — nine reference files inlined into SKILL.md via `@./references/<name>`: `persona-catalog`, `subagent-template`, `diff-scope`, `findings-schema.json`, `review-output-template`, `bulk-preview`, `tracker-defer`, `walkthrough`, `validator-template`.
+- `agents/` — 19 named agents:
+  - 2 research: `web-researcher` (pinned `model: sonnet`), `best-practices-researcher`.
+  - 5 always-on reviewers: `correctness`, `testing`, `maintainability`, `code-simplicity`, `project-standards`.
+  - 8 cross-cutting conditional reviewers: `security`, `performance`, `reliability`, `adversarial`, `api-contract`, `data-migrations`, `agent-native`, `previous-comments`.
+  - 3 stack-specific reviewers: `kieran-python`, `kieran-typescript`, `julik-frontend-races`.
+  - 1 verifier: `deployment-verification-agent`.
+- `NOTICE` — documents upstream provenance and the slimming deltas (which agents were dropped, which were demoted from always-on to conditional, tool restrictions removed from research agents).
+
+**Subagent contract.** Each reviewer writes a full-fidelity JSON artifact file *and* returns a compact merge-tier subset — keeps the orchestrator's synthesis context small while preserving evidence for downstream consumers. Confidence is discrete (`{0, 25, 50, 75, 100}`), enforced by `findings-schema.json`. Findings carry `pre_existing: bool` so reviewers can surface tech debt without gating merge. Run artifacts include `metadata.json` (branch, head_sha, verdict) so downstream skills can verify the artifact matches current state.
+
+**Severity scale source of truth.** The canonical P0–P3 definition lives in `references/review-output-template.md`; `SKILL.md` points to it.
 
 ## Design Decisions
 
@@ -166,3 +196,15 @@ Key design choices:
 - **ThinkingContent** was already parsed but silently dropped — `thinking` atom surfaces it with `[thinking]` prefix.
 
 See `docs/` for the JSONL format reference and other design documentation.
+
+### engineering-loop: forked from compound-engineering, slimmed for solo dev
+
+We adopted compound-engineering v3.8.1 wholesale, then carved away the team-coordination layer. The plugin landed without our conventions baked in — versioning rules, the `el:`-prefix trick, the audit against this repo's standards all happened *after* the merge. Future work on this plugin should treat the upstream as a reference, not a template: when we pull updates, port them through our conventions rather than copying as-is.
+
+**Fork deltas worth knowing:**
+- Skill was renamed `review` → `el:review` to avoid colliding with Claude Code's built-in `/review`. The `:` lives inside the frontmatter `name:` field, the directory uses `el-review`. Same trick upstream uses for `ce:review`.
+- `web-researcher` and `best-practices-researcher` had their `tools:` restrictions removed (upstream limited them to `WebSearch, WebFetch`). Intentional: solo researchers benefit from the full palette.
+- `agent-native-reviewer` was demoted from always-on to conditional because most projects don't ship LLM/MCP features and the persona is a measurable token tax.
+- Several upstream agents/sections were dropped entirely. See `engineering-loop/NOTICE` for the slimming ledger.
+
+**Things to refactor when next in this plugin:** see GitHub Issues labeled `engineering-loop` + `tech-debt` for the live list.

@@ -2,6 +2,17 @@
 
 Use this **exact format** when presenting synthesized review findings. Findings are grouped by severity, not by reviewer.
 
+## Severity Scale
+
+All reviewers use P0-P3. This is the canonical definition; other docs should point here rather than restate it.
+
+| Level | Meaning | Action |
+|-------|---------|--------|
+| **P0** | Critical breakage, exploitable vulnerability, data loss/corruption | Must fix before merge |
+| **P1** | High-impact defect likely hit in normal usage, breaking contract | Should fix |
+| **P2** | Moderate issue with meaningful downside (edge case, perf regression, maintainability trap) | Fix if straightforward |
+| **P3** | Low-impact, narrow scope, minor improvement | User's discretion |
+
 **IMPORTANT:** Use pipe-delimited markdown tables (`| col | col |`). Do NOT use ASCII box-drawing characters.
 
 **IMPORTANT:** Escape literal pipe characters in table cells. Any `|` that appears inside a finding title, issue description, code snippet, regex pattern, or delimited-string example (e.g. cache key examples like `userName + "|" + groups`) must be written as `\|` so column boundaries are determined only by unescaped pipes. Unescaped pipes split the cell across columns and corrupt the row's `Reviewer`, `Confidence`, and `Route` values.
