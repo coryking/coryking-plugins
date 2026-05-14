@@ -1,0 +1,33 @@
+{
+  "run_id": "2026-05-14T170109Z",
+  "tier": 2,
+  "variant": "B",
+  "branch_at_start": "worktree-agent-a9e36b32ac793ce5c",
+  "head_sha_at_start": "d96be83",
+  "targets": [
+    "CLAUDE.md"
+  ],
+  "scope": "project",
+  "repo_public": true,
+  "previous_marker": null,
+  "outcomes": {
+    "branch_created": "claude-md-doctor/2026-05-14T170109Z",
+    "pr_url": null,
+    "files_created": [
+      "docs/design-decisions.md"
+    ],
+    "files_rewritten": [
+      "CLAUDE.md"
+    ],
+    "lines_before": 217,
+    "lines_after_auto_loaded": 56,
+    "lines_relocated_to_docs": 78,
+    "net_auto_loaded_delta": -161,
+    "rules_added": 1,
+    "rules_dropped": 0,
+    "rules_rerouted": 0,
+    "sections_relocated": 5,
+    "marker_stamped": true
+  },
+  "notes": "First-ever run on this repo. The bulk of the change is relocating ADR-class content (Design Decisions section) and per-plugin index content out of the auto-loaded CLAUDE.md. One new rule added: explicit CLAUDE.md hygiene principle (with N=1 evidence — this very session — flagged as hypothesis-tier; promote to N>=2 next time the file bloats again). No DROP-only changes; everything moved or kept. No locked sections present."
+}
