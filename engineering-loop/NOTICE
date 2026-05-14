@@ -82,6 +82,13 @@ to `X.md`; otherwise verbatim unless noted):
 - agents/kieran-typescript-reviewer.md (verbatim)
 - agents/deployment-verification-agent.md (verbatim)
 
+New components not derived from upstream:
+- skills/claude-md-doctor/ (Variant B: PR-as-dialogue) — original to this
+  repo. Cleans up CLAUDE.md, AGENTS.md, and .claude/rules/*.md by applying
+  the decompose-prompt technique and shipping rewrites as a branch + PR
+  instead of an in-session AskUserQuestion loop. Not derived from
+  compound-engineering.
+
 Modifications: see git history of this repository.
 
 ----------------------------------------------------------------------
