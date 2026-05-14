@@ -21,7 +21,11 @@ See [NOTICE](NOTICE) for the upstream provenance and the slimming ledger (which 
 
 ## Status
 
-**v0.3.2** — research agents + parallel-review skill + 17 reviewer personas. Skill exposed as `/el:review`.
+**v0.4.0** — research agents + parallel-review skill (`/el:review`) + 17 reviewer personas + `/el:claude-md-doctor` (Variant D — diagnose-only instruction-surface auditor).
+
+### `/el:claude-md-doctor`
+
+Diagnoses CLAUDE.md / `.claude/rules/*` / nested instruction files for bloat, wrong-mechanism content, scar tissue, and verifiability gaps. **Produces a decomposition map and a 10-minute checklist; does not edit instruction files.** Variant D of the claude-md-doctor design space — tests the thesis that intervenability alone is enough. Output is an artifact bundle under `<repo>/.claude/claude-md-doctor/<timestamp>/`. The only file mutation it performs is an HTML marker comment at the top of the project root CLAUDE.md.
 
 Roadmap:
 - [x] `web-researcher` agent (forked, tool-restriction removed)

@@ -5,6 +5,11 @@ Portions of this plugin are derived from EveryInc/compound-engineering-plugin
 (https://github.com/EveryInc/compound-engineering-plugin), used under the MIT
 License. The upstream copyright notice is preserved below as required.
 
+Original additions (not derived from upstream):
+- skills/claude-md-doctor/ — Variant D of an instruction-surface diagnostic
+  skill. Diagnose-only by design: produces a decomposition map and checklist,
+  does not rewrite CLAUDE.md or rules files. Exposed as `/el:claude-md-doctor`.
+
 Specifically derived from upstream at tag compound-engineering-v3.8.1:
 
 Research agents:

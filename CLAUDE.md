@@ -1,3 +1,4 @@
+<!-- last-decomposed: 2026-05-14 -->
 # coryking-plugins
 
 Claude Code plugins for mining project histories and extracting evidence of behaviors, skills, and patterns.
@@ -12,14 +13,11 @@ Act as the engineer, not just the implementer. The user describes what to build;
 
 Before adding functionality, read the existing models and type hierarchy first — they are the architecture. New behavior belongs on existing types when it fits. If a model stores data in a weaker type than you need, evolve the model.
 
-## GitHub workflow
+## GitHub
 
 The backlog is GitHub Issues at `coryking/coryking-plugins`. **This is a public repo** — never include conversation content, personal data, or export files in issues or PRs.
 
-**Every session:**
-1. **Start:** Check `gh issue list --state open` for context on open work.
-2. **While working:** See tech debt, a bug, or a design question? `gh issue create` immediately. Right when you see it. Don't batch.
-3. **Before starting a ticket:** Scan the issue queue — check if your task is a symptom of something bigger. If multiple issues would benefit from the same foundational change, file a foundational issue and label it `needs-cory`.
+When you see tech debt, a bug, or a design question, `gh issue create` immediately rather than batching.
 
 **Labels:** `cc-explorer`, `project-mining`, `tech-debt`, `enhancement`, `spike`, `needs-cory`, `process`
 
@@ -31,180 +29,6 @@ We own cc-explorer in this repo. Use it directly (via MCP tools) when exploring 
 
 - **Summary info at the top of output.** Tools (Claude Code, other LLMs, shell pipelines) truncate from the bottom — `head`, context window limits, UI collapsing. Any tool we build should put match counts, overflow hints, and actionable metadata in the first lines, not the last. The stuff at the bottom gets cut; the stuff at the top survives.
 - **Skills are self-contained.** Everything the executor needs lives inside the skill (or its parent plugin). No references to external files, global CLAUDE.md, or other skills. If you need something, inline it.
-- **Wait for three variants before abstracting.** Don't generalize a skill until you've built it for at least three different use cases. Ship the specific version. (See the architecture astronaut discussion below.)
-- **One authoritative source.** Operational docs (script usage, data formats, mining workflows) live inside the skill. This CLAUDE.md describes *what each skill is and why it's shaped that way* — not how to use it.
-- **This is a toolbox, not a product.** The code here produces ephemeral output consumed by LLMs — no human users, no API contracts, no backwards compatibility obligations. When we learn a better approach, we rip out the old one entirely rather than retrofitting. Prefer clean rewrites over incremental patches when the scope is small enough to hold in context. Don't preserve existing structure, output format, or logic out of habit — preserve it only when there's a reason. The default posture is "what should this tool do given what we know now?" not "how do we change the least?"
-
-## Repo structure
-
-This repo is a Claude Code plugin marketplace. The root `.claude-plugin/marketplace.json` registers available plugins. Each plugin is a subdirectory with its own `.claude-plugin/plugin.json`, skills, agents, and tooling.
-
-```
-coryking-plugins/
-├── .claude-plugin/marketplace.json   # marketplace manifest
-├── CLAUDE.md
-├── INSTALLATION.md
-├── LICENSE
-├── project-mining/                   # plugin directory
-│   ├── .claude-plugin/plugin.json    # plugin metadata
-│   ├── .mcp.json                     # MCP server wiring
-│   ├── agents/
-│   │   └── mining-researcher.md      # named agent for research subagents
-│   ├── pyproject.toml                # package config (pydantic, fastmcp deps)
-│   ├── skills/
-│   │   ├── cc-explorer/
-│   │   │   └── SKILL.md              # skill teaching agents to use cc-explorer tools
-│   │   └── project-mining/
-│   │       └── SKILL.md              # orchestrator skill
-│   ├── scripts/
-│   │   └── cursor_*.py               # Cursor SQLite scripts for IDE chat mining
-│   └── src/cc_explorer/              # MCP server + typed JSONL toolkit
-├── mcp-authoring/                    # plugin: MCP tool-description guidance
-├── engineering-loop/                 # plugin: forked from compound-engineering v3.8.1
-│   ├── .claude-plugin/plugin.json
-│   ├── NOTICE                        # upstream provenance + slimming ledger
-│   ├── agents/                       # 19 agents: 2 research + 17 review/verify personas
-│   └── skills/el-review/             # `/el:review` orchestrator (name has literal `:`)
-│       ├── SKILL.md
-│       └── references/               # 9 inlined reference files (@./references/<name>)
-└── docs/                             # design docs and reference material
-```
-
-### MCP server architecture
-
-cc-explorer runs as an MCP server using FastMCP over stdio transport. When the plugin is enabled, Claude Code reads `.mcp.json` and starts the server automatically. Tools are discovered and callable natively — no Bash invocation needed.
-
-The `.mcp.json` wires the server:
-```json
-{
-  "mcpServers": {
-    "cc-explorer": {
-      "command": "uv",
-      "args": ["run", "--project", "${CLAUDE_PLUGIN_ROOT}", "cc-explorer"]
-    }
-  }
-}
-```
-
-This means:
-- Tools (`search`, `quote`, `agents`, `list`) appear as MCP tools in the agent's tool palette
-- The skill (`skills/cc-explorer/SKILL.md`) teaches the agent *when and why* to use each tool, not *how* to invoke them
-- No shell commands, no `uv run` in prompts — the MCP layer handles invocation
-
-### Plugin internals
-
-Plugins use the Claude Code plugin structure (`.claude-plugin/plugin.json`, `agents/`, `skills/`).
-
-- **Named agents** (`agents/<name>.md`) — YAML frontmatter (`name`, `description`, `model`) + markdown body. Consistent prompt, model pinning, single source of truth for researcher methodology.
-- **Skills** (`skills/<skill-name>/SKILL.md`) — frontmatter (`name`, `description`) + instructions for the executing agent.
-- **Scripts** live at the plugin root (`<plugin>/scripts/`). `{baseDir}` resolves to the skill directory, not the plugin root.
-- **`${CLAUDE_PLUGIN_ROOT}`** — available in `.mcp.json` and hooks for referencing the plugin root at runtime.
-
-## Plugins
-
-### project-mining
-
-Mines project histories (docs, git, chat logs, artifacts) for evidence of specific behaviors, values, skills, or patterns. Accepts a user-supplied lens (direct query, value list, or reference document) and produces rich source-of-truth narratives. Downstream cuts include resume bullets, interview stories, LinkedIn posts, performance review evidence, etc.
-
-**The lens is user-supplied.** The skill conducts an alignment conversation to translate abstract concepts into observable, searchable behaviors before mining begins. The methodology (gather/analyze/synthesize), tooling (cc-explorer MCP tools, git, Cursor scripts), and orchestration pattern (Opus orchestrator, Sonnet researchers, structured return format) are fixed; the analytical questions and search themes come from the lens.
-
-**Components:**
-- `.claude-plugin/plugin.json` — plugin metadata
-- `.mcp.json` — MCP server configuration for cc-explorer
-- `agents/mining-researcher.md` — named agent for research subagents. Inlines analytical stance, the search→grep→read methodology for chat mining, return format (claim/evidence/source/relevance), and IDE mining tiers. The orchestrator passes only the delta (objective, vocabulary, boundaries, paths). Tool mechanics are documented in MCP tool descriptions; the agent prompt focuses on research workflow.
-- `skills/project-mining/SKILL.md` — orchestrator instructions: alignment protocol, gather/analyze/synthesize workflow, researcher dispatch via `project-mining:mining-researcher`, output structure, anti-patterns
-- `skills/cc-explorer/SKILL.md` — skill teaching agents how to use cc-explorer MCP tools to explore chat logs. Describes workflow (when to use what); tool mechanics live in the MCP tool descriptions (Python docstrings), not the skill.
-- `src/cc_explorer/` — typed JSONL toolkit (Pydantic models, search/filter/triage, FastMCP server). Tools follow a progressive zoom: `list_project_sessions` (orient), `search_project` (scan), `grep_session` (examine), `read_turn` (read), plus agent inspection tools. `project` defaults to CWD.
-- `pyproject.toml` — package config with pydantic and fastmcp deps, `cc-explorer` entry point
-- `scripts/cursor_*.py` — Cursor SQLite scripts for IDE chat mining
-
-**Output:** user-confirmed during alignment.
-
-### engineering-loop
-
-Forked/slimmed from compound-engineering v3.8.1. A parallel code-review orchestrator plus two curated research agents, sized for a single operator (no team-scale scaffolding). The review skill is exposed as `/el:review` — the `el:` prefix is encoded literally in the skill's frontmatter `name:` field, mirroring upstream's `ce:review` trick to avoid colliding with Claude Code's built-in `/review`.
-
-**Workflow (the "engineering loop"):** detect diff scope → select reviewer personas by tier → dispatch parallel sub-agents that each emit JSON findings → merge + dedup → apply safe autofixes → route residual findings (interactive walkthrough / file tickets / report-only) → optional post-fix validators. Two unstructured-output agents (`agent-native-reviewer`, `deployment-verification-agent`) bypass the merge pipeline and surface in their own report sections.
-
-**Components:**
-- `.claude-plugin/plugin.json` — plugin metadata. Skill path is `./skills/el-review`; *directory* is `el-review` but skill `name:` is `el:review`.
-- `skills/el-review/SKILL.md` — orchestrator skill. Supports `mode:headless` for skill-to-skill invocation with a structured JSON return envelope. Has a `bulk-preview` gate when 10+ files change.
-- `skills/el-review/references/` — nine reference files inlined into SKILL.md via `@./references/<name>`: `persona-catalog`, `subagent-template`, `diff-scope`, `findings-schema.json`, `review-output-template`, `bulk-preview`, `tracker-defer`, `walkthrough`, `validator-template`.
-- `agents/` — 19 named agents:
-  - 2 research: `web-researcher` (pinned `model: sonnet`), `best-practices-researcher`.
-  - 5 always-on reviewers: `correctness`, `testing`, `maintainability`, `code-simplicity`, `project-standards`.
-  - 8 cross-cutting conditional reviewers: `security`, `performance`, `reliability`, `adversarial`, `api-contract`, `data-migrations`, `agent-native`, `previous-comments`.
-  - 3 stack-specific reviewers: `kieran-python`, `kieran-typescript`, `julik-frontend-races`.
-  - 1 verifier: `deployment-verification-agent`.
-- `NOTICE` — documents upstream provenance and the slimming deltas (which agents were dropped, which were demoted from always-on to conditional, tool restrictions removed from research agents).
-
-**Subagent contract.** Each reviewer writes a full-fidelity JSON artifact file *and* returns a compact merge-tier subset — keeps the orchestrator's synthesis context small while preserving evidence for downstream consumers. Confidence is discrete (`{0, 25, 50, 75, 100}`), enforced by `findings-schema.json`. Findings carry `pre_existing: bool` so reviewers can surface tech debt without gating merge. Run artifacts include `metadata.json` (branch, head_sha, verdict) so downstream skills can verify the artifact matches current state.
-
-**Severity scale source of truth.** The canonical P0–P3 definition lives in `references/review-output-template.md`; `SKILL.md` points to it.
-
-## Design Decisions
-
-### The "architecture astronaut" scoping discussion
-
-During initial development, we noticed the mining methodology could be generalized beyond AI jobs. We explicitly chose not to, citing "wait for three variants before abstracting."
-
-We later hit the three-variant threshold: AI-job lens, company-values-document lens (e.g., "read a company safety doc and find where I demonstrate these values"), specific-behavior-search lens ("find where I struggled with X"), and emotional-signal mining. The abstraction was earned.
-
-**What we generalized:** The lens is now user-supplied. The methodology (gather/analyze/synthesize), tooling (cc-explorer, git, Cursor scripts), structural analytical questions (struggles, abandoned approaches, constraint-driven decisions), and orchestration pattern (Opus orchestrator, Sonnet researchers) are fixed infrastructure. The search themes and analytical specifics come from the lens via an alignment conversation.
-
-**Where the boundary still holds:** The skill's output structure and downstream cuts (resume bullets, interview stories, LinkedIn posts, story seeds) remain oriented toward job-search / resume / content-creation use cases. Going fully generic (troubleshooting, performance evals unrelated to self-presentation, general knowledge retrieval) would require rethinking the output structure and philosophy. That's the next abstraction boundary — hold it until there are three variants that need it.
-
-### Plugin conversion: from standalone skill to plugin with named agent
-
-The standalone skill dispatched researcher subagents via inline Task prompts — the orchestrator wrote a giant prompt each time, duplicating tool instructions, return format, and analytical stance. Researchers also booted up inside the target project and got its CLAUDE.md/AGENTS.md injected as behavioral directives, which conflicted with the researcher's analytical stance.
-
-The plugin conversion solves both problems:
-- **Named agent (`mining-researcher`)** — consistent prompt, model pinning (`sonnet`), and a single place to maintain researcher instructions. The orchestrator passes only the delta (objective, vocabulary, boundaries, paths).
-- **Inlined reference material** — chat mining methodology and IDE mining tiers are inlined into the agent definition. No external file dependencies for researchers.
-- **Script access** — scripts live at plugin root, accessible via `{baseDir}/scripts/` resolution.
-
-### IDE chat mining: generic framework over Cursor-specific brain dump
-
-The Cursor mining support started as a raw brain dump — hardcoded workspace details and not integrated with the skill's gather/analyze/synthesize workflow.
-
-We reorganized it with two layers (now inlined in `mining-researcher.md`):
-1. **Generic framework** — tiered progressive mining (metadata -> user prompts -> full conversations -> aggregate stats). This applies to any IDE that stores chat history.
-2. **Cursor implementation reference** — SQLite schema, field documentation, script usage. This is the only IDE we have scripts for so far.
-
-The tiered strategy (triage cheap metadata first, go deep only where it's worth it) is the actual insight; Cursor's SQLite layout is just the first implementation of it.
-
-### Why cc-explorer replaced strip_chat.py
-
-The evolution: `extract_chat_evidence.py` -> `strip_chat.py` -> `cc-explorer`. Each replacement addressed real failures observed in production mining sessions.
-
-`strip_chat.py` solved the right problem (raw JSONL is ~95% tool results and plumbing) but created workflow overhead: batch-strip upfront, write intermediates, then grep with shell tools. Shell variables didn't persist between Bash calls, broad grep results got externalized and silently lost, and researchers needed multiple passes to get conversation context around hits.
-
-cc-explorer wraps typed Pydantic models (adapted from `claude-code-log`, MIT) around the JSONL structure and exposes tools for progressive chat exploration and agent inspection. Four conversation tools follow a zoom pattern: `list_project_sessions` (orient), `search_project` (scan across sessions), `grep_session` (examine within one session), `read_turn` (read a moment at full fidelity). Plus agent inspection tools for tracing subagent execution. Each tool has one output shape — no mode switching. The corpus is treated as one pool of data identified by session UUIDs and turn UUIDs — no filenames, no intermediates, no batch-strip step.
-
-The MCP server architecture eliminated the final friction: researchers no longer need to invoke shell commands at all. Tools appear natively in the agent's tool palette.
-
-### The `agent_content` display parameter
-
-Display tools (`grep_session`, `read_turn`, `browse_session`) accepted `truncate` to control content length, but had no way to toggle what *categories* of content to show. Tool inputs were always on; tool outputs and thinking blocks were always off.
-
-`agent_content` is a comma-separated set of atoms (`thinking`, `inputs`, `outputs`) controlling what's shown for assistant turns beyond the always-present text. Default `"inputs"` preserves backward compatibility. The parameter is orthogonal to existing controls: `truncate` governs length of whatever's visible, `role` filters which entries appear, `scope` (on search tools) controls what's searched.
-
-Key design choices:
-- **Text is always shown** — no atom for it. The param controls extras.
-- **Tool outputs are separate entries** — `ToolResultEntry` gets role marker `"T"` in pipe-delimited output, interleaved positionally after the assistant turn that triggered them. No tool name on output lines (positional pairing is sufficient).
-- **`message.content` ToolResultContent is the display source** for outputs (human-readable text Claude saw), not `toolUseResult` (raw structured metadata).
-- **ThinkingContent** was already parsed but silently dropped — `thinking` atom surfaces it with `[thinking]` prefix.
-
-See `docs/` for the JSONL format reference and other design documentation.
-
-### engineering-loop: forked from compound-engineering, slimmed for solo dev
-
-We adopted compound-engineering v3.8.1 wholesale, then carved away the team-coordination layer. The plugin landed without our conventions baked in — versioning rules, the `el:`-prefix trick, the audit against this repo's standards all happened *after* the merge. Future work on this plugin should treat the upstream as a reference, not a template: when we pull updates, port them through our conventions rather than copying as-is.
-
-**Fork deltas worth knowing:**
-- Skill was renamed `review` → `el:review` to avoid colliding with Claude Code's built-in `/review`. The `:` lives inside the frontmatter `name:` field, the directory uses `el-review`. Same trick upstream uses for `ce:review`.
-- `web-researcher` and `best-practices-researcher` had their `tools:` restrictions removed (upstream limited them to `WebSearch, WebFetch`). Intentional: solo researchers benefit from the full palette.
-- `agent-native-reviewer` was demoted from always-on to conditional because most projects don't ship LLM/MCP features and the persona is a measurable token tax.
-- Several upstream agents/sections were dropped entirely. See `engineering-loop/NOTICE` for the slimming ledger.
-
-**Things to refactor when next in this plugin:** see GitHub Issues labeled `engineering-loop` + `tech-debt` for the live list.
+- **Wait for three variants before abstracting.** Don't generalize a skill until you've built it for at least three different use cases. Ship the specific version.
+- **One authoritative source.** Operational docs (script usage, data formats, mining workflows) live inside the skill, not here.
+- **This is a toolbox, not a product.** The code here produces ephemeral output consumed by LLMs — no human users, no API contracts, no backwards compatibility obligations. When we learn a better approach, we rip out the old one entirely rather than retrofitting. Prefer clean rewrites over incremental patches when the scope is small enough to hold in context. Don't preserve existing structure, output format, or logic out of habit — preserve it only when there's a reason.
