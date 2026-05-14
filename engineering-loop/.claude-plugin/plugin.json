@@ -1,6 +1,6 @@
 {
   "name": "engineering-loop",
-  "version": "0.3.2",
+  "version": "0.4.0-variant-b",
   "description": "Slim parallel-review and curated research agents for solo development. The parts of compound-engineering's workflow that actually compound for a single operator, without the team-scale scaffolding.",
   "author": {
     "name": "Cory King",
@@ -32,5 +32,5 @@
     "./agents/kieran-typescript-reviewer.md",
     "./agents/deployment-verification-agent.md"
   ],
-  "skills": ["./skills/el-review"]
+  "skills": ["./skills/el-review", "./skills/claude-md-doctor"]
 }
