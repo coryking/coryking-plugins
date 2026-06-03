@@ -5,6 +5,7 @@ All tools are read-only and return typed Pydantic response models.
 FastMCP auto-generates output schemas from return type annotations.
 """
 
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,7 +51,27 @@ from .subagents import (
     scan_output_file_stats,
 )
 
-mcp = FastMCP("cc-explorer")
+_INSTRUCTIONS = """\
+cc-explorer explores Claude Code chat history — your past conversations and the
+subagents they spawned — stored as per-project JSONL transcripts. All tools are
+read-only and scoped to one project (CWD by default; pass `project` to target
+another). There are two lenses:
+
+1. Conversations — find and read what was discussed.
+   Orient with list_project_sessions (like `ls` on the history), scan for terms
+   across sessions with search_project (which session is hot), then zoom in:
+   grep_session / grep_sessions for matches-in-context, read_turn /
+   browse_session to read at full fidelity.
+
+2. Agent forensics — see what dispatched subagents actually did.
+   Start from list_project_sessions(min_agents=1) to find sessions that spawned
+   agents, then list_session_agents to see which agents a session dispatched,
+   get_agent_detail for one agent's prompt / result / tool-trace, and
+   audit_session_tools to check whether the agents used their tools correctly
+   (per-tool counts, error rates, retries).
+"""
+
+mcp = FastMCP("cc-explorer", instructions=_INSTRUCTIONS)
 
 _TOOL_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": False}
 
@@ -70,6 +91,46 @@ def _filter_by_date(
             before = before.replace(tzinfo=timezone.utc)
         sessions = [s for s in sessions if s.first_timestamp and s.first_timestamp <= before]
     return sessions
+
+
+def _current_session_id() -> str | None:
+    """The Claude Code session that launched THIS MCP server, if known.
+
+    Claude Code spawns a dedicated stdio MCP server per session and injects
+    CLAUDE_CODE_SESSION_ID into that process's environment — undocumented but
+    observed directly: each live session's server carries its own distinct id
+    (confirmed via /proc/<pid>/environ across concurrent sessions). We read it
+    so broad discovery tools can drop the *calling* conversation from results:
+    the session doing the searching is the one thing it never wants back.
+
+    Returns None when the var is absent (orphaned server, or one launched
+    outside a session), in which case nothing is excluded. The value is frozen
+    at process spawn; since the server is per-session that's the right value
+    for its whole life, save the rare case where one server outlives an
+    in-process session switch (`/clear`, resume) — a low-harm miss, never a
+    wrong result.
+    """
+    return os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+
+
+def _exclude_current_session(
+    sessions: list[SessionInfo], include_current: bool
+) -> tuple[list[SessionInfo], PrefixId | None]:
+    """Drop the calling session from a list unless the caller opted to keep it.
+
+    Returns (kept_sessions, excluded_id). excluded_id is set only when a
+    session was actually removed, so callers can surface *why* an expected
+    result is missing instead of omitting it silently.
+    """
+    if include_current:
+        return sessions, None
+    current = _current_session_id()
+    if not current:
+        return sessions, None
+    kept = [s for s in sessions if s.session_id != current]
+    if len(kept) == len(sessions):
+        return sessions, None  # calling session wasn't in this list anyway
+    return kept, PrefixId(current)
 
 
 def _parse_hide_or_raise(value: str | None) -> frozenset[str]:
@@ -131,7 +192,9 @@ def list_project_sessions(
     ] = 0,
     min_agents: Annotated[
         int,
-        Field(description="Only sessions with at least N agents."),
+        Field(
+            description="Only sessions that spawned at least N subagents. Set min_agents=1 to find sessions that dispatched agents — the entry point to the agent-forensics tools (list_session_agents, get_agent_detail, audit_session_tools)."
+        ),
     ] = 0,
     after: Annotated[
         datetime | None,
@@ -144,7 +207,7 @@ def list_project_sessions(
 ) -> SessionListResponse:
     """List conversations in a project with stats: dates, message counts, token usage, tool calls, agent dispatches.
 
-    This is the orientation step — like `ls -la` on the project's chat history. Use it to see what exists before searching.
+    This is the orientation step — like `ls -la` on the project's chat history. Use it to see what exists before searching. Pass min_agents=1 to narrow to sessions that dispatched subagents — the starting point for agent forensics (then drill in with list_session_agents / get_agent_detail / audit_session_tools). The calling conversation, if present, is kept but flagged `is_current: true` so you can tell which row is the session you're in.
     """
     proj = resolve_project(project)
     sessions = load_sessions(proj)
@@ -159,7 +222,7 @@ def list_project_sessions(
     if not sessions:
         raise ToolError("No conversations match filters")
 
-    return SessionListResponse.from_sessions(sessions)
+    return SessionListResponse.from_sessions(sessions, current_session=_current_session_id())
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -194,6 +257,12 @@ def search_project(
         int,
         Field(description="Character width of centered excerpt examples."),
     ] = 150,
+    include_current_session: Annotated[
+        bool,
+        Field(
+            description="Include the calling conversation itself. Default False — the live session that invoked this search is excluded so it can't return itself as a (useless) hit. Set True to search across it too."
+        ),
+    ] = False,
 ) -> SearchProjectResponse:
     """Scan a project's chat history for patterns, grouped by pattern with per-pattern hit counts and session breakdowns.
 
@@ -207,6 +276,14 @@ def search_project(
         raise ToolError(f"No conversations found for {proj}")
 
     sessions = _filter_by_date(sessions, after, before)
+    sessions, excluded = _exclude_current_session(sessions, include_current_session)
+    if not sessions and excluded:
+        # The calling conversation was the only session in scope. Don't blame
+        # the patterns — point at the exclusion and how to override it.
+        raise ToolError(
+            f"The only session in scope is the calling conversation ({excluded}), "
+            f"excluded by default. Pass include_current_session=true to search it."
+        )
 
     base_types = ENTRY_TYPE_MAP[role]
 
@@ -216,9 +293,13 @@ def search_project(
 
     # Check if anything matched
     if not any(r for _, results in all_results for r in results):
-        raise ToolError(f"No matches for: {', '.join(patterns)}")
+        raise ToolError(
+            f"No matches for: {', '.join(patterns)}. Patterns are case-insensitive "
+            f"regex — try shorter or broader terms, set role='all' to search both "
+            f"sides, or widen the date range."
+        )
 
-    return SearchProjectResponse.from_triage(all_results)
+    return SearchProjectResponse.from_triage(all_results, excluded_current_session=excluded)
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -311,7 +392,11 @@ def grep_session(
     pattern_results = multi_results[sessions[0].session_id]
 
     if not any(matches for _, matches, _ in pattern_results):
-        raise ToolError(f"No matches for any pattern: {', '.join(patterns)}")
+        raise ToolError(
+            f"No matches for any pattern: {', '.join(patterns)}. Try shorter or "
+            f"broader regex, set role='all', or use browse_session to read the "
+            f"session directly."
+        )
 
     return GrepSessionResponse.from_pattern_results(
         session_id=sessions[0].session_id,
@@ -446,7 +531,9 @@ def grep_sessions(
         if not_found and len(not_found) == len(sessions):
             raise ToolError(f"No sessions matched: {', '.join(not_found)}")
         raise ToolError(
-            f"No matches in any session for any pattern: {', '.join(patterns)}"
+            f"No matches in any session for any pattern: {', '.join(patterns)}. "
+            f"Try shorter or broader regex, set role='all', or confirm the session "
+            f"ids with list_project_sessions."
         )
 
     return GrepSessionsResponse(
@@ -628,38 +715,6 @@ def browse_session(
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
-def list_agent_sessions(
-    project: Annotated[
-        str | None,
-        Field(
-            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
-        ),
-    ] = None,
-    after: Annotated[
-        datetime | None,
-        Field(description="Only sessions after this datetime."),
-    ] = None,
-    before: Annotated[
-        datetime | None,
-        Field(description="Only sessions before this datetime."),
-    ] = None,
-) -> SessionListResponse:
-    """List all sessions that spawned subagents, with agent counts and tool usage."""
-    proj = resolve_project(project)
-    sessions = load_sessions(proj)
-    if not sessions:
-        raise ToolError(f"No conversations found for {proj}")
-
-    agent_sessions = [s for s in sessions if s.stats.agent_count > 0]
-    agent_sessions = _filter_by_date(agent_sessions, after, before)
-
-    if not agent_sessions:
-        raise ToolError("No sessions with subagents found.")
-
-    return SessionListResponse.from_sessions(agent_sessions)
-
-
-@mcp.tool(annotations=_TOOL_ANNOTATIONS)
 def list_session_agents(
     session: Annotated[str, Field(description="Session ID or prefix to inspect.")],
     project: Annotated[
@@ -673,7 +728,10 @@ def list_session_agents(
         Field(description="Directory containing saved .output files."),
     ] = None,
 ) -> SessionAgentsResponse:
-    """List all agents spawned by a specific session, with stats and output file info."""
+    """List the subagents one session dispatched — type, status, token cost, duration, and whether each agent's output file is available.
+
+    Use when you want to see a session's fan-out before drilling in: which agents ran, which errored, which burned the most tokens. Step two of agent forensics — get a session id from list_project_sessions(min_agents=1), then from here pass an agent_id to get_agent_detail for the full prompt/result/trace, or audit the whole session's tool usage with audit_session_tools.
+    """
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
@@ -732,7 +790,10 @@ def get_agent_detail(
         ),
     ] = 80,
 ) -> AgentDetailResponse | AgentListResponse:
-    """Get full prompt, result, stats, and optional tool trace for specific agent(s)."""
+    """Get one or more subagents' full story: the prompt they were given, the result they returned, token/tool stats, and (with trace=true) a chronological tool-by-tool timeline of what they did.
+
+    Use when you need what an agent was actually told and how it reached its answer — debugging why an agent went off the rails, recovering a result that scrolled out of context, or comparing what several parallel agents concluded. Find agent_ids with list_session_agents. For a session-wide view of whether agents used their tools correctly (rather than one agent's full transcript), use audit_session_tools instead.
+    """
     proj = resolve_project(project)
     sessions = load_sessions(proj)
     if not sessions:
@@ -786,7 +847,7 @@ def _find_agent(sessions, agent_id: str):
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
-def session_tool_audit(
+def audit_session_tools(
     session: Annotated[
         str,
         Field(description="Session ID or prefix to audit."),
@@ -815,11 +876,11 @@ def session_tool_audit(
         ),
     ] = 80,
 ) -> SessionToolAuditResponse:
-    """Audit how every subagent in a session used its tools.
+    """Audit how every subagent in a session used its tools — the whole-session view, vs get_agent_detail's single-agent deep dive.
 
-    For each subagent in the target session, walks the agent's transcript and returns: tool counts, error rate, and a chronological list of tool calls (optionally filtered by name substring). Each call includes timestamp, tool name, truncated input args, and an error flag set when the tool result was an error or zero-match response.
+    For each subagent in the target session, walks the agent's transcript and returns: tool counts, error rate, and a chronological list of tool calls (optionally filtered by name substring via tool_name_filter). Each call includes timestamp, tool name, truncated input args, and an error flag set when the tool result was an error or zero-match response.
 
-    Use this to answer 'are my agents using my tools right?' — see which tools land vs fail, where retries happened, and which agents over-call. Replaces hand-rolled scripts that walk the per-agent JSONL files in `<session_dir>/subagents/`.
+    Use this to answer 'are my agents using my tools right?' — which tools land vs fail, where retries happened, which agents over-call, and (with tool_name_filter='your-server') whether agents even reached for a specific MCP tool you shipped or ignored it. Get the session id from list_project_sessions(min_agents=1). Replaces hand-rolled scripts that walk the per-agent JSONL files in `<session_dir>/subagents/`.
     """
     proj = resolve_project(project)
     sessions = load_sessions(proj)

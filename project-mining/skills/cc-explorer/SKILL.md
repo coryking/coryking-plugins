@@ -44,10 +44,10 @@ Default is `""` (show and search everything). Pass `hide="outputs"` to suppress 
 
 Tools for tracing subagent execution — a separate axis from conversation content:
 
-- **`list_agent_sessions`** — which sessions spawned subagents? Counts and dates.
+- **`list_project_sessions(min_agents=1)`** — which sessions spawned subagents? The entry point: filter the normal session list down to the ones that dispatched agents.
 - **`list_session_agents`** — what agents did a specific session dispatch? Status, tokens, duration.
 - **`get_agent_detail`** — full prompt, result, stats for specific agent(s). Optional tool trace.
-- **`session_tool_audit`** — for every subagent in a session, tool counts + error rates + chronological tool-call traces. Use this to answer "are my agents using my tools right?" — see which tools land vs fail, where retries happened, which agents over-call.
+- **`audit_session_tools`** — for every subagent in a session, tool counts + error rates + chronological tool-call traces. Use this to answer "are my agents using my tools right?" — see which tools land vs fail, where retries happened, which agents over-call.
 
 Use when tracing what an agent did, correlating outputs with sessions, or building timelines that distinguish "discussed doing X" from "dispatched agents to do X."
 
@@ -55,7 +55,7 @@ Use when tracing what an agent did, correlating outputs with sessions, or buildi
 
 Sessions from every git worktree of a project are pooled under one project. Claude Desktop dispatch creates real git worktrees under `<project>/.claude-worktrees/<name>/`, so dispatched work shows up alongside interactive sessions automatically — no need to specify a worktree or know which branch work happened on.
 
-Each session carries a `worktree` field: absent for the main worktree, set to the worktree's directory basename (e.g. `happy-lehmann`) for linked worktrees. `list_project_sessions`, `grep_session`, `read_turn`, `browse_session`, `list_session_agents`, `get_agent_detail`, and `session_tool_audit` all surface it.
+Each session carries a `worktree` field: absent for the main worktree, set to the worktree's directory basename (e.g. `happy-lehmann`) for linked worktrees. `list_project_sessions`, `grep_session`, `read_turn`, `browse_session`, `list_session_agents`, `get_agent_detail`, and `audit_session_tools` all surface it.
 
 **Why it matters for mining:** labeled sessions are usually dispatch-driven, meaning the "user" turn is often a programmatically-constructed prompt, not a human typing in-the-moment. Weight signal accordingly — dispatch sessions are weaker evidence for "user's own words" but stronger evidence for "what the agent decided autonomously." The worktree label also doubles as a git branch bridge: `happy-lehmann` in the session metadata points you at the `happy-lehmann` branch when cross-referencing with git history.
 
@@ -67,7 +67,7 @@ Each session carries a `worktree` field: absent for the main worktree, set to th
 
 **"Show me what was said"** → `grep_session` for pattern-matched content with context, or `read_turn` to read a specific moment at full fidelity. Use `full_length` values in grep output to gauge entry size before reading.
 
-**"Trace agent execution"** → `list_agent_sessions` → `list_session_agents` → `get_agent_detail`. Top-down zoom from project to session to individual agent.
+**"Trace agent execution"** → `list_project_sessions(min_agents=1)` → `list_session_agents` → `get_agent_detail` (or `audit_session_tools` for the whole-session tool-usage view). Top-down zoom from project to session to individual agent.
 
 ## Key workflows
 
@@ -85,7 +85,7 @@ Then `grep_session` on the hot sessions with your best patterns. Like `search_pr
 
 ### Agent inspection
 
-Trace subagent execution top-down: `list_agent_sessions` identifies which sessions spawned agents. `list_session_agents` shows what a specific session dispatched. `get_agent_detail` reveals what each agent was told to do and what it produced. The tool trace option adds the chronological tool-by-tool timeline.
+Trace subagent execution top-down: `list_project_sessions(min_agents=1)` identifies which sessions spawned agents. `list_session_agents` shows what a specific session dispatched. `get_agent_detail` reveals what each agent was told to do and what it produced (the tool trace option adds the chronological tool-by-tool timeline), while `audit_session_tools` gives the whole-session view of how every agent used its tools.
 
 ## Tips
 

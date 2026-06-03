@@ -182,7 +182,7 @@ Chat logs are 50%+ AI being agreeable. Without explicit filtering, agents treat 
 | Search | `search_project` | project | Which patterns hit, which sessions are hot |
 | Grep | `grep_session` / `grep_sessions` | session(s) | Matches with surrounding context |
 | Read | `read_turn` | turn | Full fidelity text around a specific moment |
-| Inspect | `list_agent_sessions` / `list_session_agents` / `get_agent_detail` | varies | Agent inspection at manifest/session/detail levels |
+| Inspect | `list_project_sessions(min_agents=1)` / `list_session_agents` / `get_agent_detail` / `audit_session_tools` | varies | Agent forensics at manifest/session/detail levels |
 
 Each step narrows scope and increases fidelity. No tool switches modes based on hit volume. The corpus is one pool identified by session UUIDs and turn UUIDs.
 

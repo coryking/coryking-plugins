@@ -113,14 +113,14 @@ The cc-explorer MCP tools are automatically available to named agents within thi
 - `list_project_sessions` — list conversations with stats. The orchestrator typically already gives you the relevant session paths in your dispatch — only call this if you specifically need session metadata you weren't handed.
 
 **Agent inspection:**
-- `list_agent_sessions` — find sessions that spawned subagents
+- `list_project_sessions(min_agents=1)` — find sessions that spawned subagents
 - `list_session_agents` — see what agents a session dispatched
 - `get_agent_detail` — full prompt, result, and stats for specific agents
-- `session_tool_audit` — per-subagent tool counts, error rates, and chronological tool-call traces for a session. Use when investigating how agents used their tools.
+- `audit_session_tools` — per-subagent tool counts, error rates, and chronological tool-call traces for a session. Use when investigating how agents used their tools.
 
 ### Subagent dispatch history
 
-When your lens involves correlating outputs with the sessions that produced them, use `list_agent_sessions` to find which sessions spawned agents, `list_session_agents` to see what agents a specific session dispatched, and `get_agent_detail` for a deep dive into a specific agent.
+When your lens involves correlating outputs with the sessions that produced them, use `list_project_sessions(min_agents=1)` to find which sessions spawned agents, `list_session_agents` to see what agents a specific session dispatched, and `get_agent_detail` for a deep dive into a specific agent.
 
 The manifest view shows all sessions with agent counts. The session view lists every subagent: dispatch timestamp, agent type, completion status, token consumption, description, and compaction events.
 

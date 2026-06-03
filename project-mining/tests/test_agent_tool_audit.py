@@ -1,4 +1,4 @@
-"""Tests for extract_agent_tool_audit — the engine behind session_tool_audit.
+"""Tests for extract_agent_tool_audit — the engine behind audit_session_tools.
 
 Verifies tool_use → tool_result pairing, error detection (both is_error=True
 and no-match marker text), and tool_name_filter substring matching.

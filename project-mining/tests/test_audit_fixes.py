@@ -27,7 +27,7 @@ What's pinned and why:
 
   TestSessionToolAuditResponseHasDispatchVsAuditedCounts
   TestSessionToolAuditCountsReflectSkippedAgents
-    session_tool_audit can only audit subagents whose .output files are
+    audit_session_tools can only audit subagents whose .output files are
     accessible. The response has to expose both `total_dispatched` (every
     subagent the session spawned) and `total_audited` (the subset whose
     output files were readable), so callers can see when work was skipped.
@@ -217,10 +217,10 @@ class TestGrepSessionsSurfacesUnresolvedPrefixes:
 
 
 # =============================================================================
-# session_tool_audit: dispatched vs. audited counts
+# audit_session_tools: dispatched vs. audited counts
 # =============================================================================
 #
-# session_tool_audit walks subagent .output files to report tool usage per
+# audit_session_tools walks subagent .output files to report tool usage per
 # agent. Not every spawned subagent has a readable output file — some get
 # skipped. The response exposes two separate counts so the caller can see
 # the gap:
@@ -257,7 +257,7 @@ class TestSessionToolAuditCountsReflectSkippedAgents:
     """
 
     def test_dispatched_and_audited_counts_diverge_when_outputs_missing(self):
-        from cc_explorer.mcp_server import session_tool_audit
+        from cc_explorer.mcp_server import audit_session_tools
         from cc_explorer.subagents import SubagentInfo
         from cc_explorer.utils import PrefixId
 
@@ -306,7 +306,7 @@ class TestSessionToolAuditCountsReflectSkippedAgents:
                  "cc_explorer.mcp_server.extract_agent_tool_audit",
                  side_effect=fake_extract,
              ):
-            resp = session_tool_audit(session="aaaaaaaa", project="/tmp/fake")
+            resp = audit_session_tools(session="aaaaaaaa", project="/tmp/fake")
 
         assert resp.total_dispatched == 3, (
             f"3 agents were spawned, got total_dispatched={resp.total_dispatched}"
@@ -322,7 +322,7 @@ class TestSessionToolAuditCountsReflectSkippedAgents:
         total_dispatched > 0 / total_audited == 0 asymmetry is exactly the
         signal these new fields exist to surface; raising would hide it.
         """
-        from cc_explorer.mcp_server import session_tool_audit
+        from cc_explorer.mcp_server import audit_session_tools
         from cc_explorer.subagents import SubagentInfo
 
         target_id = "aaaaaaaa-1111-2222-3333-444444444444"
@@ -348,7 +348,7 @@ class TestSessionToolAuditCountsReflectSkippedAgents:
              patch("cc_explorer.mcp_server.extract_subagents", return_value=all_agents), \
              patch("cc_explorer.mcp_server.resolve_output_files", side_effect=lambda *a, **k: None), \
              patch("cc_explorer.mcp_server.scan_output_file_stats", return_value={}):
-            resp = session_tool_audit(session="aaaaaaaa", project="/tmp/fake")
+            resp = audit_session_tools(session="aaaaaaaa", project="/tmp/fake")
 
         assert resp.total_dispatched == 2
         assert resp.total_audited == 0
