@@ -26,6 +26,7 @@ from .models import (
 )
 from .formatting import _match_example
 from .parser import load_conversations, load_transcript
+from .subagents import discover_subagents
 from .utils import PrefixId, smart_truncate
 
 
@@ -128,6 +129,14 @@ class SessionInfo:
     message_count: int
     stats: TranscriptStats = field(default_factory=TranscriptStats)
     worktree: Optional[str] = None
+    # Number of human prompts (entries where the user actually spoke), distinct
+    # from message_count which also counts assistant turns. Signals how much the
+    # human drove the session vs one prompt fanning out into a long agent run.
+    user_turns: int = 0
+    # Full discovered subagent population — parent dispatches plus on-disk
+    # orphans (notably workflow-orchestrated agents). Equals list_session_agents'
+    # total_agents, unlike stats.agent_count which is top-down dispatches only.
+    agents_present: int = 0
 
 
 @dataclass
@@ -222,10 +231,18 @@ def session_title(entries: list[TranscriptEntry]) -> str:
     return "(empty session)"
 
 
-def load_sessions(project_path: str) -> list[SessionInfo]:
+def load_sessions(
+    project_path: str, *, with_agents_present: bool = False
+) -> list[SessionInfo]:
     """Find and load all conversation sessions for a project.
 
     Returns SessionInfo list sorted by first_timestamp (newest first).
+
+    `with_agents_present` populates SessionInfo.agents_present by walking each
+    session's on-disk subagents dir (reconciled against parent dispatches). That
+    walk is per-session filesystem I/O, so it's opt-in — only list_project_sessions,
+    which displays and filters on the count, needs it. Every other tool loads
+    sessions purely for their transcripts and leaves agents_present at 0.
     """
     conversations = load_conversations(project_path)
     sessions: list[SessionInfo] = []
@@ -245,6 +262,13 @@ def load_sessions(project_path: str) -> list[SessionInfo]:
         if message_count == 0:
             continue
 
+        # Human prompts only — how many times the user actually spoke.
+        user_turns = sum(
+            1
+            for e in entries
+            if isinstance(e, HumanEntry) and len(e.display(truncate=0)) > 0
+        )
+
         # Find first timestamp from any entry that has one (typed access)
         first_ts: Optional[datetime] = None
         for e in entries:
@@ -254,6 +278,15 @@ def load_sessions(project_path: str) -> list[SessionInfo]:
 
         title = session_title(entries)
         stats = TranscriptStats.from_entries(entries)
+        # Reconcile parent dispatches with the on-disk subagent walk so the
+        # count matches list_session_agents and catches workflow orphans. Reuses
+        # the already-parsed entries — only the tiny subagents/ dir is walked.
+        # Gated: most tools don't need it and shouldn't pay the per-session walk.
+        agents_present = (
+            len(discover_subagents(ref.path, entries=entries))
+            if with_agents_present
+            else 0
+        )
         sessions.append(
             SessionInfo(
                 session_id=session_id,
@@ -263,6 +296,8 @@ def load_sessions(project_path: str) -> list[SessionInfo]:
                 message_count=message_count,
                 stats=stats,
                 worktree=ref.worktree,
+                user_turns=user_turns,
+                agents_present=agents_present,
             )
         )
 

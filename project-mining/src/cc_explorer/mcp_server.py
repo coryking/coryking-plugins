@@ -193,7 +193,7 @@ def list_project_sessions(
     min_agents: Annotated[
         int,
         Field(
-            description="Only sessions that spawned at least N subagents. Set min_agents=1 to find sessions that dispatched agents — the entry point to the agent-forensics tools (list_session_agents, get_agent_detail, audit_session_tools)."
+            description="Only sessions with at least N subagents in their full discovered population (`agents_present` — direct dispatches plus workflow-orchestrated orphans, NOT the top-down `agents` count). Set min_agents=1 to find every session that ran subagents, including workflow-only ones — the entry point to the agent-forensics tools (list_session_agents, get_agent_detail, audit_session_tools)."
         ),
     ] = 0,
     after: Annotated[
@@ -205,18 +205,18 @@ def list_project_sessions(
         Field(description="Only sessions before this datetime."),
     ] = None,
 ) -> SessionListResponse:
-    """List conversations in a project with stats: dates, message counts, token usage, tool calls, agent dispatches.
+    """List conversations in a project with stats: dates, message counts, human prompts, token usage, tool calls, agent dispatches.
 
-    This is the orientation step — like `ls -la` on the project's chat history. Use it to see what exists before searching. Pass min_agents=1 to narrow to sessions that dispatched subagents — the starting point for agent forensics (then drill in with list_session_agents / get_agent_detail / audit_session_tools). The calling conversation, if present, is kept but flagged `is_current: true` so you can tell which row is the session you're in.
+    This is the orientation step — like `ls -la` on the project's chat history. Use it to see what exists before searching. Each row carries two agent counts: `agents` (dispatched directly) and `agents_present` (the full population including workflow orphans) — a gap between them means the session orchestrated workflows. `user_turns` (human prompts) against a high message/agent count flags a single prompt that fanned out into a long autonomous run. Pass min_agents=1 to narrow to sessions that ran subagents — the starting point for agent forensics (then drill in with list_session_agents / get_agent_detail / audit_session_tools). The calling conversation, if present, is kept but flagged `is_current: true` so you can tell which row is the session you're in.
     """
     proj = resolve_project(project)
-    sessions = load_sessions(proj)
+    sessions = load_sessions(proj, with_agents_present=True)
     if not sessions:
         raise ToolError(f"No conversations found for {proj}")
 
     sessions = [s for s in sessions if s.message_count >= min_messages]
     sessions = [s for s in sessions if s.stats.tool_use_count >= min_tools]
-    sessions = [s for s in sessions if s.stats.agent_count >= min_agents]
+    sessions = [s for s in sessions if s.agents_present >= min_agents]
     sessions = _filter_by_date(sessions, after, before)
 
     if not sessions:

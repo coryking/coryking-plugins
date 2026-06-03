@@ -53,8 +53,10 @@ class SessionSummary(SparseModel):
         default=None,
         description="Git worktree name this session lived in. Absent for the main worktree; present (e.g. 'happy-lehmann') for linked worktrees, which includes Claude Desktop dispatched sessions under `.claude-worktrees/`. Labeled sessions are often programmatically dispatched rather than interactively typed — calibrate signal accordingly.",
     )
-    messages: int = Field(description="Total message count.")
-    agents: int = Field(description="Number of subagent dispatches.")
+    messages: int = Field(description="Total message count (human + assistant turns).")
+    user_turns: int = Field(description="Human prompts — how many times the user actually spoke. A small number against many agents or messages flags a single prompt that fanned out into a long autonomous run.")
+    agents: int = Field(description="Subagents dispatched directly by the parent transcript (Task/Agent/TaskCreate blocks). Top-down view — does NOT count workflow-orchestrated agents.")
+    agents_present: int = Field(description="Full discovered subagent population — direct dispatches plus on-disk orphans (notably workflow-orchestrated agents). Matches list_session_agents' total_agents. When this exceeds `agents`, the session ran workflows. The min_agents filter matches on this number.")
     context_tokens: int = Field(description="Last assistant turn's input tokens (context window size).")
     output_tokens: int = Field(description="Total output tokens across all turns.")
     tools: int = Field(description="Total tool_use invocations.")
@@ -71,7 +73,9 @@ class SessionSummary(SparseModel):
             title=s.title,
             worktree=s.worktree,
             messages=s.message_count,
+            user_turns=s.user_turns,
             agents=s.stats.agent_count,
+            agents_present=s.agents_present,
             context_tokens=s.stats.context_tokens,
             output_tokens=s.stats.output_tokens,
             tools=s.stats.tool_use_count,

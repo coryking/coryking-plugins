@@ -16,7 +16,10 @@ orphan transcripts — notably workflow-orchestrated agents under
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
+from cc_explorer.parser import ConversationRef, load_transcript
+from cc_explorer.search import load_sessions
 from cc_explorer.subagents import (
     AgentFile,
     collect_agent_files,
@@ -235,3 +238,104 @@ def test_discover_dispatch_only_has_no_file(tmp_path):
     ghost = next(a for a in agents if a.source == "dispatch_only")
     assert not ghost.output_file_exists
     assert ghost.tool_use_id == "toolu_NOFILE"
+
+
+def test_discover_from_preloaded_entries_matches_path_form(tmp_path):
+    """Passing entries (the orientation hot path) yields the identical population
+    as letting discover_subagents re-read the transcript itself."""
+    session = _setup_session(tmp_path)
+    from_path = discover_subagents(session)
+    from_entries = discover_subagents(session, entries=load_transcript(session))
+
+    assert len(from_path) == len(from_entries)
+    assert [a.source for a in from_path] == [a.source for a in from_entries]
+    assert [a.agent_id for a in from_path] == [a.agent_id for a in from_entries]
+
+
+# =============================================================================
+# Orientation count: load_sessions surfaces the present population
+# =============================================================================
+
+
+def _parent_chat() -> list[dict]:
+    """A parent transcript that dispatches NO agents directly — one human prompt,
+    one assistant reply. Stands in for a session that orchestrates only via a
+    Workflow (whose children land on disk but never as Task/Agent blocks)."""
+    return [
+        {
+            "type": "user",
+            "uuid": "u-root",
+            "timestamp": TS,
+            "sessionId": SID,
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": "kick off the workflow"}],
+            },
+        },
+        {
+            "type": "assistant",
+            "uuid": "a-root",
+            "timestamp": TS,
+            "sessionId": SID,
+            "message": {
+                "id": "m0",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-4",
+                "content": [{"type": "text", "text": "running it"}],
+            },
+        },
+    ]
+
+
+def _setup_workflow_only_session(tmp_path, n: int = 3) -> Path:
+    session = tmp_path / f"{SID}.jsonl"
+    _write_jsonl(session, _parent_chat())
+    subdir = tmp_path / SID / "subagents"
+    for i in range(1, n + 1):
+        f = subdir / "workflows" / "wf_run1" / f"agent-aid_wf{i}.jsonl"
+        _write_jsonl(f, _agent_transcript(f"aid_wf{i}", f"prompt {i}", f"result {i}"))
+        _meta(f, agentType="workflow-subagent")
+    return session
+
+
+def test_load_sessions_counts_workflow_orphans_as_present(tmp_path):
+    """The orphan-blind-spot fix: a workflow-only session has agent_count==0
+    top-down, but agents_present reflects the on-disk population so min_agents
+    no longer gates it out. user_turns counts the single human prompt."""
+    session = _setup_workflow_only_session(tmp_path, n=3)
+    conversations = {SID: ConversationRef(path=session, worktree=None)}
+    with patch("cc_explorer.search.load_conversations", return_value=conversations):
+        sessions = load_sessions(str(tmp_path), with_agents_present=True)
+
+    assert len(sessions) == 1
+    s = sessions[0]
+    assert s.stats.agent_count == 0  # nothing dispatched top-down
+    assert s.agents_present == 3  # all three workflow orphans discovered
+    assert s.user_turns == 1  # one human prompt, despite the fan-out
+
+
+def test_load_sessions_present_matches_discover(tmp_path):
+    """agents_present is exactly len(discover_subagents) so list_project_sessions
+    and list_session_agents can never disagree on the count."""
+    session = _setup_session(tmp_path)  # 1 dispatched + 1 dispatch_only + 1 orphan
+    conversations = {SID: ConversationRef(path=session, worktree=None)}
+    with patch("cc_explorer.search.load_conversations", return_value=conversations):
+        sessions = load_sessions(str(tmp_path), with_agents_present=True)
+
+    assert sessions[0].agents_present == len(discover_subagents(session))
+    assert sessions[0].agents_present == 3
+
+
+def test_load_sessions_skips_subagent_walk_by_default(tmp_path):
+    """agents_present is opt-in: tools that only need transcripts (read_turn,
+    grep_session, search_project, ...) must not pay the per-session subagents
+    walk. Default leaves the count at 0 without touching the filesystem tree."""
+    session = _setup_workflow_only_session(tmp_path, n=3)
+    conversations = {SID: ConversationRef(path=session, worktree=None)}
+    with patch("cc_explorer.search.load_conversations", return_value=conversations):
+        with patch("cc_explorer.search.discover_subagents") as walk:
+            sessions = load_sessions(str(tmp_path))
+
+    walk.assert_not_called()
+    assert sessions[0].agents_present == 0
