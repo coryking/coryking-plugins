@@ -45,8 +45,8 @@ from .search import (
     triage_multi,
 )
 from .subagents import (
+    discover_subagents,
     extract_agent_tool_audit,
-    extract_subagents,
     resolve_output_files,
     scan_output_file_stats,
 )
@@ -63,11 +63,11 @@ another). There are two lenses:
    grep_session / grep_sessions for matches-in-context, read_turn /
    browse_session to read at full fidelity.
 
-2. Agent forensics — see what dispatched subagents actually did.
+2. Agent forensics — see what a session's subagents actually did.
    Start from list_project_sessions(min_agents=1) to find sessions that spawned
-   agents, then list_session_agents to see which agents a session dispatched,
-   get_agent_detail for one agent's prompt / result / tool-trace, and
-   audit_session_tools to check whether the agents used their tools correctly
+   agents, then list_session_agents to see every agent the session ran (workflow
+   ones included), get_agent_detail for one agent's prompt / result / tool-trace,
+   and audit_session_tools to check whether the agents used their tools correctly
    (per-tool counts, error rates, retries).
 """
 
@@ -728,7 +728,9 @@ def list_session_agents(
         Field(description="Directory containing saved .output files."),
     ] = None,
 ) -> SessionAgentsResponse:
-    """List the subagents one session dispatched — type, status, token cost, duration, and whether each agent's output file is available.
+    """List every subagent a session ran — type, status, token cost, duration, and whether its full record is available.
+
+    Includes agents spawned by a workflow, not just ones the conversation dispatched directly, so the count reflects the session's real fan-out. Each row's `source` tells you whether to trust missing fields — and `workflow_run_id` lets you group agents from the same workflow run.
 
     Use when you want to see a session's fan-out before drilling in: which agents ran, which errored, which burned the most tokens. Step two of agent forensics — get a session id from list_project_sessions(min_agents=1), then from here pass an agent_id to get_agent_detail for the full prompt/result/trace, or audit the whole session's tool usage with audit_session_tools.
     """
@@ -746,7 +748,7 @@ def list_session_agents(
     if not target:
         raise ToolError(f"Session {session} not found")
 
-    agents = extract_subagents(target.path)
+    agents = discover_subagents(target.path)
 
     output_dir = Path(task_output_dir).expanduser() if task_output_dir else None
     resolve_output_files(agents, output_dir)
@@ -792,7 +794,9 @@ def get_agent_detail(
 ) -> AgentDetailResponse | AgentListResponse:
     """Get one or more subagents' full story: the prompt they were given, the result they returned, token/tool stats, and (with trace=true) a chronological tool-by-tool timeline of what they did.
 
-    Use when you need what an agent was actually told and how it reached its answer — debugging why an agent went off the rails, recovering a result that scrolled out of context, or comparing what several parallel agents concluded. Find agent_ids with list_session_agents. For a session-wide view of whether agents used their tools correctly (rather than one agent's full transcript), use audit_session_tools instead.
+    Works for any agent list_session_agents returns, including ones a workflow spawned rather than the conversation requesting directly. Find agent_ids with list_session_agents.
+
+    Use when you need what an agent was actually told and how it reached its answer — debugging why an agent went off the rails, recovering a result that scrolled out of context, or comparing what several parallel agents concluded. For a session-wide view of whether agents used their tools correctly (rather than one agent's full transcript), use audit_session_tools instead.
     """
     proj = resolve_project(project)
     sessions = load_sessions(proj)
@@ -839,7 +843,7 @@ def get_agent_detail(
 def _find_agent(sessions, agent_id: str):
     """Search for an agent across sessions by ID prefix."""
     for s in sessions:
-        agents = extract_subagents(s.path)
+        agents = discover_subagents(s.path)
         for sa in agents:
             if matches_id(sa, agent_id):
                 return sa, s
@@ -878,9 +882,9 @@ def audit_session_tools(
 ) -> SessionToolAuditResponse:
     """Audit how every subagent in a session used its tools — the whole-session view, vs get_agent_detail's single-agent deep dive.
 
-    For each subagent in the target session, walks the agent's transcript and returns: tool counts, error rate, and a chronological list of tool calls (optionally filtered by name substring via tool_name_filter). Each call includes timestamp, tool name, truncated input args, and an error flag set when the tool result was an error or zero-match response.
+    Covers agents spawned by a workflow, not just ones the conversation dispatched directly, so a workflow's fan-out is audited rather than silently missing from the picture. `total_present` is how many agents the session ran; `total_audited` is how many could be inspected — a gap means some agents left no inspectable record. For each agent, returns tool counts, error rate, and a chronological list of tool calls (optionally filtered by name substring via tool_name_filter); each call includes timestamp, tool name, truncated input args, and an error flag set when the tool result was an error or zero-match response.
 
-    Use this to answer 'are my agents using my tools right?' — which tools land vs fail, where retries happened, which agents over-call, and (with tool_name_filter='your-server') whether agents even reached for a specific MCP tool you shipped or ignored it. Get the session id from list_project_sessions(min_agents=1). Replaces hand-rolled scripts that walk the per-agent JSONL files in `<session_dir>/subagents/`.
+    Use this to answer 'are my agents using my tools right?' — which tools land vs fail, where retries happened, which agents over-call, and (with tool_name_filter='your-server') whether agents even reached for a specific MCP tool you shipped or ignored it. Get the session id from list_project_sessions(min_agents=1).
     """
     proj = resolve_project(project)
     sessions = load_sessions(proj)
@@ -891,11 +895,11 @@ def audit_session_tools(
     if target is None:
         raise ToolError(f"Session {session} not found")
 
-    agents = extract_subagents(target.path)
+    agents = discover_subagents(target.path)
     if not agents:
         raise ToolError(f"Session {session} dispatched no subagents")
 
-    total_dispatched = len(agents)
+    total_present = len(agents)
 
     output_dir = Path(task_output_dir).expanduser() if task_output_dir else None
     resolve_output_files(agents, output_dir)
@@ -920,6 +924,8 @@ def audit_session_tools(
         audits.append(
             AgentToolAudit(
                 agent_id=sa.agent_id,
+                source=sa.source,
+                workflow_run_id=sa.workflow_run_id,
                 type=sa.subagent_type or "",
                 description=sa.description or "",
                 tool_call_count=agent_total,
@@ -929,17 +935,17 @@ def audit_session_tools(
             )
         )
 
-    # When total_dispatched > 0 but total_audited == 0, return the response
-    # anyway with empty agents — that asymmetry IS the signal the new
-    # total_dispatched/total_audited fields exist to surface. Only the
-    # zero-dispatched case (handled above) raises ToolError, since there
-    # genuinely isn't anything to report on.
+    # When total_present > 0 but total_audited == 0, return the response anyway
+    # with empty agents — that asymmetry IS the signal the
+    # total_present/total_audited fields exist to surface. Only the
+    # zero-present case (handled above) raises ToolError, since there genuinely
+    # isn't anything to report on.
 
     return SessionToolAuditResponse(
         session=PrefixId(target.session_id),
         worktree=target.worktree,
         title=target.title,
-        total_dispatched=total_dispatched,
+        total_present=total_present,
         total_audited=len(audits),
         total_tool_calls=total_calls,
         total_errors=total_errors,

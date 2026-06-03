@@ -30,6 +30,7 @@ from .models import (
     AssistantTranscriptEntry,
     CompactionEvent,
     ContentItem,
+    HumanEntry,
     QueueOperationTranscriptEntry,
     TextContent,
     ToolResultContent,
@@ -37,6 +38,7 @@ from .models import (
     ToolUseContent,
     TranscriptEntry,
     TranscriptStats,
+    extract_text,
 )
 from .parser import load_transcript
 from .utils import PrefixId
@@ -54,6 +56,15 @@ class SubagentInfo:
     result_text: str = ""
     status: str = "unknown"
     timestamp: Optional[datetime] = None
+
+    # Discovery provenance — how this subagent was found. See discover_subagents.
+    #   "dispatched"    — seen in the parent transcript AND its on-disk transcript was found
+    #   "dispatch_only" — seen in the parent transcript, but no on-disk transcript matched
+    #   "orphan"        — on-disk transcript with no correlating parent dispatch
+    #                     (workflow-orchestrated agents, or any spawn the parent didn't record)
+    source: str = ""
+    # Workflow run id for agents under subagents/workflows/<runId>/, else None.
+    workflow_run_id: Optional[str] = None
 
     # Completion stats (from toolUseResult on completed agents)
     # Optional here is meaningful — distinguishes "no data" from "zero usage"
@@ -203,6 +214,196 @@ def extract_subagents(transcript_path: Path) -> list[SubagentInfo]:
     return [spawns[tid] for tid in spawn_order if tid in spawns]
 
 
+# =============================================================================
+# Bottom-up discovery: walk the on-disk subagent transcripts
+# =============================================================================
+#
+# extract_subagents (above) is the TOP-DOWN view: it parses the parent
+# transcript's Task/Agent/TaskCreate blocks, so it only ever sees agents whose
+# spawn the parent recorded. A child agent whose dispatch isn't in the parent —
+# notably workflow-orchestrated agents under subagents/workflows/<runId>/ — is
+# invisible to it.
+#
+# collect_agent_files is the BOTTOM-UP counterpart: it walks the filesystem
+# tree where Claude Code stores child transcripts and finds every agent-*.jsonl,
+# orphan or not. discover_subagents reconciles the two. (The walk mirrors the
+# claude-agent-sdk's _collect_agent_files / _resolve_subagents_dir, which we
+# reimplement here rather than vendoring — see _claude_paths.py for why the
+# path-resolution slice was the only part worth carrying.)
+
+
+@dataclass
+class AgentFile:
+    """An on-disk subagent transcript located by the filesystem walk.
+
+    `tool_use_id`/`agent_type`/`description` come from the `.meta.json` sidecar
+    Claude Code writes next to each transcript; older sessions may lack it, in
+    which case those stay empty and correlation falls back to `agent_id`.
+    """
+
+    agent_id: str  # full id, from the agent-<id>.jsonl filename
+    path: Path  # the transcript file
+    workflow_run_id: Optional[str] = None  # runId if under subagents/workflows/<runId>/
+    agent_type: str = ""  # meta.json agentType
+    description: str = ""  # meta.json description
+    tool_use_id: str = ""  # meta.json toolUseId (links back to a parent dispatch)
+
+
+def resolve_subagents_dir(session_path: Path) -> Path:
+    """Map a session transcript path to its subagents directory.
+
+    The session file lives at `<projectDir>/<sessionId>.jsonl` and its child
+    agent transcripts at `<projectDir>/<sessionId>/subagents/`. Resolution is
+    purely relative to where the session file already is, so worktree-pooled
+    sessions resolve correctly without re-deriving the project dir.
+    """
+    return session_path.with_suffix("") / "subagents"
+
+
+def _workflow_run_id(path: Path, base_dir: Path) -> Optional[str]:
+    """Extract the workflow runId from a transcript path, if it's under workflows/."""
+    try:
+        parts = path.relative_to(base_dir).parts
+    except ValueError:
+        parts = path.parts
+    if "workflows" in parts:
+        idx = parts.index("workflows")
+        if idx + 1 < len(parts):
+            return parts[idx + 1]
+    return None
+
+
+def _read_agent_meta(transcript_path: Path) -> dict[str, str]:
+    """Read the `.meta.json` sidecar next to an agent transcript. Empty dict if absent."""
+    meta_path = transcript_path.with_suffix(".meta.json")
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def collect_agent_files(subagents_dir: Path) -> list[AgentFile]:
+    """Recursively collect every `agent-*.jsonl` transcript under a subagents dir.
+
+    Walks nested directories (notably `workflows/<runId>/`) and reads each
+    transcript's `.meta.json` sidecar. Returns AgentFile records sorted by
+    filename for stable ordering. Empty list if the directory doesn't exist.
+    """
+    if not subagents_dir.is_dir():
+        return []
+
+    found: list[AgentFile] = []
+
+    def _walk(current: Path) -> None:
+        try:
+            entries = sorted(current.iterdir(), key=lambda p: p.name)
+        except OSError:
+            return
+        for entry in entries:
+            name = entry.name
+            if entry.is_dir():
+                _walk(entry)
+            elif (
+                entry.is_file()
+                and name.startswith("agent-")
+                and name.endswith(".jsonl")
+            ):
+                agent_id = name[len("agent-") : -len(".jsonl")]
+                meta = _read_agent_meta(entry)
+                found.append(
+                    AgentFile(
+                        agent_id=agent_id,
+                        path=entry,
+                        workflow_run_id=_workflow_run_id(entry, subagents_dir),
+                        agent_type=meta.get("agentType", ""),
+                        description=meta.get("description", ""),
+                        tool_use_id=meta.get("toolUseId", ""),
+                    )
+                )
+
+    _walk(subagents_dir)
+    return found
+
+
+def _attach_transcript_file(info: SubagentInfo, path: Path) -> None:
+    """Point a SubagentInfo at its on-disk transcript (resolved output file)."""
+    info.output_file_resolved = str(path)
+    try:
+        info.output_file_size = path.stat().st_size
+        info.output_file_exists = True
+    except OSError:
+        info.output_file_exists = False
+
+
+def discover_subagents(session_path: Path) -> list[SubagentInfo]:
+    """Full subagent population for a session: parent dispatches + orphan files.
+
+    Reconciles the top-down dispatch graph (extract_subagents) with the
+    bottom-up filesystem walk (collect_agent_files):
+
+      - A dispatch that matches an on-disk transcript (by the sidecar's
+        toolUseId, falling back to agentId) is enriched in place — its agent_id
+        is backfilled if missing, its transcript path resolved, source set to
+        "dispatched".
+      - A transcript with no correlating dispatch becomes a fresh orphan
+        SubagentInfo (source="orphan"); its prompt/result/stats are recovered
+        later from the transcript by scan_output_file_stats.
+      - A dispatch with no on-disk transcript (rejected, never ran, or cleaned
+        up) is kept with source="dispatch_only".
+
+    Dispatched/dispatch_only entries preserve parent transcript order; orphans
+    follow, ordered by filename.
+    """
+    dispatched = extract_subagents(session_path)
+    files = collect_agent_files(resolve_subagents_dir(session_path))
+
+    by_tool_use: dict[str, SubagentInfo] = {}
+    by_agent_id: dict[str, SubagentInfo] = {}
+    for sa in dispatched:
+        if sa.tool_use_id:
+            by_tool_use[sa.tool_use_id.full] = sa
+        if sa.agent_id:
+            by_agent_id[sa.agent_id.full] = sa
+
+    matched: set[int] = set()
+    orphans: list[SubagentInfo] = []
+
+    for af in files:
+        target: Optional[SubagentInfo] = None
+        if af.tool_use_id and af.tool_use_id in by_tool_use:
+            target = by_tool_use[af.tool_use_id]
+        elif af.agent_id in by_agent_id:
+            target = by_agent_id[af.agent_id]
+
+        if target is not None:
+            if not target.agent_id:
+                target.agent_id = PrefixId(af.agent_id)
+            target.workflow_run_id = af.workflow_run_id
+            target.source = "dispatched"
+            _attach_transcript_file(target, af.path)
+            matched.add(id(target))
+        else:
+            info = SubagentInfo(
+                tool_use_id=PrefixId(af.tool_use_id),
+                agent_id=PrefixId(af.agent_id),
+                subagent_type=af.agent_type,
+                description=af.description,
+                workflow_run_id=af.workflow_run_id,
+                source="orphan",
+            )
+            _attach_transcript_file(info, af.path)
+            orphans.append(info)
+
+    for sa in dispatched:
+        if id(sa) not in matched:
+            sa.source = "dispatch_only"
+
+    return dispatched + orphans
+
+
 def _content_as_list(
     content: Union[str, list[ContentItem]],
 ) -> list[ContentItem]:
@@ -316,6 +517,26 @@ def _extract_tool_result_text(
     return ""
 
 
+def _first_user_text(entries: list[TranscriptEntry]) -> str:
+    """First human turn's text — a subagent's spawn prompt, recovered from its transcript."""
+    for entry in entries:
+        if isinstance(entry, HumanEntry):
+            text = extract_text(entry).strip()
+            if text:
+                return text
+    return ""
+
+
+def _last_assistant_text(entries: list[TranscriptEntry]) -> str:
+    """Last assistant turn's text — a subagent's result, recovered from its transcript."""
+    for entry in reversed(entries):
+        if isinstance(entry, AssistantTranscriptEntry):
+            text = extract_text(entry).strip()
+            if text:
+                return text
+    return ""
+
+
 def resolve_output_files(
     subagents: list[SubagentInfo],
     task_output_dir: Optional[Path] = None,
@@ -340,6 +561,12 @@ def resolve_output_files(
             info.output_file_resolved = str(resolved)
             info.output_file_exists = True
             info.output_file_size = resolved.stat().st_size
+            continue
+
+        # If discover_subagents already resolved the on-disk transcript, leave
+        # it — the filesystem walk is the canonical location. task_output_dir
+        # above is the only thing allowed to override it.
+        if info.output_file_resolved:
             continue
 
         # Fall back to original outputFile path
@@ -378,6 +605,14 @@ def scan_output_file_stats(
             continue
 
         info.output_entry_count = len(entries)
+
+        # Recover prompt/result from the transcript when the parent didn't
+        # supply them — orphan agents have no parent-side record at all, and
+        # async dispatches often lack result text until their transcript is read.
+        if not info.prompt:
+            info.prompt = _first_user_text(entries)
+        if not info.result_text:
+            info.result_text = _last_assistant_text(entries)
 
         stats = TranscriptStats.from_entries(entries)
         info.compaction_events = list(stats.compaction_events)
