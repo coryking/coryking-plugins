@@ -58,9 +58,13 @@ class SessionSummary(SparseModel):
     context_tokens: int = Field(description="Last assistant turn's input tokens (context window size).")
     output_tokens: int = Field(description="Total output tokens across all turns.")
     tools: int = Field(description="Total tool_use invocations.")
+    is_current: bool | None = Field(
+        default=None,
+        description="True for the calling conversation itself — the session you are reading this from. Absent for every other session. Use it to skip yourself.",
+    )
 
     @classmethod
-    def from_session_info(cls, s: SessionInfo) -> SessionSummary:
+    def from_session_info(cls, s: SessionInfo, is_current: bool = False) -> SessionSummary:
         return cls(
             session=s.session_id,
             date=s.first_timestamp,
@@ -71,11 +75,12 @@ class SessionSummary(SparseModel):
             context_tokens=s.stats.context_tokens,
             output_tokens=s.stats.output_tokens,
             tools=s.stats.tool_use_count,
+            is_current=is_current or None,
         )
 
 
 # =============================================================================
-# list_project_sessions / list_agent_sessions
+# list_project_sessions
 # =============================================================================
 
 
@@ -86,10 +91,19 @@ class SessionListResponse(SparseModel):
     sessions: list[SessionSummary] = Field(description="Session summaries, most recent first.")
 
     @classmethod
-    def from_sessions(cls, sessions: list[SessionInfo]) -> SessionListResponse:
+    def from_sessions(
+        cls,
+        sessions: list[SessionInfo],
+        current_session: str | None = None,
+    ) -> SessionListResponse:
         return cls(
             total=len(sessions),
-            sessions=[SessionSummary.from_session_info(s) for s in sessions],
+            sessions=[
+                SessionSummary.from_session_info(
+                    s, is_current=current_session is not None and s.session_id == current_session
+                )
+                for s in sessions
+            ],
         )
 
 
@@ -119,11 +133,16 @@ class SearchProjectResponse(SparseModel):
     matches: list[PatternMatch] = Field(
         description="Patterns with hits, sorted by hit count descending. Zero-hit patterns omitted."
     )
+    excluded_current_session: PrefixId | None = Field(
+        default=None,
+        description="The calling conversation was excluded from this search (it would otherwise match itself). Absent when nothing was excluded. Pass include_current_session=true to search it too.",
+    )
 
     @classmethod
     def from_triage(
         cls,
         all_results: PatternTriageResults,
+        excluded_current_session: PrefixId | None = None,
     ) -> SearchProjectResponse:
         matches: list[PatternMatch] = []
 
@@ -149,7 +168,7 @@ class SearchProjectResponse(SparseModel):
             )
 
         matches.sort(key=lambda m: m.hits, reverse=True)
-        return cls(matches=matches)
+        return cls(matches=matches, excluded_current_session=excluded_current_session)
 
 
 # =============================================================================
@@ -534,7 +553,7 @@ class AgentListResponse(SparseModel):
 
 
 # =============================================================================
-# session_tool_audit
+# audit_session_tools
 # =============================================================================
 
 
