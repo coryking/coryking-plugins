@@ -126,11 +126,22 @@ def _parse_agent_spawn(
 
 
 def extract_subagents(transcript_path: Path) -> list[SubagentInfo]:
-    """Parse a session transcript and extract all agent tool spawns with results.
+    """Load a session transcript and extract its agent tool spawns.
 
-    Uses typed transcript entries from load_transcript(). Detects three tool
-    names: Agent (current), Task (older, same shape), and TaskCreate
-    (background task API, different fields).
+    Thin wrapper over extract_subagents_from_entries — call that directly when
+    the transcript is already parsed (e.g. the orientation hot path) to avoid
+    re-reading the file.
+    """
+    return extract_subagents_from_entries(load_transcript(transcript_path))
+
+
+def extract_subagents_from_entries(
+    entries: list[TranscriptEntry],
+) -> list[SubagentInfo]:
+    """Extract all agent tool spawns with results from parsed transcript entries.
+
+    Detects three tool names: Agent (current), Task (older, same shape), and
+    TaskCreate (background task API, different fields).
 
     Handles three result patterns:
     1. Sync completed — toolUseResult dict with status=completed, full stats
@@ -140,8 +151,6 @@ def extract_subagents(transcript_path: Path) -> list[SubagentInfo]:
 
     Returns SubagentInfo list ordered by appearance in the transcript.
     """
-    entries = load_transcript(transcript_path)
-
     spawns: dict[str, SubagentInfo] = {}  # keyed by tool_use_id
     spawn_order: list[str] = []
     # Reverse lookup: agentId -> tool_use_id (for task-notification matching)
@@ -338,7 +347,10 @@ def _attach_transcript_file(info: SubagentInfo, path: Path) -> None:
         info.output_file_exists = False
 
 
-def discover_subagents(session_path: Path) -> list[SubagentInfo]:
+def discover_subagents(
+    session_path: Path,
+    entries: Optional[list[TranscriptEntry]] = None,
+) -> list[SubagentInfo]:
     """Full subagent population for a session: parent dispatches + orphan files.
 
     Reconciles the top-down dispatch graph (extract_subagents) with the
@@ -356,8 +368,15 @@ def discover_subagents(session_path: Path) -> list[SubagentInfo]:
 
     Dispatched/dispatch_only entries preserve parent transcript order; orphans
     follow, ordered by filename.
+
+    Pass `entries` when the parent transcript is already parsed (the orientation
+    hot path) to skip re-reading it; otherwise the session file is loaded.
     """
-    dispatched = extract_subagents(session_path)
+    dispatched = (
+        extract_subagents_from_entries(entries)
+        if entries is not None
+        else extract_subagents(session_path)
+    )
     files = collect_agent_files(resolve_subagents_dir(session_path))
 
     by_tool_use: dict[str, SubagentInfo] = {}
