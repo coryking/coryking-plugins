@@ -34,16 +34,16 @@ class _FakeDir:
 
 
 def _patch(worktree_paths, find_map):
-    """Patch SDK helpers inside the parser module's local import."""
-    import claude_agent_sdk._internal.sessions as sdk
+    """Patch the vendored path helpers that parser.load_conversations imports."""
+    import cc_explorer._claude_paths as paths
 
     return [
-        patch.object(sdk, "_get_worktree_paths", return_value=worktree_paths),
+        patch.object(paths, "_get_worktree_paths", return_value=worktree_paths),
         patch.object(
-            sdk, "_find_project_dir", side_effect=lambda p: find_map.get(p)
+            paths, "_find_project_dir", side_effect=lambda p: find_map.get(p)
         ),
         patch.object(
-            sdk, "_canonicalize_path", side_effect=lambda p: p
+            paths, "_canonicalize_path", side_effect=lambda p: p
         ),
     ]
 

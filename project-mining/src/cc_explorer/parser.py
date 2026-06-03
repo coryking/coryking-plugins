@@ -264,15 +264,17 @@ def load_conversations(project_path: str) -> dict[PrefixId, ConversationRef]:
     into one pool — the main worktree gets `worktree=None`, linked worktrees
     get labeled with their directory basename.
 
-    Uses the Claude Agent SDK for path resolution (handles long-path hash
-    suffixes, Bun/Node hash mismatches, CLAUDE_CONFIG_DIR) and for the
-    `git worktree list --porcelain` shell-out that discovers worktree paths.
+    Path resolution (long-path hash suffixes, Bun/Node hash mismatches,
+    CLAUDE_CONFIG_DIR) and the `git worktree list --porcelain` shell-out that
+    discovers worktree paths come from `_claude_paths`, our vendored copy of
+    the Claude Code CLI's directory-naming logic. See that module's header for
+    provenance and the "check for updates" recipe.
 
     When git is unavailable or `project_path` is not inside a repo, falls
     back to scanning the single project directory (all sessions get
     `worktree=None`).
     """
-    from claude_agent_sdk._internal.sessions import (
+    from cc_explorer._claude_paths import (
         _canonicalize_path,
         _find_project_dir,
         _get_worktree_paths,
