@@ -399,6 +399,13 @@ class AgentSummary(SparseModel):
 
     agent_id: PrefixId = Field(description="Agent identifier.")
     tool_use_id: PrefixId = Field(description="Tool use ID that spawned this agent.")
+    source: str = Field(
+        description="Whether this agent's record is complete and how it relates to the conversation. 'dispatched' — the conversation requested it and its full run is available. 'dispatch_only' — the conversation requested it but no run is available (rejected, never started, or no longer kept), so result/stats/trace will be missing. 'orphan' — it ran with a full record but the conversation didn't request it directly, typically because a workflow spawned it."
+    )
+    workflow_run_id: str | None = Field(
+        default=None,
+        description="The workflow run this agent belongs to; null if it wasn't spawned by a workflow. Agents sharing a value ran in the same workflow.",
+    )
     date: datetime | None = Field(default=None, description="Timestamp when agent was spawned.")
     type: str = Field(description="Subagent type (e.g. 'general-purpose', 'Explore').")
     status: str = Field(description="Agent status: completed, error, async_launched, unknown.")
@@ -413,6 +420,8 @@ class AgentSummary(SparseModel):
         return cls(
             agent_id=sa.agent_id,
             tool_use_id=sa.tool_use_id,
+            source=sa.source,
+            workflow_run_id=sa.workflow_run_id,
             date=sa.timestamp,
             type=sa.subagent_type or "",
             status=sa.status,
@@ -479,6 +488,13 @@ class AgentDetailResponse(SparseModel):
     title: str | None = Field(default=None, description="Session title.")
     agent_id: PrefixId = Field(description="Agent identifier.")
     tool_use_id: PrefixId = Field(description="Tool use ID that spawned this agent.")
+    source: str = Field(
+        description="Whether this agent's record is complete and how it relates to the conversation. 'dispatched' — the conversation requested it and its full run is available. 'dispatch_only' — the conversation requested it but no run is available (rejected, never started, or no longer kept), so result/stats/trace will be missing. 'orphan' — it ran with a full record but the conversation didn't request it directly, typically because a workflow spawned it."
+    )
+    workflow_run_id: str | None = Field(
+        default=None,
+        description="The workflow run this agent belongs to; null if it wasn't spawned by a workflow. Agents sharing a value ran in the same workflow.",
+    )
     type: str = Field(description="Subagent type.")
     status: str = Field(description="Agent status.")
     date_started: datetime | None = Field(default=None, description="Timestamp when agent was spawned.")
@@ -531,6 +547,8 @@ class AgentDetailResponse(SparseModel):
             title=found_session.title,
             agent_id=found.agent_id,
             tool_use_id=found.tool_use_id,
+            source=found.source,
+            workflow_run_id=found.workflow_run_id,
             type=found.subagent_type or "",
             status=found.status,
             date_started=found.timestamp,
@@ -571,6 +589,13 @@ class AgentToolAudit(SparseModel):
     """Per-agent tool usage audit: counts, error rate, full chronological trace."""
 
     agent_id: PrefixId = Field(description="Agent identifier.")
+    source: str = Field(
+        description="Whether this agent's record is complete and how it relates to the conversation. 'dispatched' — the conversation requested it and its full run is available. 'dispatch_only' — the conversation requested it but no run is available (rejected, never started, or no longer kept), so result/stats/trace will be missing. 'orphan' — it ran with a full record but the conversation didn't request it directly, typically because a workflow spawned it."
+    )
+    workflow_run_id: str | None = Field(
+        default=None,
+        description="The workflow run this agent belongs to; null if it wasn't spawned by a workflow. Agents sharing a value ran in the same workflow.",
+    )
     type: str = Field(description="Subagent type.")
     description: str = Field(description="Short description passed to the agent.")
     tool_call_count: int = Field(description="Total tool invocations made by this agent.")
@@ -597,11 +622,11 @@ class SessionToolAuditResponse(SparseModel):
         description="Git worktree name this session lived in, if not the main one.",
     )
     title: str | None = Field(default=None, description="Session title.")
-    total_dispatched: int = Field(
-        description="Number of subagents the session spawned, regardless of whether their output files were accessible. This is the truth about how much fan-out happened."
+    total_present: int = Field(
+        description="How many subagents the session ran in total, including any spawned by workflows. The real measure of fan-out."
     )
     total_audited: int = Field(
-        description="Number of subagents this audit could actually inspect — the subset of dispatched agents whose .output files were readable. When this is less than total_dispatched, work was skipped and the agents list reflects only the audited subset."
+        description="How many of those agents could be inspected. When this is less than total_present, the difference is agents that left no inspectable record (rejected, never ran, or unreadable) — they are absent from `agents`."
     )
     total_tool_calls: int = Field(description="Aggregate tool calls across all audited agents.")
     total_errors: int = Field(description="Aggregate error/no-match results across all audited agents.")

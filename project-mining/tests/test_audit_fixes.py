@@ -25,14 +25,14 @@ What's pinned and why:
     When *every* prefix fails to resolve, the tool raises ToolError
     instead, since there's nothing useful to return.
 
-  TestSessionToolAuditResponseHasDispatchVsAuditedCounts
+  TestSessionToolAuditResponseHasPresentVsAuditedCounts
   TestSessionToolAuditCountsReflectSkippedAgents
-    audit_session_tools can only audit subagents whose .output files are
-    accessible. The response has to expose both `total_dispatched` (every
-    subagent the session spawned) and `total_audited` (the subset whose
-    output files were readable), so callers can see when work was skipped.
-    A single `total_agents` field would be ambiguous and would hide the
-    gap.
+    audit_session_tools can only audit subagents whose transcript is
+    readable. The response has to expose both `total_present` (every
+    subagent discovered — dispatched plus orphan transcripts on disk) and
+    `total_audited` (the subset whose transcript was readable), so callers
+    can see when work was skipped. A single `total_agents` field would be
+    ambiguous and would hide the gap.
 
   TestGrepSessionsPreservesInputOrder
   TestGrepSessionsOmitsZeroHitSessions
@@ -224,29 +224,32 @@ class TestGrepSessionsSurfacesUnresolvedPrefixes:
 # agent. Not every spawned subagent has a readable output file — some get
 # skipped. The response exposes two separate counts so the caller can see
 # the gap:
-#   - total_dispatched: every subagent the session spawned
-#   - total_audited:    the subset whose output files were accessible
-# A single ambiguous `total_agents` field (was it dispatched? was it
+#   - total_present:  every subagent discovered (dispatched + orphan transcripts)
+#   - total_audited:  the subset whose transcript was readable
+# A single ambiguous `total_agents` field (was it present? was it
 # audited?) would hide the skipped work entirely, so the response model
 # must carry both — and the ambiguous name must not be present.
 
 
-class TestSessionToolAuditResponseHasDispatchVsAuditedCounts:
-    def test_response_model_has_total_dispatched_and_total_audited(self):
+class TestSessionToolAuditResponseHasPresentVsAuditedCounts:
+    def test_response_model_has_total_present_and_total_audited(self):
         from cc_explorer.responses import SessionToolAuditResponse
 
         fields = SessionToolAuditResponse.model_fields
-        assert "total_dispatched" in fields, (
-            "Need total_dispatched: number of subagents the session spawned, "
-            "regardless of whether their output files were accessible."
+        assert "total_present" in fields, (
+            "Need total_present: every subagent discovered for the session — "
+            "parent-dispatched plus orphan transcripts found on disk."
         )
         assert "total_audited" in fields, (
-            "Rename total_agents -> total_audited so it's clear it's the "
-            "subset with accessible output files."
+            "total_audited: the subset whose transcript was readable."
+        )
+        assert "total_dispatched" not in fields, (
+            "total_dispatched was renamed to total_present once discovery became "
+            "bottom-up: orphan transcripts are present without being dispatched. "
+            "Toolbox, not product — no backwards-compat shim."
         )
         assert "total_agents" not in fields, (
-            "Drop total_agents — its meaning was ambiguous (audited or dispatched?). "
-            "Toolbox, not product — no backwards-compat shim."
+            "Drop total_agents — its meaning was ambiguous (audited or present?)."
         )
 
 
@@ -299,7 +302,7 @@ class TestSessionToolAuditCountsReflectSkippedAgents:
             return [], {}, 0
 
         with patch("cc_explorer.mcp_server.load_sessions", return_value=sessions), \
-             patch("cc_explorer.mcp_server.extract_subagents", return_value=all_agents), \
+             patch("cc_explorer.mcp_server.discover_subagents", return_value=all_agents), \
              patch("cc_explorer.mcp_server.resolve_output_files", side_effect=fake_resolve), \
              patch("cc_explorer.mcp_server.scan_output_file_stats", side_effect=fake_scan), \
              patch(
@@ -308,8 +311,8 @@ class TestSessionToolAuditCountsReflectSkippedAgents:
              ):
             resp = audit_session_tools(session="aaaaaaaa", project="/tmp/fake")
 
-        assert resp.total_dispatched == 3, (
-            f"3 agents were spawned, got total_dispatched={resp.total_dispatched}"
+        assert resp.total_present == 3, (
+            f"3 agents were present, got total_present={resp.total_present}"
         )
         assert resp.total_audited == 1, (
             f"only 1 had an accessible output file, got total_audited={resp.total_audited}"
@@ -317,9 +320,9 @@ class TestSessionToolAuditCountsReflectSkippedAgents:
         assert len(resp.agents) == 1
 
     def test_zero_audited_returns_response_not_raises(self):
-        """When dispatched > 0 but every output file is missing, the tool
+        """When present > 0 but every transcript is missing, the tool
         returns the response with empty agents — it does NOT raise. The
-        total_dispatched > 0 / total_audited == 0 asymmetry is exactly the
+        total_present > 0 / total_audited == 0 asymmetry is exactly the
         signal these new fields exist to surface; raising would hide it.
         """
         from cc_explorer.mcp_server import audit_session_tools
@@ -345,12 +348,12 @@ class TestSessionToolAuditCountsReflectSkippedAgents:
         ]
 
         with patch("cc_explorer.mcp_server.load_sessions", return_value=sessions), \
-             patch("cc_explorer.mcp_server.extract_subagents", return_value=all_agents), \
+             patch("cc_explorer.mcp_server.discover_subagents", return_value=all_agents), \
              patch("cc_explorer.mcp_server.resolve_output_files", side_effect=lambda *a, **k: None), \
              patch("cc_explorer.mcp_server.scan_output_file_stats", return_value={}):
             resp = audit_session_tools(session="aaaaaaaa", project="/tmp/fake")
 
-        assert resp.total_dispatched == 2
+        assert resp.total_present == 2
         assert resp.total_audited == 0
         assert resp.agents == []
 
