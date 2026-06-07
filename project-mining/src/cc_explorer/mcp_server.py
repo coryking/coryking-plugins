@@ -17,6 +17,7 @@ from pydantic import Field
 
 from .formatting import matches_id
 from .models import parse_hide
+from .parser import load_conversations
 from .utils import PrefixId
 from .responses import (
     AgentDetailResponse,
@@ -26,8 +27,9 @@ from .responses import (
     BrowseSessionResponse,
     GrepSessionResponse,
     GrepSessionsResponse,
+    ProjectListResponse,
     ReadTurnResponse,
-    SearchProjectResponse,
+    SearchProjectsResponse,
     SessionAgentsResponse,
     SessionListResponse,
     SessionToolAuditResponse,
@@ -38,10 +40,13 @@ from .search import (
     SessionInfo,
     browse_session_turns,
     conversation_types_for,
+    discover_projects,
     get_turn_context,
     load_sessions,
     resolve_project,
+    resolve_projects,
     search_multi,
+    sort_sessions_newest_first,
     triage_multi,
 )
 from .subagents import (
@@ -54,14 +59,20 @@ from .subagents import (
 _INSTRUCTIONS = """\
 cc-explorer explores Claude Code chat history — your past conversations and the
 subagents they spawned — stored as per-project JSONL transcripts. All tools are
-read-only and scoped to one project (CWD by default; pass `project` to target
-another). There are two lenses:
+read-only. Projects are selected with `projects` (paths or bare names; git
+worktrees are flattened into one project). Omit `projects` to search across ALL
+projects — the recall path when you remember a conversation but not where it
+happened. The search corpus is complete: it includes subagent bodies, not just
+the main transcript, so an agent's own tool calls / thinking are searchable too
+(matches name the `agent` they came from).
 
 1. Conversations — find and read what was discussed.
-   Orient with list_project_sessions (like `ls` on the history), scan for terms
-   across sessions with search_project (which session is hot), then zoom in:
-   grep_session / grep_sessions for matches-in-context, read_turn /
-   browse_session to read at full fidelity.
+   When you don't know the project, start with search_projects (omit `projects`)
+   to find which project/session a phrase lives in, or list_projects to see what
+   exists. Within a project, orient with list_project_sessions (like `ls`), then
+   zoom in: grep_session / grep_sessions for matches-in-context, read_turn /
+   browse_session to read at full fidelity. Every result carries its `project`,
+   so pass that back to scope follow-ups.
 
 2. Agent forensics — see what a session's subagents actually did.
    Start from list_project_sessions(min_agents=1) to find sessions that spawned
@@ -74,6 +85,101 @@ another). There are two lenses:
 mcp = FastMCP("cc-explorer", instructions=_INSTRUCTIONS)
 
 _TOOL_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": False}
+
+
+# Shared param: which projects to look in. Omit ⇒ ALL projects (cross-project) for
+# the search/locate tools; list_project_sessions overrides this to default to CWD
+# so it doesn't dump every session on disk.
+ProjectsParam = Annotated[
+    list[str] | None,
+    Field(
+        description=(
+            "Projects to look in — each a path or a bare name (bare → ~/projects/<name>); "
+            "worktrees are flattened into their repo automatically. Omit to look across ALL "
+            "projects (cross-project recall). Pass the `project` value from a search/list "
+            "result to scope to one."
+        )
+    ),
+]
+
+
+def _load_all_sessions(
+    projects: list[str] | None,
+    *,
+    with_agents_present: bool = False,
+) -> tuple[list[SessionInfo], list[str]]:
+    """Load sessions across the selected projects (omit/empty ⇒ all projects).
+
+    Returns (sessions, resolved_project_paths), sessions pooled across every
+    resolved project, de-duplicated by session_id, and re-sorted newest-first.
+    Worktrees are already flattened within each project by
+    load_sessions/load_conversations; the dedup additionally guards the case
+    where an explicit `projects` list names two worktrees of the same repo (each
+    would otherwise re-pool the repo's whole session set) or the same session
+    UUID appears under two project dirs. Each SessionInfo carries its
+    project_path, so downstream responses can name where a hit lives.
+    """
+    proj_paths = resolve_projects(projects)
+    sessions: list[SessionInfo] = []
+    seen: set[str] = set()
+    for p in proj_paths:
+        for s in load_sessions(p, with_agents_present=with_agents_present):
+            key = s.session_id.full
+            if key in seen:
+                continue
+            seen.add(key)
+            sessions.append(s)
+    sort_sessions_newest_first(sessions)
+    return sessions, proj_paths
+
+
+def _projects_for_sessions(
+    session_prefixes: list[str], projects: list[str] | None
+) -> list[str]:
+    """Narrow to the project(s) that actually contain the given session id(s).
+
+    For session-keyed tools: when `projects` is given, use it verbatim. When it's
+    omitted (the cross-project default), locate the holding project(s) cheaply via
+    `load_conversations` — which discovers transcript *files* by name only, with
+    NO transcript parsing — instead of parsing every transcript in every project
+    just to filter down to one session afterward.
+
+    Returns the project paths to load. Empty when nothing matches (the caller
+    raises a "no session" error rather than re-expanding to all projects).
+    """
+    if projects:
+        return resolve_projects(projects)
+
+    wanted = [PrefixId(s) for s in session_prefixes]
+    matched: list[str] = []
+    for proj in resolve_projects(None):
+        refs = load_conversations(proj)
+        if any(sid == w for sid in refs for w in wanted):
+            matched.append(proj)
+    return matched
+
+
+def _resolve_unique_session(
+    all_sessions: list[SessionInfo], session: str
+) -> SessionInfo:
+    """Resolve a session id/prefix to exactly one SessionInfo, or raise.
+
+    Prefix matching across the whole corpus can be ambiguous (an 8-char prefix
+    may match more than one full session id). Rather than silently picking the
+    first/newest, surface the collision so the caller can disambiguate with a
+    longer id or an explicit `projects` scope.
+    """
+    matches = [s for s in all_sessions if PrefixId(s.session_id) == session]
+    if not matches:
+        raise ToolError(f"No session matching: {session}")
+    distinct = {s.session_id.full for s in matches}
+    if len(distinct) > 1:
+        where = ", ".join(sorted({s.project_path or "?" for s in matches}))
+        raise ToolError(
+            f"Session prefix {session!r} is ambiguous — it matches {len(distinct)} "
+            f"distinct sessions (in: {where}). Pass a longer id or scope with `projects`."
+        )
+    return matches[0]
 
 
 def _filter_by_date(
@@ -175,11 +281,28 @@ def _validate_turn_id(turn: str) -> None:
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
+def list_projects() -> ProjectListResponse:
+    """List every project cc-explorer can see, one row per repo (worktrees flattened).
+
+    The cross-project orientation step — like `ls` over `~/.claude/projects`, but
+    de-duplicated so a repo with many git worktrees shows up once, keyed by its
+    real path. Each row has the project path (pass it to the `projects` param of
+    any other tool), a session count, and last-active time, sorted most-recent
+    first. Use this when you're not sure which project holds a conversation, then
+    search_projects to find the phrase or list_project_sessions to drill in.
+    """
+    projects = discover_projects()
+    if not projects:
+        raise ToolError("No projects found under ~/.claude/projects")
+    return ProjectListResponse.from_projects(projects)
+
+
+@mcp.tool(annotations=_TOOL_ANNOTATIONS)
 def list_project_sessions(
-    project: Annotated[
-        str | None,
+    projects: Annotated[
+        list[str] | None,
         Field(
-            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
+            description="Projects to list sessions for — paths or bare names (worktrees flattened). Omit for the CURRENT project (CWD); pass projects to list those instead. (To enumerate projects themselves, use list_projects.)"
         ),
     ] = None,
     min_messages: Annotated[
@@ -207,12 +330,14 @@ def list_project_sessions(
 ) -> SessionListResponse:
     """List conversations in a project with stats: dates, message counts, human prompts, token usage, tool calls, agent dispatches.
 
-    This is the orientation step — like `ls -la` on the project's chat history. Use it to see what exists before searching. Each row carries two agent counts: `agents` (dispatched directly) and `agents_present` (the full population including workflow orphans) — a gap between them means the session orchestrated workflows. `user_turns` (human prompts) against a high message/agent count flags a single prompt that fanned out into a long autonomous run. Pass min_agents=1 to narrow to sessions that ran subagents — the starting point for agent forensics (then drill in with list_session_agents / get_agent_detail / audit_session_tools). The calling conversation, if present, is kept but flagged `is_current: true` so you can tell which row is the session you're in.
+    This is the orientation step — like `ls -la` on the project's chat history. Use it to see what exists before searching. Each row carries its `project` plus two agent counts: `agents` (dispatched directly) and `agents_present` (the full population including workflow orphans) — a gap between them means the session orchestrated workflows. `user_turns` (human prompts) against a high message/agent count flags a single prompt that fanned out into a long autonomous run. Pass min_agents=1 to narrow to sessions that ran subagents — the starting point for agent forensics (then drill in with list_session_agents / get_agent_detail / audit_session_tools). The calling conversation, if present, is kept but flagged `is_current: true` so you can tell which row is the session you're in.
+
+    Defaults to the CURRENT project (CWD). Pass `projects` to list one or more named projects instead; to enumerate the projects themselves use list_projects, and to find a conversation when you don't know its project use search_projects.
     """
-    proj = resolve_project(project)
-    sessions = load_sessions(proj, with_agents_present=True)
+    proj_sel = projects if projects else [resolve_project(None)]
+    sessions, _ = _load_all_sessions(proj_sel, with_agents_present=True)
     if not sessions:
-        raise ToolError(f"No conversations found for {proj}")
+        raise ToolError(f"No conversations found for {', '.join(proj_sel)}")
 
     sessions = [s for s in sessions if s.message_count >= min_messages]
     sessions = [s for s in sessions if s.stats.tool_use_count >= min_tools]
@@ -226,19 +351,14 @@ def list_project_sessions(
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
-def search_project(
+def search_projects(
     patterns: Annotated[
         list[str],
         Field(
             description="Regex patterns to scan for (case-insensitive). Results grouped by pattern, sorted by hit count."
         ),
     ],
-    project: Annotated[
-        str | None,
-        Field(
-            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
-        ),
-    ] = None,
+    projects: ProjectsParam = None,
     role: Annotated[
         ConversationRole,
         Field(
@@ -263,17 +383,18 @@ def search_project(
             description="Include the calling conversation itself. Default False — the live session that invoked this search is excluded so it can't return itself as a (useless) hit. Set True to search across it too."
         ),
     ] = False,
-) -> SearchProjectResponse:
-    """Scan a project's chat history for patterns, grouped by pattern with per-pattern hit counts and session breakdowns.
+) -> SearchProjectsResponse:
+    """Scan chat history across one or many projects for patterns, grouped by pattern with hit counts and per-project/session breakdowns.
 
-    Search is exhaustive by default: every pattern is checked against conversation text, tool inputs (Bash commands, file paths, grep patterns), tool outputs, and assistant thinking. The pattern is the precision tool — use tight regex to narrow noisy searches instead of a scope flag.
+    This is the cross-project recall surface: omit `projects` to search EVERY project at once when you remember a conversation but not where it happened. Each example hit names the `project` (and the `agent`, if the hit was inside a subagent body) so you can switch to that project and drill in. Pass `projects` to scope to specific ones.
 
-    Pass all your candidate search terms at once — each gets its own hit count and session list so you can see which terms are useful and which aren't. Use separate patterns rather than regex OR pipes (e.g. ["facebook.*scrape", "fb_capture"] not "facebook.*scrape|fb_capture") to get this per-term breakdown. Results are sorted by hit count (hottest patterns and sessions first) and include session dates for chronological context. Follow up with grep_session on sessions that look promising.
+    Search is exhaustive by default and spans the whole corpus: conversation text, tool inputs (Bash commands, file paths, grep patterns), tool outputs, assistant thinking — and subagent transcripts, not just the main session. The pattern is the precision tool — use tight regex to narrow noisy searches.
+
+    Pass all your candidate search terms at once — each gets its own hit count and breakdown so you can see which terms are useful. Use separate patterns rather than regex OR pipes (e.g. ["facebook.*scrape", "fb_capture"] not "facebook.*scrape|fb_capture"). Results are sorted by hit count (hottest first). Follow up with grep_session (scoped to the returned project) or get_agent_detail (for an `agent` hit).
     """
-    proj = resolve_project(project)
-    sessions = load_sessions(proj)
+    sessions, proj_paths = _load_all_sessions(projects)
     if not sessions:
-        raise ToolError(f"No conversations found for {proj}")
+        raise ToolError(f"No conversations found for: {', '.join(proj_paths) or '(no projects)'}")
 
     sessions = _filter_by_date(sessions, after, before)
     sessions, excluded = _exclude_current_session(sessions, include_current_session)
@@ -294,12 +415,16 @@ def search_project(
     # Check if anything matched
     if not any(r for _, results in all_results for r in results):
         raise ToolError(
-            f"No matches for: {', '.join(patterns)}. Patterns are case-insensitive "
-            f"regex — try shorter or broader terms, set role='all' to search both "
-            f"sides, or widen the date range."
+            f"No matches for: {', '.join(patterns)} across {len(proj_paths)} project(s). "
+            f"Patterns are case-insensitive regex — try shorter or broader terms, set "
+            f"role='all' to search both sides, or widen the date range."
         )
 
-    return SearchProjectResponse.from_triage(all_results, excluded_current_session=excluded)
+    return SearchProjectsResponse.from_triage(
+        all_results,
+        projects_searched=len(proj_paths),
+        excluded_current_session=excluded,
+    )
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -307,7 +432,7 @@ def grep_session(
     session: Annotated[
         str,
         Field(
-            description="Session ID or prefix. Required — use search_project to find session IDs first."
+            description="Session ID or prefix. Required — use search_projects to find session IDs first."
         ),
     ],
     patterns: Annotated[
@@ -316,12 +441,7 @@ def grep_session(
             description="Regex patterns to search for (case-insensitive). Each gets its own hit count and match list. Use separate patterns rather than `|`-OR (e.g. ['fb_capture', 'facebook.*scrape'] not 'fb_capture|facebook.*scrape') so you can see which terms land and which are dead weight."
         ),
     ],
-    project: Annotated[
-        str | None,
-        Field(
-            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
-        ),
-    ] = None,
+    projects: ProjectsParam = None,
     context: Annotated[
         int,
         Field(
@@ -367,29 +487,25 @@ def grep_session(
         raise ToolError("patterns must contain at least one pattern")
 
     hide_set = _parse_hide_or_raise(hide)
-    proj = resolve_project(project)
-    sessions = load_sessions(proj)
-    if not sessions:
-        raise ToolError(f"No conversations found for {proj}")
-
-    # Filter to the target session
-    sessions = [s for s in sessions if PrefixId(s.session_id) == session]
-    if not sessions:
+    narrowed = _projects_for_sessions([session], projects)
+    if not narrowed:
         raise ToolError(f"No session matching: {session}")
+    all_sessions, _ = _load_all_sessions(narrowed)
+    target = _resolve_unique_session(all_sessions, session)
 
     base_types = ENTRY_TYPE_MAP[role]
 
     # Single-pass over the session's entries — search_multi checks every
     # pattern per entry instead of re-walking the transcript per pattern.
     multi_results = search_multi(
-        sessions,
+        [target],
         patterns,
         base_types=base_types,
         context=context,
         max_results_per_pattern=limit,
         hide=hide_set,
     )
-    pattern_results = multi_results[sessions[0].session_id]
+    pattern_results = multi_results[target.session_id]
 
     if not any(matches for _, matches, _ in pattern_results):
         raise ToolError(
@@ -399,11 +515,12 @@ def grep_session(
         )
 
     return GrepSessionResponse.from_pattern_results(
-        session_id=sessions[0].session_id,
+        session_id=target.session_id,
         results=pattern_results,
         truncate=truncate,
         hide=hide_set,
-        worktree=sessions[0].worktree,
+        worktree=target.worktree,
+        project=target.project_path,
     )
 
 
@@ -412,7 +529,7 @@ def grep_sessions(
     sessions: Annotated[
         list[str],
         Field(
-            description="Session IDs or prefixes to search. Required — use search_project to find which sessions are hot, then fan out across them in one call instead of looping grep_session."
+            description="Session IDs or prefixes to search. Required — use search_projects to find which sessions are hot, then fan out across them in one call instead of looping grep_session."
         ),
     ],
     patterns: Annotated[
@@ -421,12 +538,7 @@ def grep_sessions(
             description="Regex patterns to search for (case-insensitive). Each gets its own hit count and match list per session. Use separate patterns rather than `|`-OR so you can see which terms land."
         ),
     ],
-    project: Annotated[
-        str | None,
-        Field(
-            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
-        ),
-    ] = None,
+    projects: ProjectsParam = None,
     context: Annotated[
         int,
         Field(
@@ -462,7 +574,7 @@ def grep_sessions(
 ) -> GrepSessionsResponse:
     """Fan out grep across multiple sessions in one call.
 
-    Use this when you've already identified your hot sessions (via `search_project`) and want context blocks across all of them for the same patterns. One call replaces N `grep_session` calls.
+    Use this when you've already identified your hot sessions (via `search_projects`) and want context blocks across all of them for the same patterns. One call replaces N `grep_session` calls.
 
     Returns one entry per session that had at least one match (zero-hit sessions are omitted). Each entry has the same shape as `grep_session` output: per-pattern hit counts and match blocks with surrounding context. Sort order preserves the order of `sessions`.
     """
@@ -472,20 +584,27 @@ def grep_sessions(
         raise ToolError("patterns must contain at least one pattern")
 
     hide_set = _parse_hide_or_raise(hide)
-    proj = resolve_project(project)
-    all_sessions = load_sessions(proj)
-    if not all_sessions:
-        raise ToolError(f"No conversations found for {proj}")
+    narrowed = _projects_for_sessions(sessions, projects)
+    all_sessions, _ = _load_all_sessions(narrowed) if narrowed else ([], [])
 
-    # Resolve each session prefix to a SessionInfo, preserving input order
+    # Resolve each session prefix to a SessionInfo, preserving input order.
+    # Ambiguous prefixes (matching >1 distinct session across the corpus) raise
+    # rather than silently picking one; clean misses go to not_found.
     resolved: list = []
     not_found: list[str] = []
     for sid in sessions:
-        match = next((s for s in all_sessions if PrefixId(s.session_id) == sid), None)
-        if match is None:
+        matches = [s for s in all_sessions if PrefixId(s.session_id) == sid]
+        distinct = {s.session_id.full for s in matches}
+        if not matches:
             not_found.append(sid)
+        elif len(distinct) > 1:
+            where = ", ".join(sorted({s.project_path or "?" for s in matches}))
+            raise ToolError(
+                f"Session prefix {sid!r} is ambiguous — it matches {len(distinct)} "
+                f"distinct sessions (in: {where}). Pass a longer id or scope with `projects`."
+            )
         else:
-            resolved.append(match)
+            resolved.append(matches[0])
 
     # All-prefix-failure is handled together with all-pattern-failure below,
     # so the caller gets one consistent error path.
@@ -514,6 +633,7 @@ def grep_sessions(
                 truncate=truncate,
                 hide=hide_set,
                 worktree=sess.worktree,
+                project=sess.project_path,
             )
         )
 
@@ -556,12 +676,7 @@ def read_turn(
             description="Session ID or prefix. Optional — turn UUIDs are globally unique, but pass this to narrow the search explicitly.",
         ),
     ] = None,
-    project: Annotated[
-        str | None,
-        Field(
-            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
-        ),
-    ] = None,
+    projects: ProjectsParam = None,
     context: Annotated[
         int,
         Field(
@@ -591,26 +706,32 @@ def read_turn(
     """
     _validate_turn_id(turn)
     hide_set = _parse_hide_or_raise(hide)
-    proj = resolve_project(project)
-    sessions = load_sessions(proj)
-    if not sessions:
-        raise ToolError(f"No conversations found for {proj}")
 
     target_session_id: str | None = None
     if session:
-        target = [s for s in sessions if PrefixId(s.session_id) == session]
-        if not target:
+        # Session known → narrow to the holding project(s) and resolve uniquely.
+        narrowed = _projects_for_sessions([session], projects)
+        if not narrowed:
             raise ToolError(f"No session matching: {session}")
-        target_session_id = target[0].session_id
+        sessions, _ = _load_all_sessions(narrowed)
+        target = _resolve_unique_session(sessions, session)
+        target_session_id = target.session_id
+    else:
+        # Only a turn id (globally unique) → scan the selected projects' corpus.
+        sessions, _ = _load_all_sessions(projects)
+        if not sessions:
+            raise ToolError("No conversations found")
 
-    session_info, entries = get_turn_context(
+    session_info, entries, agent_id = get_turn_context(
         sessions, turn, context, hide=hide_set, session_id=target_session_id
     )
 
     if not entries:
         raise ToolError(f"Turn {turn} not found")
 
-    return ReadTurnResponse.from_entries(session_info, turn, entries, truncate=truncate, hide=hide_set)
+    return ReadTurnResponse.from_entries(
+        session_info, turn, entries, truncate=truncate, hide=hide_set, agent_id=agent_id
+    )
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -621,12 +742,7 @@ def browse_session(
             description="Session ID or prefix. Use list_project_sessions to find session IDs."
         ),
     ],
-    project: Annotated[
-        str | None,
-        Field(
-            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
-        ),
-    ] = None,
+    projects: ProjectsParam = None,
     position: Annotated[
         str,
         Field(
@@ -676,20 +792,17 @@ def browse_session(
     if position not in ("head", "tail"):
         raise ToolError(f"position must be 'head' or 'tail', got: {position!r}")
 
-    proj = resolve_project(project)
-    sessions = load_sessions(proj)
-    if not sessions:
-        raise ToolError(f"No conversations found for {proj}")
-
-    target = [s for s in sessions if PrefixId(s.session_id) == session]
-    if not target:
+    narrowed = _projects_for_sessions([session], projects)
+    if not narrowed:
         raise ToolError(f"No session matching: {session}")
+    sessions, _ = _load_all_sessions(narrowed)
+    target = _resolve_unique_session(sessions, session)
 
     base_types = ENTRY_TYPE_MAP[role]
     entry_types = conversation_types_for(hide_set, base_types)
 
     entries, total = browse_session_turns(
-        target[0], position, turns, anchor_turn=turn, entry_types=entry_types
+        target, position, turns, anchor_turn=turn, entry_types=entry_types
     )
 
     if not entries:
@@ -698,14 +811,15 @@ def browse_session(
         raise ToolError(f"Session {session} has no conversation turns")
 
     return BrowseSessionResponse.from_entries(
-        session_id=target[0].session_id,
+        session_id=target.session_id,
         position=position,
         entries=entries,
         total=total,
         truncate=truncate,
         anchor=turn,
         hide=hide_set,
-        worktree=target[0].worktree,
+        worktree=target.worktree,
+        project=target.project_path,
     )
 
 
@@ -717,12 +831,7 @@ def browse_session(
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
 def list_session_agents(
     session: Annotated[str, Field(description="Session ID or prefix to inspect.")],
-    project: Annotated[
-        str | None,
-        Field(
-            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
-        ),
-    ] = None,
+    projects: ProjectsParam = None,
     task_output_dir: Annotated[
         str | None,
         Field(description="Directory containing saved .output files."),
@@ -734,19 +843,11 @@ def list_session_agents(
 
     Use when you want to see a session's fan-out before drilling in: which agents ran, which errored, which burned the most tokens. Step two of agent forensics — get a session id from list_project_sessions(min_agents=1), then from here pass an agent_id to get_agent_detail for the full prompt/result/trace, or audit the whole session's tool usage with audit_session_tools.
     """
-    proj = resolve_project(project)
-    sessions = load_sessions(proj)
-    if not sessions:
-        raise ToolError(f"No conversations found for {proj}")
-
-    target = None
-    for s in sessions:
-        if PrefixId(s.session_id) == session:
-            target = s
-            break
-
-    if not target:
+    narrowed = _projects_for_sessions([session], projects)
+    if not narrowed:
         raise ToolError(f"Session {session} not found")
+    sessions, _ = _load_all_sessions(narrowed)
+    target = _resolve_unique_session(sessions, session)
 
     agents = discover_subagents(target.path)
 
@@ -763,12 +864,7 @@ def get_agent_detail(
         list[str],
         Field(description="Agent ID(s) or prefixes to inspect."),
     ],
-    project: Annotated[
-        str | None,
-        Field(
-            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
-        ),
-    ] = None,
+    projects: ProjectsParam = None,
     session: Annotated[
         str | None,
         Field(description="Session ID prefix to narrow the search."),
@@ -798,15 +894,19 @@ def get_agent_detail(
 
     Use when you need what an agent was actually told and how it reached its answer — debugging why an agent went off the rails, recovering a result that scrolled out of context, or comparing what several parallel agents concluded. For a session-wide view of whether agents used their tools correctly (rather than one agent's full transcript), use audit_session_tools instead.
     """
-    proj = resolve_project(project)
-    sessions = load_sessions(proj)
-    if not sessions:
-        raise ToolError(f"No conversations found for {proj}")
-
     if session:
-        sessions = [s for s in sessions if PrefixId(s.session_id) == session]
-        if not sessions:
+        # Session known → narrow to its project(s) and resolve uniquely, so we
+        # don't parse the whole corpus to find one agent.
+        narrowed = _projects_for_sessions([session], projects)
+        if not narrowed:
             raise ToolError(f"Session {session} not found")
+        loaded, _ = _load_all_sessions(narrowed)
+        sessions = [_resolve_unique_session(loaded, session)]
+    else:
+        # Agent id only → scan the selected projects for the matching agent.
+        sessions, _ = _load_all_sessions(projects)
+        if not sessions:
+            raise ToolError("No conversations found")
 
     output_dir = Path(task_output_dir).expanduser() if task_output_dir else None
 
@@ -856,12 +956,7 @@ def audit_session_tools(
         str,
         Field(description="Session ID or prefix to audit."),
     ],
-    project: Annotated[
-        str | None,
-        Field(
-            description="Project path, bare name (expands to ~/projects/<name>), or omit for CWD."
-        ),
-    ] = None,
+    projects: ProjectsParam = None,
     tool_name_filter: Annotated[
         str | None,
         Field(
@@ -886,14 +981,11 @@ def audit_session_tools(
 
     Use this to answer 'are my agents using my tools right?' — which tools land vs fail, where retries happened, which agents over-call, and (with tool_name_filter='your-server') whether agents even reached for a specific MCP tool you shipped or ignored it. Get the session id from list_project_sessions(min_agents=1).
     """
-    proj = resolve_project(project)
-    sessions = load_sessions(proj)
-    if not sessions:
-        raise ToolError(f"No conversations found for {proj}")
-
-    target = next((s for s in sessions if PrefixId(s.session_id) == session), None)
-    if target is None:
+    narrowed = _projects_for_sessions([session], projects)
+    if not narrowed:
         raise ToolError(f"Session {session} not found")
+    sessions, _ = _load_all_sessions(narrowed)
+    target = _resolve_unique_session(sessions, session)
 
     agents = discover_subagents(target.path)
     if not agents:
@@ -943,6 +1035,7 @@ def audit_session_tools(
 
     return SessionToolAuditResponse(
         session=PrefixId(target.session_id),
+        project=target.project_path,
         worktree=target.worktree,
         title=target.title,
         total_present=total_present,

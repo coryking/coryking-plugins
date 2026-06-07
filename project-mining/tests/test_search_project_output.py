@@ -1,9 +1,9 @@
-"""Tests for SearchProjectResponse output format.
+"""Tests for SearchProjectsResponse output format.
 
-Covers:
-1. Examples include date alongside session_id: 'session_id|YYYY-MM-DD|excerpt'
-2. sessions field is an integer count, not a list of formatted strings
-3. No literal '\\n' in excerpts (newline escaping should not leak into examples)
+Covers the structured example shape (project/session/date/agent/excerpt):
+1. Each example names its project and session and carries a date.
+2. sessions / projects fields are integer counts, not lists of strings.
+3. No literal '\\n' in excerpts (newline escaping should not leak into examples).
 """
 
 from datetime import datetime, timezone
@@ -13,26 +13,24 @@ from unittest.mock import patch
 import pytest
 
 from cc_explorer.models import (
-    AssistantMessageModel,
-    AssistantTranscriptEntry,
     HumanEntry,
     TextContent,
-    ToolUseContent,
     TranscriptStats,
     UserMessageModel,
 )
-from cc_explorer.responses import SearchProjectResponse
+from cc_explorer.responses import SearchProjectsResponse
 from cc_explorer.search import (
     SessionInfo,
     triage_multi,
 )
-from cc_explorer.utils import PrefixId
 
 
 TS_A = datetime(2026, 3, 15, 10, 30, 0, tzinfo=timezone.utc)
 TS_B = datetime(2026, 3, 22, 14, 0, 0, tzinfo=timezone.utc)
 SESSION_A_ID = "aaaaaaaa-1111-2222-3333-444444444444"
 SESSION_B_ID = "bbbbbbbb-1111-2222-3333-444444444444"
+PROJECT_A = "/home/me/projects/alpha"
+PROJECT_B = "/home/me/projects/beta"
 
 
 def _human(text: str, uuid: str = "11111111-aaaa-bbbb-cccc-dddddddddddd", session_id: str = SESSION_A_ID) -> HumanEntry:
@@ -45,7 +43,7 @@ def _human(text: str, uuid: str = "11111111-aaaa-bbbb-cccc-dddddddddddd", sessio
     )
 
 
-def _session(session_id: str, path: str, ts: datetime) -> SessionInfo:
+def _session(session_id: str, path: str, ts: datetime, project: str = PROJECT_A) -> SessionInfo:
     return SessionInfo(
         session_id=session_id,
         path=Path(path),
@@ -53,6 +51,7 @@ def _session(session_id: str, path: str, ts: datetime) -> SessionInfo:
         first_timestamp=ts,
         message_count=10,
         stats=TranscriptStats(),
+        project_path=project,
     )
 
 
@@ -68,85 +67,81 @@ def _patch_entries(mapping):
 
 
 class TestExampleFormat:
-    """Examples should be pipe-delimited: session_id|date|excerpt."""
+    """Examples should be structured SearchHitExample objects."""
 
     @pytest.fixture
     def two_sessions(self):
         return [
-            _session(SESSION_A_ID, "a.jsonl", TS_A),
-            _session(SESSION_B_ID, "b.jsonl", TS_B),
+            _session(SESSION_A_ID, "a.jsonl", TS_A, project=PROJECT_A),
+            _session(SESSION_B_ID, "b.jsonl", TS_B, project=PROJECT_B),
         ]
 
     def _get_pattern_match(self, two_sessions, pattern="comment_count"):
         with _patch_entries({"a.jsonl": ENTRIES_A, "b.jsonl": ENTRIES_B}):
             results = triage_multi(two_sessions, [pattern])
-            response = SearchProjectResponse.from_triage(results)
+            response = SearchProjectsResponse.from_triage(results, projects_searched=2)
         return response.matches[0]
 
-    def test_example_has_three_pipe_fields(self, two_sessions):
-        """Each example should have session_id|date|excerpt."""
+    def test_example_names_project(self, two_sessions):
         match = self._get_pattern_match(two_sessions)
         assert match.examples
-        for example in match.examples:
-            parts = example.split("|", 2)
-            assert len(parts) == 3, f"Expected 3 pipe-separated fields, got {len(parts)}: {example!r}"
+        projects = {ex.project for ex in match.examples}
+        assert projects == {PROJECT_A, PROJECT_B}
 
-    def test_example_second_field_is_date(self, two_sessions):
-        """The second pipe field should be a YYYY-MM-DD date."""
+    def test_example_session_is_short_prefix(self, two_sessions):
         match = self._get_pattern_match(two_sessions)
-        for example in match.examples:
-            _, date_str, _ = example.split("|", 2)
-            # Should parse as a date
-            parsed = datetime.strptime(date_str, "%Y-%m-%d")
+        for ex in match.examples:
+            assert len(str(ex.session)) == 8
+
+    def test_example_has_date(self, two_sessions):
+        match = self._get_pattern_match(two_sessions)
+        for ex in match.examples:
+            parsed = datetime.strptime(ex.date, "%Y-%m-%d")
             assert parsed is not None
 
-    def test_example_first_field_is_session_id(self, two_sessions):
-        """The first pipe field should be an 8-char session ID prefix."""
+    def test_example_excerpt_contains_match(self, two_sessions):
         match = self._get_pattern_match(two_sessions)
-        for example in match.examples:
-            session_id, _, _ = example.split("|", 2)
-            assert len(session_id) == 8
+        for ex in match.examples:
+            assert "comment_count" in ex.excerpt
 
-    def test_example_third_field_contains_match(self, two_sessions):
-        """The excerpt field should contain the matched term."""
+    def test_example_agent_absent_for_main_transcript(self, two_sessions):
+        # Hits in the main transcript have no agent provenance.
         match = self._get_pattern_match(two_sessions)
-        for example in match.examples:
-            _, _, excerpt = example.split("|", 2)
-            assert "comment_count" in excerpt
+        for ex in match.examples:
+            assert ex.agent is None
 
 
-class TestSessionsField:
-    """sessions should be an integer count, not a list of strings."""
+class TestCountFields:
+    """sessions / projects / total_hits should be integer counts."""
 
     @pytest.fixture
     def two_sessions(self):
         return [
-            _session(SESSION_A_ID, "a.jsonl", TS_A),
-            _session(SESSION_B_ID, "b.jsonl", TS_B),
+            _session(SESSION_A_ID, "a.jsonl", TS_A, project=PROJECT_A),
+            _session(SESSION_B_ID, "b.jsonl", TS_B, project=PROJECT_B),
         ]
 
-    def test_sessions_is_int(self, two_sessions):
-        """sessions field should be an integer count."""
+    def test_counts(self, two_sessions):
         with _patch_entries({"a.jsonl": ENTRIES_A, "b.jsonl": ENTRIES_B}):
             results = triage_multi(two_sessions, ["comment_count"])
-            response = SearchProjectResponse.from_triage(results)
+            response = SearchProjectsResponse.from_triage(results, projects_searched=2)
         match = response.matches[0]
-        assert isinstance(match.sessions, int)
-        assert match.sessions == 2
+        assert isinstance(match.sessions, int) and match.sessions == 2
+        assert isinstance(match.projects, int) and match.projects == 2
+        assert response.total_hits == 2
+        assert response.projects_searched == 2
 
 
 class TestNoEscapedNewlines:
     """Excerpts should not contain literal backslash-n sequences."""
 
     def test_multiline_text_no_backslash_n_in_excerpt(self):
-        """Text with real newlines should have them collapsed to spaces, not escaped."""
         entries = [_human("line one\nline two\ncomment_count is here\nline four")]
         session = _session(SESSION_A_ID, "a.jsonl", TS_A)
         with _patch_entries({"a.jsonl": entries}):
             results = triage_multi([session], ["comment_count"])
-            response = SearchProjectResponse.from_triage(results)
+            response = SearchProjectsResponse.from_triage(results, projects_searched=1)
         match = response.matches[0]
         assert match.examples
-        for example in match.examples:
-            _, _, excerpt = example.split("|", 2)
-            assert "\\n" not in excerpt, f"Literal backslash-n found in excerpt: {excerpt!r}"
+        for ex in match.examples:
+            assert "\\n" not in ex.excerpt, f"Literal backslash-n in excerpt: {ex.excerpt!r}"

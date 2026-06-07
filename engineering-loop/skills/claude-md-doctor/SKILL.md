@@ -81,7 +81,7 @@ For each non-Tier-0 file, follow `references/decompose-technique.md` literally. 
 ### Stage 3 — Mining (Tier 2+, optional in Tier 1)
 
 For each DROP CANDIDATE, validate with cc-explorer:
-- `search_project` with patterns derived from the unit's distinctive vocabulary (function names, paths, jargon).
+- `search_projects` with patterns derived from the unit's distinctive vocabulary (function names, paths, jargon).
 - Hit count < 3 across sessions AND no session shows the rule being *acted upon* (vs. just quoted) → **confirmed scar tissue**.
 - Hit count ≥ 3 AND visible behavioral pull on at least 2 sessions → **demote from DROP to PRESENT-but-verify**.
 

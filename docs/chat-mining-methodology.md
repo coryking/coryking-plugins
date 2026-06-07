@@ -50,7 +50,7 @@ The split dissolves the false dichotomy. Corpus weighting is lens-dependent: "as
 
 Chat log mining is iterative, not linear. The process-analyst uses cc-explorer MCP tools at three zoom levels:
 
-**Search** (`search_project`) — cast a wide net across all sessions with several candidate patterns. Results show which terms land and which sessions are hot. Orientation step.
+**Search** (`search_projects`) — cast a wide net across all sessions with several candidate patterns. Results show which terms land and which sessions are hot. Orientation step.
 
 **Grep** (`grep_session` / `grep_sessions`) — drill into specific sessions with multiple patterns. Front-load all candidates in one call to get per-pattern breakdowns.
 
@@ -179,7 +179,7 @@ Chat logs are 50%+ AI being agreeable. Without explicit filtering, agents treat 
 | Stage | Tool | Scope | What it does |
 |-------|------|-------|-------------|
 | Orient | `list_project_sessions` | project | What conversations exist, with stats |
-| Search | `search_project` | project | Which patterns hit, which sessions are hot |
+| Search | `search_projects` | project | Which patterns hit, which sessions are hot |
 | Grep | `grep_session` / `grep_sessions` | session(s) | Matches with surrounding context |
 | Read | `read_turn` | turn | Full fidelity text around a specific moment |
 | Inspect | `list_project_sessions(min_agents=1)` / `list_session_agents` / `get_agent_detail` / `audit_session_tools` | varies | Agent forensics at manifest/session/detail levels |

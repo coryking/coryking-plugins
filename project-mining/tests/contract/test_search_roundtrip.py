@@ -15,6 +15,7 @@ shape and semantics of their shared interface.
 """
 
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -39,7 +40,7 @@ TS = datetime(2026, 3, 15, 10, 30, 0, tzinfo=timezone.utc)
 def _make_session() -> SessionInfo:
     return SessionInfo(
         session_id=SESSION_ID,
-        path="fake.jsonl",
+        path=Path("fake.jsonl"),
         title="test session",
         first_timestamp=TS,
         message_count=2,
@@ -87,7 +88,7 @@ class TestSearchToReadTurnContract:
         assert result.matches, "search should find 'hello' in the user message"
 
         turn_uuid = result.matches[0].turn_uuid
-        session, entries = get_turn_context(sessions, turn_uuid)
+        session, entries, _agent = get_turn_context(sessions, turn_uuid)
 
         assert session is not None, (
             f"get_turn_context could not resolve full turn_uuid={turn_uuid!r}"
@@ -106,7 +107,7 @@ class TestSearchToReadTurnContract:
         full_turn_uuid = result.matches[0].turn_uuid
         prefix = str(full_turn_uuid)[:8]
 
-        session, entries = get_turn_context(sessions, prefix)
+        session, entries, _agent = get_turn_context(sessions, prefix)
 
         assert session is not None, (
             f"get_turn_context could not resolve prefix={prefix!r} "

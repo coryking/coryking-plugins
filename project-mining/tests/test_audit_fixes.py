@@ -191,7 +191,7 @@ class TestGrepSessionsSurfacesUnresolvedPrefixes:
             resp = grep_sessions(
                 sessions=["aaaaaaaa", "deadbeef", "cafef00d"],
                 patterns=["TARGET"],
-                project="/tmp/fake",
+                projects=["/tmp/fake"],
             )
 
         # Good session resolved
@@ -212,7 +212,7 @@ class TestGrepSessionsSurfacesUnresolvedPrefixes:
                 grep_sessions(
                     sessions=["deadbeef", "cafef00d"],
                     patterns=["TARGET"],
-                    project="/tmp/fake",
+                    projects=["/tmp/fake"],
                 )
 
 
@@ -309,7 +309,7 @@ class TestSessionToolAuditCountsReflectSkippedAgents:
                  "cc_explorer.mcp_server.extract_agent_tool_audit",
                  side_effect=fake_extract,
              ):
-            resp = audit_session_tools(session="aaaaaaaa", project="/tmp/fake")
+            resp = audit_session_tools(session="aaaaaaaa", projects=["/tmp/fake"])
 
         assert resp.total_present == 3, (
             f"3 agents were present, got total_present={resp.total_present}"
@@ -351,7 +351,7 @@ class TestSessionToolAuditCountsReflectSkippedAgents:
              patch("cc_explorer.mcp_server.discover_subagents", return_value=all_agents), \
              patch("cc_explorer.mcp_server.resolve_output_files", side_effect=lambda *a, **k: None), \
              patch("cc_explorer.mcp_server.scan_output_file_stats", return_value={}):
-            resp = audit_session_tools(session="aaaaaaaa", project="/tmp/fake")
+            resp = audit_session_tools(session="aaaaaaaa", projects=["/tmp/fake"])
 
         assert resp.total_present == 2
         assert resp.total_audited == 0
@@ -393,7 +393,7 @@ class TestGrepSessionsPreservesInputOrder:
             resp = grep_sessions(
                 sessions=["cccccccc", "aaaaaaaa", "bbbbbbbb"],
                 patterns=["TARGET"],
-                project="/tmp/fake",
+                projects=["/tmp/fake"],
             )
 
         out_ids = [str(s.session) for s in resp.sessions]
@@ -421,7 +421,7 @@ class TestGrepSessionsOmitsZeroHitSessions:
             resp = grep_sessions(
                 sessions=["aaaaaaaa", "bbbbbbbb"],
                 patterns=["TARGET"],
-                project="/tmp/fake",
+                projects=["/tmp/fake"],
             )
 
         assert len(resp.sessions) == 1

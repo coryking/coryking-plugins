@@ -20,7 +20,7 @@ from .formatting import format_entry_line, format_session_date, render_trace
 from .utils import PrefixId
 
 if TYPE_CHECKING:
-    from .search import MatchHit, PatternTriageResults, SessionInfo
+    from .search import MatchHit, PatternTriageResults, ProjectInfo, SessionInfo
     from .subagents import SubagentInfo
 
 
@@ -47,6 +47,7 @@ class SessionSummary(SparseModel):
     """Summary of a single conversation session."""
 
     session: PrefixId = Field(description="Session identifier — pass this back as the `session` param to other tools.")
+    project: str | None = Field(default=None, description="Project this session belongs to — pass to the `projects` param to scope other tools to it. Useful when results span projects.")
     date: datetime | None = Field(default=None, description="Timestamp of first message.")
     title: str | None = Field(default=None, description="Auto-generated title from first human message.")
     worktree: str | None = Field(
@@ -69,6 +70,7 @@ class SessionSummary(SparseModel):
     def from_session_info(cls, s: SessionInfo, is_current: bool = False) -> SessionSummary:
         return cls(
             session=s.session_id,
+            project=s.project_path,
             date=s.first_timestamp,
             title=s.title,
             worktree=s.worktree,
@@ -80,6 +82,42 @@ class SessionSummary(SparseModel):
             output_tokens=s.stats.output_tokens,
             tools=s.stats.tool_use_count,
             is_current=is_current or None,
+        )
+
+
+# =============================================================================
+# list_projects
+# =============================================================================
+
+
+class ProjectSummary(SparseModel):
+    """One logical project on disk, pooled across its git worktrees."""
+
+    path: str = Field(description="Canonical project path (git repo root) — pass to the `projects` param of other tools to scope to it.")
+    name: str = Field(description="Project basename, for display.")
+    sessions: int = Field(description="Number of conversation transcripts, summed across the project's worktrees.")
+    last_active: datetime | None = Field(default=None, description="Most recent transcript modification time.")
+
+
+class ProjectListResponse(SparseModel):
+    """Every project cc-explorer can see, worktrees flattened into one entry each."""
+
+    total: int = Field(description="Number of projects returned.")
+    projects: list[ProjectSummary] = Field(description="Projects, most recently active first.")
+
+    @classmethod
+    def from_projects(cls, projects: list[ProjectInfo]) -> ProjectListResponse:
+        return cls(
+            total=len(projects),
+            projects=[
+                ProjectSummary(
+                    path=p.path,
+                    name=p.name,
+                    sessions=p.session_count,
+                    last_active=p.last_active,
+                )
+                for p in projects
+            ],
         )
 
 
@@ -112,28 +150,56 @@ class SessionListResponse(SparseModel):
 
 
 # =============================================================================
-# search_project
+# search_projects
 # =============================================================================
 
 
-MAX_EXAMPLES_PER_PATTERN = 7
+MAX_EXAMPLES_PER_PATTERN = 10
+
+
+class SearchHitExample(SparseModel):
+    """One example hit for a pattern, tagged with where it lives.
+
+    `project` and `agent` are what make a cross-project, subagent-aware search
+    actionable: they tell you which project to switch to and whether the hit was
+    inside a subagent body — so you can follow up with `grep_session` (scoped to
+    that project) or `get_agent_detail`.
+    """
+
+    project: str = Field(description="Project the hit lives in — pass to the `projects` param of other tools to scope to it.")
+    session: PrefixId = Field(description="Session containing the hit.")
+    date: str | None = Field(default=None, description="Session date (YYYY-MM-DD).")
+    agent: PrefixId | None = Field(
+        default=None,
+        description="Subagent body the hit was in, if any. Absent for the main transcript.",
+    )
+    excerpt: str = Field(description="Match excerpt centered on the hit.")
 
 
 class PatternMatch(SparseModel):
-    """Results for a single search pattern across all sessions."""
+    """Results for a single search pattern across every searched project."""
 
     pattern: str = Field(description="The regex pattern that was searched.")
-    hits: int = Field(description="Total match count across all sessions.")
+    hits: int = Field(description="Total match count across all projects/sessions.")
+    projects: int = Field(description="Number of distinct projects containing matches.")
     sessions: int = Field(description="Number of sessions containing matches.")
-    examples: list[str] | None = Field(
+    examples: list[SearchHitExample] | None = Field(
         default=None,
-        description="Pipe-delimited: 'session|YYYY-MM-DD|excerpt'. Capped to avoid token bloat.",
+        description="Example hits (project/session/agent tagged), spread across projects, capped to avoid token bloat.",
     )
 
 
-class SearchProjectResponse(SparseModel):
-    """Pattern-centric search results across a project's chat history."""
+class SearchProjectsResponse(SparseModel):
+    """Pattern-centric search results across one or more projects.
 
+    Summary first: `total_hits` / `projects_searched` up top, then patterns
+    sorted by hit count, each carrying the projects + sessions it landed in.
+    This is the cross-project recall surface (#21): omit `projects` to search
+    everything and find which project a remembered conversation lives in.
+    """
+
+    total_hits: int = Field(description="Total matches across all patterns and projects.")
+    projects_searched: int = Field(description="How many projects were searched.")
     matches: list[PatternMatch] = Field(
         description="Patterns with hits, sorted by hit count descending. Zero-hit patterns omitted."
     )
@@ -146,33 +212,56 @@ class SearchProjectResponse(SparseModel):
     def from_triage(
         cls,
         all_results: PatternTriageResults,
+        projects_searched: int,
         excluded_current_session: PrefixId | None = None,
-    ) -> SearchProjectResponse:
-        matches: list[PatternMatch] = []
+    ) -> SearchProjectsResponse:
+        """Build from triage over a flattened cross-project session list.
 
+        Each TriageResult carries its session's `project_path`, so project
+        provenance is read straight off the result — no per-project bookkeeping
+        in the tool layer.
+        """
+        matches: list[PatternMatch] = []
+        grand_total = 0
         for pat, results in all_results:
             total_hits = sum(r.count for r in results)
             if total_hits == 0:
                 continue
+            grand_total += total_hits
 
-            all_examples = [
-                f"{PrefixId(r.session.session_id)}|{format_session_date(r.session.first_timestamp)}|{r.first_match_example}"
-                for r in results
+            distinct_projects = {r.session.project_path for r in results if r.session.project_path}
+
+            # Hottest sessions first; examples capped to bound tokens.
+            ranked = sorted(results, key=lambda r: r.count, reverse=True)
+            examples = [
+                SearchHitExample(
+                    project=r.session.project_path or "",
+                    session=PrefixId(r.session.session_id),
+                    date=format_session_date(r.session.first_timestamp) or None,
+                    agent=r.agent_id,
+                    excerpt=r.first_match_example,
+                )
+                for r in ranked
                 if r.first_match_example
-            ]
-            examples = all_examples[:MAX_EXAMPLES_PER_PATTERN] or None
+            ][:MAX_EXAMPLES_PER_PATTERN] or None
 
             matches.append(
                 PatternMatch(
                     pattern=pat,
                     hits=total_hits,
+                    projects=len(distinct_projects),
                     sessions=len(results),
                     examples=examples,
                 )
             )
 
         matches.sort(key=lambda m: m.hits, reverse=True)
-        return cls(matches=matches, excluded_current_session=excluded_current_session)
+        return cls(
+            total_hits=grand_total,
+            projects_searched=projects_searched,
+            matches=matches,
+            excluded_current_session=excluded_current_session,
+        )
 
 
 # =============================================================================
@@ -188,6 +277,10 @@ class MatchBlock(SparseModel):
     with a centered excerpt when truncated so the hit is always visible.
     """
 
+    agent: PrefixId | None = Field(
+        default=None,
+        description="Subagent body this match came from (a `subagents/agent-*.jsonl` transcript). Absent when the match is in the main session transcript. Pass it to get_agent_detail to inspect that agent.",
+    )
     before: list[str] = Field(
         default_factory=list,
         description="Context turns before the match (pipe-delimited entry lines).",
@@ -204,7 +297,7 @@ class MatchBlock(SparseModel):
 class GrepPatternResult(SparseModel):
     """Per-pattern results within a single session.
 
-    Mirrors `search_project`'s per-pattern shape so you can see at a glance
+    Mirrors `search_projects`'s per-pattern shape so you can see at a glance
     which terms landed (`hits`) and which were dead weight. The actual context
     blocks live in `matches`.
     """
@@ -232,6 +325,10 @@ class GrepSessionResponse(SparseModel):
     """
 
     session: PrefixId = Field(description="Session identifier.")
+    project: str | None = Field(
+        default=None,
+        description="Project this session belongs to. Present when the session was located across projects.",
+    )
     worktree: str | None = Field(
         default=None,
         description="Git worktree name this session lived in, if not the main one. Labeled sessions are often dispatch-driven rather than interactively typed.",
@@ -248,6 +345,7 @@ class GrepSessionResponse(SparseModel):
         truncate: int,
         hide: frozenset[str] = frozenset(),
         worktree: str | None = None,
+        project: str | None = None,
     ) -> GrepSessionResponse:
         """Build response from a list of (pattern, matches, total_hits) tuples."""
 
@@ -267,7 +365,14 @@ class GrepSessionResponse(SparseModel):
                     format_entry_line(e, truncate=truncate, hide=hide)
                     for e in match.context_after
                 ]
-                match_blocks.append(MatchBlock(before=before, match=match_line, after=after))
+                match_blocks.append(
+                    MatchBlock(
+                        agent=match.agent_id,
+                        before=before,
+                        match=match_line,
+                        after=after,
+                    )
+                )
 
             overflow = None
             if len(matches) < total:
@@ -286,6 +391,7 @@ class GrepSessionResponse(SparseModel):
         pattern_results.sort(key=lambda p: p.hits, reverse=True)
         return cls(
             session=PrefixId(session_id),
+            project=project,
             worktree=worktree,
             patterns=pattern_results,
         )
@@ -319,9 +425,17 @@ class ReadTurnResponse(SparseModel):
     """A specific moment in a conversation at full fidelity."""
 
     session: PrefixId | None = Field(default=None, description="Session identifier.")
+    project: str | None = Field(
+        default=None,
+        description="Project this session belongs to. Present when the turn was located across projects.",
+    )
     worktree: str | None = Field(
         default=None,
         description="Git worktree name this session lived in, if not the main one.",
+    )
+    agent: PrefixId | None = Field(
+        default=None,
+        description="Subagent body this turn lives in (a `subagents/agent-*.jsonl` transcript). Absent when the turn is in the main session transcript.",
     )
     turn: PrefixId = Field(description="Turn identifier.")
     chats: list[str] = Field(
@@ -336,13 +450,16 @@ class ReadTurnResponse(SparseModel):
         entries: list,
         truncate: int,
         hide: frozenset[str] = frozenset(),
+        agent_id: Optional[PrefixId] = None,
     ) -> ReadTurnResponse:
 
         chats = [format_entry_line(e, truncate=truncate, hide=hide) for e in entries]
 
         return cls(
             session=PrefixId(session_info.session_id) if session_info else None,
+            project=session_info.project_path if session_info else None,
             worktree=session_info.worktree if session_info else None,
+            agent=agent_id,
             turn=PrefixId(turn),
             chats=chats,
         )
@@ -357,6 +474,10 @@ class BrowseSessionResponse(SparseModel):
     """First or last N conversation turns from a session."""
 
     session: PrefixId = Field(description="Session identifier.")
+    project: str | None = Field(
+        default=None,
+        description="Project this session belongs to. Present when the session was located across projects.",
+    )
     worktree: str | None = Field(
         default=None,
         description="Git worktree name this session lived in, if not the main one.",
@@ -380,10 +501,12 @@ class BrowseSessionResponse(SparseModel):
         anchor: str | None = None,
         hide: frozenset[str] = frozenset(),
         worktree: str | None = None,
+        project: str | None = None,
     ) -> BrowseSessionResponse:
         chats = [format_entry_line(e, truncate=truncate, hide=hide) for e in entries]
         return cls(
             session=PrefixId(session_id),
+            project=project,
             worktree=worktree,
             position=position,
             showing=len(entries),
@@ -441,6 +564,10 @@ class SessionAgentsResponse(SparseModel):
     """All agents spawned by a specific session."""
 
     session: PrefixId = Field(description="Session identifier.")
+    project: str | None = Field(
+        default=None,
+        description="Project this session belongs to. Present when located across projects.",
+    )
     worktree: str | None = Field(
         default=None,
         description="Git worktree name this session lived in, if not the main one.",
@@ -458,6 +585,7 @@ class SessionAgentsResponse(SparseModel):
     ) -> SessionAgentsResponse:
         return cls(
             session=target.session_id,
+            project=target.project_path,
             worktree=target.worktree,
             date=target.first_timestamp,
             title=target.title,
@@ -484,6 +612,10 @@ class AgentDetailResponse(SparseModel):
     """Full detail for a single agent: prompt, result, stats, optional trace."""
 
     session: PrefixId = Field(description="Parent session identifier.")
+    project: str | None = Field(
+        default=None,
+        description="Project the parent session belongs to. Present when located across projects.",
+    )
     worktree: str | None = Field(
         default=None,
         description="Git worktree name the parent session lived in, if not the main one.",
@@ -546,6 +678,7 @@ class AgentDetailResponse(SparseModel):
 
         return cls(
             session=found_session.session_id,
+            project=found_session.project_path,
             worktree=found_session.worktree,
             date=found_session.first_timestamp,
             title=found_session.title,
@@ -621,6 +754,10 @@ class SessionToolAuditResponse(SparseModel):
     """
 
     session: PrefixId = Field(description="Session identifier.")
+    project: str | None = Field(
+        default=None,
+        description="Project this session belongs to. Present when located across projects.",
+    )
     worktree: str | None = Field(
         default=None,
         description="Git worktree name this session lived in, if not the main one.",

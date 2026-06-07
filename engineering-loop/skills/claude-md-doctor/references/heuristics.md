@@ -28,7 +28,7 @@
 
 A unit is **confirmed scar tissue** when ALL hold:
 1. `git log -p` on the line range shows one commit (added, never edited).
-2. cc-explorer `search_project` on the unit's distinctive vocabulary returns <3 hits across sessions OR all hits are the rule quoting itself, not being acted on.
+2. cc-explorer `search_projects` on the unit's distinctive vocabulary returns <3 hits across sessions OR all hits are the rule quoting itself, not being acted on.
 3. No other instruction file references it.
 
 A unit is **suspected scar tissue** when 2 of the 3 hold. Surface as DROP CANDIDATE with a "scar (suspected)" tag and an evidence line.

@@ -1,6 +1,7 @@
 """Shared test fixtures."""
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -34,7 +35,7 @@ def human_entry():
 def session_info():
     return SessionInfo(
         session_id=FULL_UUID,
-        path="fake.jsonl",
+        path=Path("fake.jsonl"),
         title="test session",
         first_timestamp=TS,
         message_count=10,

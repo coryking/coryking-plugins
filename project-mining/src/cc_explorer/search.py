@@ -5,12 +5,13 @@ interface uses session IDs (UUID from filename) and turn UUIDs (the uuid
 field on each entry).
 """
 
+import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TypeGuard
 
 from .models import (
     AssistantTranscriptEntry,
@@ -26,7 +27,7 @@ from .models import (
 )
 from .formatting import _match_example
 from .parser import load_conversations, load_transcript
-from .subagents import discover_subagents
+from .subagents import collect_agent_files, discover_subagents, resolve_subagents_dir
 from .utils import PrefixId, smart_truncate
 
 
@@ -39,6 +40,17 @@ class ConversationRole(str, Enum):
     user = "user"
     assistant = "assistant"
     all = "all"
+
+
+# Sentinel for sessions/projects with no timestamp: sorts last under newest-first.
+# tz-aware so it never collides with aware first_timestamps (mixing aware + naive
+# in a sort key raises TypeError).
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def sort_sessions_newest_first(sessions: list["SessionInfo"]) -> None:
+    """Sort sessions in place, newest first; None timestamps sort last."""
+    sessions.sort(key=lambda s: s.first_timestamp or _EPOCH, reverse=True)
 
 
 # =============================================================================
@@ -63,6 +75,198 @@ def resolve_project(project: Optional[str] = None) -> str:
             return str(expanded)
 
     return project
+
+
+def resolve_projects(projects: Optional[list[str]] = None) -> list[str]:
+    """Resolve a projects selector to concrete project paths.
+
+    Empty / None ⇒ every project on disk (cross-project search), discovered and
+    flattened across git worktrees by `discover_projects`. A non-empty list ⇒
+    those projects, each run through `resolve_project` (bare name → ~/projects/<name>,
+    path as-is). De-duplicates while preserving order.
+    """
+    if not projects:
+        return [p.path for p in discover_projects()]
+
+    seen: set[str] = set()
+    resolved: list[str] = []
+    for p in projects:
+        path = resolve_project(p)
+        if path not in seen:
+            seen.add(path)
+            resolved.append(path)
+    return resolved
+
+
+# =============================================================================
+# Project discovery (cross-project) — enumerate ~/.claude/projects, flatten
+# worktrees back into their repo so one logical project is one entry.
+# =============================================================================
+
+
+@dataclass
+class ProjectInfo:
+    """A logical project discovered on disk, pooled across its git worktrees.
+
+    `path` is the canonical main-worktree path (the git repo root); `encoded_dirs`
+    are every `~/.claude/projects/<encoded>/` directory that pools into it (main
+    plus linked worktrees). `session_count` and `last_active` are cheap aggregates
+    over those dirs (file count and max mtime — no transcript parse).
+    """
+
+    path: str
+    name: str
+    encoded_dirs: list[Path] = field(default_factory=list)
+    session_count: int = 0
+    last_active: Optional[datetime] = None
+
+
+def _cwd_from_transcripts(jsonls: list[Path], scan_lines: int = 20) -> Optional[str]:
+    """Recover a project's real cwd from its transcripts.
+
+    The encoded dir name is a one-way sanitization (non-alphanumeric → '-'), so
+    the real path can't be un-mangled — it has to be read back out of a
+    transcript. Entries carry `cwd` (BaseTranscriptEntry); leading lines are
+    sometimes summaries without one, so scan the first `scan_lines` of each file
+    in deterministic (sorted) order until a 'cwd' key turns up. Cheap by design:
+    first parsable cwd wins, no full parse.
+    """
+    for jsonl in jsonls:
+        try:
+            with open(jsonl, "r", encoding="utf-8", errors="replace") as f:
+                for _ in range(scan_lines):
+                    line = f.readline()
+                    if not line:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    cwd = data.get("cwd")
+                    if isinstance(cwd, str) and cwd:
+                        return cwd
+        except OSError:
+            continue
+    return None
+
+
+def discover_projects() -> list[ProjectInfo]:
+    """Enumerate every project under ~/.claude/projects, flattening worktrees.
+
+    Each encoded dir is mapped to its real cwd (read from a transcript), then
+    pooled into its git repo's main worktree via the same `_get_worktree_paths`
+    machinery `load_conversations` uses for single-project pooling. Git calls are
+    cached per repo (siblings prepopulated from one `git worktree list`). cwds
+    not inside a git repo pool under themselves.
+
+    Returns ProjectInfo list sorted by `last_active` (newest first). Dirs with no
+    parsable cwd are skipped.
+    """
+    from ._claude_paths import (
+        _canonicalize_path,
+        _get_projects_dir,
+        _get_worktree_paths,
+    )
+
+    projects_dir = _get_projects_dir()
+    try:
+        encoded_dirs = [d for d in projects_dir.iterdir() if d.is_dir()]
+    except OSError:
+        return []
+
+    # cwd → main-worktree path, cached. Siblings from one `git worktree list`
+    # are prepopulated so each repo shells out at most once.
+    main_cache: dict[str, str] = {}
+
+    def main_worktree(cwd: str) -> str:
+        canonical = _canonicalize_path(cwd)
+        if canonical in main_cache:
+            return main_cache[canonical]
+        worktrees = _get_worktree_paths(canonical)
+        if not worktrees:
+            main_cache[canonical] = canonical
+            return canonical
+        main = worktrees[0]
+        for wt in worktrees:
+            main_cache.setdefault(wt, main)
+        main_cache[canonical] = main
+        return main
+
+    pooled: dict[str, ProjectInfo] = {}
+    for enc in encoded_dirs:
+        # One sorted enumeration of the dir, reused for cwd recovery + counts.
+        jsonls = sorted(enc.glob("*.jsonl"))
+        if not jsonls:
+            continue
+        cwd = _cwd_from_transcripts(jsonls)
+        if not cwd:
+            continue
+        repo = main_worktree(cwd)
+
+        proj = pooled.get(repo)
+        if proj is None:
+            proj = ProjectInfo(path=repo, name=Path(repo).name)
+            pooled[repo] = proj
+        proj.encoded_dirs.append(enc)
+
+        for jsonl in jsonls:
+            proj.session_count += 1
+            try:
+                mtime = datetime.fromtimestamp(jsonl.stat().st_mtime, tz=timezone.utc)
+            except OSError:
+                continue
+            if proj.last_active is None or mtime > proj.last_active:
+                proj.last_active = mtime
+
+    result = list(pooled.values())
+    result.sort(key=lambda p: p.last_active or _EPOCH, reverse=True)
+    return result
+
+
+# =============================================================================
+# Search corpus — a session's main transcript plus its subagent transcripts.
+# =============================================================================
+
+
+@dataclass
+class TranscriptSource:
+    """One searchable transcript file within a session's corpus.
+
+    `agent_id` is None for the main session transcript and the subagent's id for
+    a `subagents/agent-*.jsonl` body (including workflow-orchestrated orphans).
+    """
+
+    agent_id: Optional[PrefixId]
+    path: Path
+
+
+def session_sources(session: "SessionInfo") -> list["TranscriptSource"]:
+    """Expand a session into every transcript that belongs to its search corpus.
+
+    The main transcript plus every subagent transcript on disk. We use
+    `collect_agent_files` (a pure filesystem walk over `subagents/`, including
+    `workflows/<runId>/`) rather than the full `discover_subagents` reconciliation
+    — search only needs the transcript *files*, not the dispatch graph, and this
+    avoids re-reading the parent transcript. This is what makes a subagent's
+    internal activity searchable (#22), not just the result text the parent
+    recorded.
+
+    NOTE: this walks every session's subagent dir, so a cross-project search
+    touches the whole tree — the known cost tracked as the whole-corpus perf
+    follow-up. Correctness first.
+    """
+    sources: list[TranscriptSource] = [TranscriptSource(agent_id=None, path=session.path)]
+    for af in collect_agent_files(resolve_subagents_dir(session.path)):
+        sources.append(
+            TranscriptSource(
+                agent_id=PrefixId(af.agent_id) if af.agent_id else None,
+                path=af.path,
+            )
+        )
+    return sources
 
 
 
@@ -129,6 +333,11 @@ class SessionInfo:
     message_count: int
     stats: TranscriptStats = field(default_factory=TranscriptStats)
     worktree: Optional[str] = None
+    # The project this session was loaded under (the path passed to load_sessions,
+    # i.e. the canonical repo root for worktree-pooled sessions). Carries project
+    # provenance through search so cross-project results can name where each hit
+    # lives without the tool layer re-threading it.
+    project_path: Optional[str] = None
     # Number of human prompts (entries where the user actually spoke), distinct
     # from message_count which also counts assistant turns. Signals how much the
     # human drove the session vs one prompt fanning out into a long agent run.
@@ -141,22 +350,34 @@ class SessionInfo:
 
 @dataclass
 class TriageResult:
-    """Match count for a single session."""
+    """Match count for a single session.
+
+    `agent_id` records where the first match was found: None for the main
+    transcript, or the subagent id when the first hit was inside a subagent body
+    (the count itself sums across the session's whole corpus).
+    """
 
     session: SessionInfo
     count: int
     first_match_example: str = ""  # example excerpt from first matching entry
+    agent_id: Optional[PrefixId] = None
 
 
 @dataclass
 class MatchHit:
-    """A single search match with surrounding context."""
+    """A single search match with surrounding context.
+
+    `agent_id` is None when the match is in the main session transcript and the
+    subagent id when it's inside a subagent body; context turns are drawn from
+    the same transcript the match came from.
+    """
 
     session_id: PrefixId
     turn_uuid: PrefixId
     entry: TranscriptEntry
     context_before: list[TranscriptEntry]
     context_after: list[TranscriptEntry]
+    agent_id: Optional[PrefixId] = None
 
 
 @dataclass
@@ -185,6 +406,21 @@ ENTRY_TYPE_MAP: dict[str, tuple[type, ...]] = {
     "assistant": (AssistantTranscriptEntry,),
     "all": (HumanEntry, AssistantTranscriptEntry),
 }
+
+
+def _is_searchable(
+    entry: TranscriptEntry, search_types: tuple[type, ...]
+) -> TypeGuard[BaseTranscriptEntry]:
+    """isinstance against the dynamic search-type tuple, narrowed for the checker.
+
+    `search_types` is built at runtime by conversation_types_for(), so a static
+    checker can't narrow from `isinstance(entry, search_types)`. But every
+    searchable entry kind subclasses BaseTranscriptEntry, so a match proves that
+    — this TypeGuard states the invariant once, letting the search loops use a
+    single check (and reach `.uuid` / `.display`) instead of a redundant second
+    `isinstance(entry, BaseTranscriptEntry)`.
+    """
+    return isinstance(entry, search_types)
 
 
 def conversation_types_for(
@@ -298,11 +534,12 @@ def load_sessions(
                 worktree=ref.worktree,
                 user_turns=user_turns,
                 agents_present=agents_present,
+                project_path=project_path,
             )
         )
 
     # Sort newest first (None timestamps sort last)
-    sessions.sort(key=lambda s: s.first_timestamp or datetime.min, reverse=True)
+    sort_sessions_newest_first(sessions)
     return sessions
 
 
@@ -409,22 +646,30 @@ def triage(
     results: list[TriageResult] = []
 
     for session in sessions:
-        entries = load_transcript(session.path)
         count = 0
         first_example = ""
-        for entry in entries:
-            if not isinstance(entry, search_types):
-                continue
-            if not isinstance(entry, BaseTranscriptEntry):
-                continue
-            if _entry_matches(entry, compiled, hide):
-                count += 1
-                if not first_example:
-                    first_example = _match_example(
-                        entry.display(truncate=0, hide=hide), compiled, width=example_width
-                    )
+        first_agent_id: Optional[PrefixId] = None
+        for source in session_sources(session):
+            entries = load_transcript(source.path)
+            for entry in entries:
+                if not _is_searchable(entry, search_types):
+                    continue
+                if _entry_matches(entry, compiled, hide):
+                    count += 1
+                    if not first_example:
+                        first_example = _match_example(
+                            entry.display(truncate=0, hide=hide), compiled, width=example_width
+                        )
+                        first_agent_id = source.agent_id
         if count > 0:
-            results.append(TriageResult(session=session, count=count, first_match_example=first_example))
+            results.append(
+                TriageResult(
+                    session=session,
+                    count=count,
+                    first_match_example=first_example,
+                    agent_id=first_agent_id,
+                )
+            )
 
     results.sort(key=lambda r: r.count, reverse=True)
     return results
@@ -440,36 +685,44 @@ def triage_multi(
     """Count matches for multiple patterns in a single pass over each session.
 
     Loads each session's transcript once and checks all patterns per entry.
-    Returns PatternTriageResults — same type consumed by SearchProjectResponse.from_triage.
+    Returns PatternTriageResults — same type consumed by SearchProjectsResponse.from_triage.
     """
     compiled = [(pat, re.compile(pat, re.IGNORECASE)) for pat in patterns]
     search_types = conversation_types_for(hide, base_types)
 
-    # Per-pattern accumulators: {pattern_index: {session_index: (count, first_example)}}
-    accum: dict[int, dict[int, tuple[int, str]]] = {i: {} for i in range(len(compiled))}
+    # Per-pattern accumulators: {pattern_index: {session_index: (count, first_example, first_agent_id)}}
+    accum: dict[int, dict[int, tuple[int, str, Optional[PrefixId]]]] = {
+        i: {} for i in range(len(compiled))
+    }
 
     for si, session in enumerate(sessions):
-        entries = load_transcript(session.path)
-        for entry in entries:
-            if not isinstance(entry, search_types):
-                continue
-            if not isinstance(entry, BaseTranscriptEntry):
-                continue
-            for pi, (_, regex) in enumerate(compiled):
-                if _entry_matches(entry, regex, hide):
-                    count, example = accum[pi].get(si, (0, ""))
-                    if not example:
-                        example = _match_example(
-                            entry.display(truncate=0, hide=hide), regex, width=example_width
-                        )
-                    accum[pi][si] = (count + 1, example)
+        # Search the whole corpus: main transcript + every subagent body (#22).
+        for source in session_sources(session):
+            entries = load_transcript(source.path)
+            for entry in entries:
+                if not _is_searchable(entry, search_types):
+                    continue
+                for pi, (_, regex) in enumerate(compiled):
+                    if _entry_matches(entry, regex, hide):
+                        count, example, agent_id = accum[pi].get(si, (0, "", None))
+                        if not example:
+                            example = _match_example(
+                                entry.display(truncate=0, hide=hide), regex, width=example_width
+                            )
+                            agent_id = source.agent_id
+                        accum[pi][si] = (count + 1, example, agent_id)
 
     results: PatternTriageResults = []
     for pi, (pat, _) in enumerate(compiled):
         session_results: list[TriageResult] = []
-        for si, (count, example) in accum[pi].items():
+        for si, (count, example, agent_id) in accum[pi].items():
             session_results.append(
-                TriageResult(session=sessions[si], count=count, first_match_example=example)
+                TriageResult(
+                    session=sessions[si],
+                    count=count,
+                    first_match_example=example,
+                    agent_id=agent_id,
+                )
             )
         session_results.sort(key=lambda r: r.count, reverse=True)
         results.append((pat, session_results))
@@ -505,32 +758,34 @@ def search_multi(
     out: dict[PrefixId, list[tuple[str, list[MatchHit], int]]] = {}
 
     for session in sessions:
-        entries = load_transcript(session.path)
         # Per-pattern accumulator for this session: pi -> list[MatchHit]
         per_pattern: dict[int, list[MatchHit]] = {i: [] for i in range(len(compiled))}
         per_pattern_totals: dict[int, int] = {i: 0 for i in range(len(compiled))}
 
-        for idx, entry in enumerate(entries):
-            if not isinstance(entry, search_types):
-                continue
-            if not isinstance(entry, BaseTranscriptEntry):
-                continue
-            for pi, (_, regex) in enumerate(compiled):
-                if not _entry_matches(entry, regex, hide):
+        # Walk the whole corpus: main transcript + every subagent body (#22).
+        # Context is drawn from within the same source the match came from.
+        for source in session_sources(session):
+            entries = load_transcript(source.path)
+            for idx, entry in enumerate(entries):
+                if not _is_searchable(entry, search_types):
                     continue
-                per_pattern_totals[pi] += 1
-                if len(per_pattern[pi]) >= max_results_per_pattern:
-                    continue  # over the cap; only the total grows
-                before, after = _get_context(entries, idx, context, base_types, hide)
-                per_pattern[pi].append(
-                    MatchHit(
-                        session_id=session.session_id,
-                        turn_uuid=PrefixId(getattr(entry, "uuid", "") or ""),
-                        entry=entry,
-                        context_before=before,
-                        context_after=after,
+                for pi, (_, regex) in enumerate(compiled):
+                    if not _entry_matches(entry, regex, hide):
+                        continue
+                    per_pattern_totals[pi] += 1
+                    if len(per_pattern[pi]) >= max_results_per_pattern:
+                        continue  # over the cap; only the total grows
+                    before, after = _get_context(entries, idx, context, base_types, hide)
+                    per_pattern[pi].append(
+                        MatchHit(
+                            session_id=session.session_id,
+                            turn_uuid=PrefixId(entry.uuid or ""),
+                            entry=entry,
+                            context_before=before,
+                            context_after=after,
+                            agent_id=source.agent_id,
+                        )
                     )
-                )
 
         out[session.session_id] = [
             (compiled[pi][0], per_pattern[pi], per_pattern_totals[pi])
@@ -568,25 +823,27 @@ def search(
         target_sessions = [s for s in sessions if s.session_id == session_id]
 
     for session in target_sessions:
-        entries = load_transcript(session.path)
         session_matches: list[MatchHit] = []
 
-        for idx, entry in enumerate(entries):
-            if not isinstance(entry, search_types):
-                continue
-            if not _entry_matches(entry, compiled, hide):
-                continue
+        for source in session_sources(session):
+            entries = load_transcript(source.path)
+            for idx, entry in enumerate(entries):
+                if not _is_searchable(entry, search_types):
+                    continue
+                if not _entry_matches(entry, compiled, hide):
+                    continue
 
-            before, after = _get_context(entries, idx, context, base_types, hide)
-            session_matches.append(
-                MatchHit(
-                    session_id=session.session_id,
-                    turn_uuid=PrefixId(getattr(entry, "uuid", "") or ""),
-                    entry=entry,
-                    context_before=before,
-                    context_after=after,
+                before, after = _get_context(entries, idx, context, base_types, hide)
+                session_matches.append(
+                    MatchHit(
+                        session_id=session.session_id,
+                        turn_uuid=PrefixId(entry.uuid or ""),
+                        entry=entry,
+                        context_before=before,
+                        context_after=after,
+                        agent_id=source.agent_id,
+                    )
                 )
-            )
 
         if session_matches:
             per_session_counts.append(
@@ -634,13 +891,16 @@ def get_turn_context(
     context: int = 3,
     hide: frozenset[str] = frozenset(),
     session_id: str | None = None,
-) -> tuple[SessionInfo | None, list[TranscriptEntry]]:
+) -> tuple[SessionInfo | None, list[TranscriptEntry], Optional[PrefixId]]:
     """Find a turn by UUID across sessions and return surrounding entries.
 
     Turn UUIDs are globally unique — session_id is optional and used only to
-    narrow the search when the caller wants to be explicit.
+    narrow the search when the caller wants to be explicit. The turn may live in
+    the main transcript or in any subagent body (#22), so the whole corpus is
+    scanned per session.
 
-    Returns (session_info, entries) where entries includes context.
+    Returns (session_info, entries, agent_id) where entries includes context and
+    agent_id names the subagent body the turn was found in (None for main).
     """
     conv_types = conversation_types_for(hide)
 
@@ -649,40 +909,41 @@ def get_turn_context(
         target_sessions = [s for s in sessions if s.session_id == session_id]
 
     for session in target_sessions:
-        entries = load_transcript(session.path)
-        for idx, entry in enumerate(entries):
-            if not isinstance(entry, BaseTranscriptEntry):
-                continue
-            if entry.uuid != turn_uuid:
-                continue
+        for source in session_sources(session):
+            entries = load_transcript(source.path)
+            for idx, entry in enumerate(entries):
+                if not isinstance(entry, BaseTranscriptEntry):
+                    continue
+                if entry.uuid != turn_uuid:
+                    continue
 
-            # Found it — gather context
-            result: list[TranscriptEntry] = []
+                # Found it — gather context
+                result: list[TranscriptEntry] = []
 
-            # Before
-            count = 0
-            before_start = idx
-            for i in range(idx - 1, -1, -1):
-                if isinstance(entries[i], conv_types):
-                    before_start = i
-                    count += 1
-                    if count >= context:
-                        break
-
-            # Collect from before_start through context after
-            # Always include the target turn even if it's not in conv_types
-            count_after = 0
-            for i in range(before_start, len(entries)):
-                if i == idx or isinstance(entries[i], conv_types):
-                    result.append(entries[i])
-                    if i > idx:
-                        count_after += 1
-                        if count_after >= context:
+                # Before
+                count = 0
+                before_start = idx
+                for i in range(idx - 1, -1, -1):
+                    if isinstance(entries[i], conv_types):
+                        before_start = i
+                        count += 1
+                        if count >= context:
                             break
 
-            return session, result
+                # Collect from before_start through context after
+                # Always include the target turn even if it's not in conv_types
+                count_after = 0
+                for i in range(before_start, len(entries)):
+                    if i == idx or isinstance(entries[i], conv_types):
+                        result.append(entries[i])
+                        if i > idx:
+                            count_after += 1
+                            if count_after >= context:
+                                break
 
-    return None, []
+                return session, result, source.agent_id
+
+    return None, [], None
 
 
 def browse_session_turns(

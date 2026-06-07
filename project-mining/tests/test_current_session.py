@@ -1,7 +1,7 @@
 """Tests for current-session detection, exclusion, and marking.
 
 Two behaviors, deliberately different per tool family:
-- search_project EXCLUDES the calling session (it would match itself) and
+- search_projects EXCLUDES the calling session (it would match itself) and
   surfaces excluded_current_session.
 - list_* tools KEEP the calling session but flag it is_current=True, because
   dropping a row from an inventory is misleading.
@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from cc_explorer.mcp_server import _current_session_id, _exclude_current_session
-from cc_explorer.responses import SearchProjectResponse, SessionListResponse
+from cc_explorer.responses import SearchProjectsResponse, SessionListResponse
 from cc_explorer.search import SessionInfo, TriageResult
 from cc_explorer.utils import PrefixId
 
@@ -54,7 +54,7 @@ def test_current_session_id_empty_is_none(monkeypatch):
     assert _current_session_id() is None
 
 
-# --- _exclude_current_session (search_project path) --------------------------
+# --- _exclude_current_session (search_projects path) -------------------------
 
 
 def test_exclude_drops_caller_and_reports_it(monkeypatch):
@@ -121,8 +121,8 @@ def test_is_current_omitted_from_serialization_when_false():
 def test_search_response_surfaces_excluded():
     other = _session(OTHER_ID)
     triage = [("foo", [TriageResult(session=other, count=3, first_match_example="foo bar")])]
-    resp = SearchProjectResponse.from_triage(
-        triage, excluded_current_session=PrefixId(CALLER_ID)
+    resp = SearchProjectsResponse.from_triage(
+        triage, projects_searched=1, excluded_current_session=PrefixId(CALLER_ID)
     )
     assert resp.excluded_current_session == PrefixId(CALLER_ID)
     # serializes to the short form
@@ -132,14 +132,14 @@ def test_search_response_surfaces_excluded():
 def test_search_response_omits_marker_when_nothing_excluded():
     other = _session(OTHER_ID)
     triage = [("foo", [TriageResult(session=other, count=1, first_match_example="foo")])]
-    resp = SearchProjectResponse.from_triage(triage)
+    resp = SearchProjectsResponse.from_triage(triage, projects_searched=1)
     assert "excluded_current_session" not in resp.model_dump()
 
 
-# --- search_project: calling session is the only one in scope ----------------
+# --- search_projects: calling session is the only one in scope ---------------
 
 
-def test_search_project_only_self_points_at_exclusion(monkeypatch):
+def test_search_projects_only_self_points_at_exclusion(monkeypatch):
     """When the calling session is the only session in scope, the error names
     the exclusion (and the override) rather than blaming the patterns. The
     exclusion branch fires before any transcript is loaded."""
@@ -147,11 +147,13 @@ def test_search_project_only_self_points_at_exclusion(monkeypatch):
     from fastmcp.exceptions import ToolError
 
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", CALLER_ID)
-    monkeypatch.setattr(srv, "resolve_project", lambda project=None: "/tmp/fake")
-    monkeypatch.setattr(srv, "load_sessions", lambda proj: [_session(CALLER_ID)])
+    monkeypatch.setattr(srv, "resolve_projects", lambda projects=None: ["/tmp/fake"])
+    monkeypatch.setattr(
+        srv, "load_sessions", lambda proj, with_agents_present=False: [_session(CALLER_ID)]
+    )
 
     with pytest.raises(ToolError) as exc:
-        srv.search_project(patterns=["anything"])
+        srv.search_projects(patterns=["anything"])
     msg = str(exc.value)
     assert "include_current_session" in msg
     assert CALLER_ID[:8] in msg  # names the excluded session by short id

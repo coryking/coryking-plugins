@@ -14,15 +14,20 @@ Explores Claude Code chat history stored as JSONL transcripts. MCP tools handle 
 
 ## The conversation exploration tools
 
-Five tools for exploring chat content, each operating at a different scope — like `ls`, `rg -c`, `rg -C3`, and `sed -n` on a set of JSONL files:
+Tools for exploring chat content, each operating at a different scope — like `ls`, `rg -c`, `rg -C3`, and `sed -n` on a set of JSONL files:
 
 | Tool | Scope | Job |
 |------|-------|-----|
-| `list_project_sessions` | project | Orient — what conversations exist, with stats |
-| `search_project` | project | Scan — which patterns hit, which sessions are hot |
+| `list_projects` | all projects | Orient — which projects exist (one row per repo, worktrees flattened) |
+| `list_project_sessions` | project(s) | Orient — what conversations exist, with stats (defaults to CWD) |
+| `search_projects` | projects (all by default) | Scan — which patterns hit, in which project/session |
 | `grep_session` | session | Examine — matches with context inside one conversation |
 | `grep_sessions` | sessions | Fan out — same patterns across N sessions in one call |
 | `read_turn` | turn | Read — full fidelity text around a specific moment |
+
+Project selection is uniform: every tool takes a `projects` list (paths or bare names). Omit it and the search/locate tools sweep **all** projects — the recall path when you remember a conversation but not where it happened. `list_project_sessions` is the exception: it defaults to the current project (use `list_projects` for the cross-project overview). Each result carries its `project`, so pass that back to scope follow-ups.
+
+**The search corpus is complete.** Search reads subagent transcripts too — `<sessionId>/subagents/agent-*.jsonl`, including workflow-orchestrated orphans — not just the main session. A subagent's own tool calls, thinking, and Bash are searchable, and any match that came from a subagent body names the `agent` it lives in (drill in with `get_agent_detail`).
 
 Each step narrows scope and increases fidelity. No tool switches modes or changes output shape based on hit volume.
 
@@ -53,9 +58,9 @@ Use when tracing what an agent did, correlating outputs with sessions, or buildi
 
 ## Worktree pooling
 
-Sessions from every git worktree of a project are pooled under one project. Claude Desktop dispatch creates real git worktrees under `<project>/.claude-worktrees/<name>/`, so dispatched work shows up alongside interactive sessions automatically — no need to specify a worktree or know which branch work happened on.
+Sessions from every git worktree of a project are pooled under one project — and this holds cross-project too: `list_projects` and an omitted-`projects` search show one row per repo, not one per worktree. Claude Desktop dispatch creates real git worktrees under `<project>/.claude-worktrees/<name>/`, so dispatched work shows up alongside interactive sessions automatically — no need to specify a worktree or know which branch work happened on.
 
-Each session carries a `worktree` field: absent for the main worktree, set to the worktree's directory basename (e.g. `happy-lehmann`) for linked worktrees. `list_project_sessions`, `grep_session`, `read_turn`, `browse_session`, `list_session_agents`, `get_agent_detail`, and `audit_session_tools` all surface it.
+Each session carries a `worktree` field (absent for the main worktree, set to the worktree's directory basename like `happy-lehmann` for linked worktrees) and a `project` field (the repo it belongs to). `list_project_sessions`, `grep_session`, `read_turn`, `browse_session`, `list_session_agents`, `get_agent_detail`, and `audit_session_tools` all surface both.
 
 **Why it matters for mining:** labeled sessions are usually dispatch-driven, meaning the "user" turn is often a programmatically-constructed prompt, not a human typing in-the-moment. Weight signal accordingly — dispatch sessions are weaker evidence for "user's own words" but stronger evidence for "what the agent decided autonomously." The worktree label also doubles as a git branch bridge: `happy-lehmann` in the session metadata points you at the `happy-lehmann` branch when cross-referencing with git history.
 
@@ -63,7 +68,7 @@ Each session carries a `worktree` field: absent for the main worktree, set to th
 
 **"What conversations exist?"** → `list_project_sessions`. Stats (message count, agent count, dates) help you decide where to look.
 
-**"Find where X was discussed"** → `search_project` with candidate patterns. Results show which patterns are productive and which sessions contain them. Then `grep_session` on the hot sessions to see actual matches in context.
+**"Find where X was discussed"** → `search_projects` with candidate patterns (omit `projects` to sweep everything when you don't know which project it was). Results show which patterns are productive and which project/session contains them. Then `grep_session` (scoped to the returned project) to see actual matches in context.
 
 **"Show me what was said"** → `grep_session` for pattern-matched content with context, or `read_turn` to read a specific moment at full fidelity. Use `full_length` values in grep output to gauge entry size before reading.
 
@@ -73,14 +78,14 @@ Each session carries a `worktree` field: absent for the main worktree, set to th
 
 ### Progressive search (broad → narrow)
 
-Start with `search_project` using all your candidate patterns in one call. The tool accepts an array and scans all sessions in a single pass regardless of pattern count — 20 patterns costs the same as 1. Front-load everything you can think of. The results show which terms land (high hit count) vs dead weight (zero hits, omitted from output). Session IDs include dates, so you can reason about chronology directly without a separate `list_project_sessions` call.
+Start with `search_projects` using all your candidate patterns in one call. The tool accepts an array and scans every session in a single pass regardless of pattern count — 20 patterns costs the same as 1. Front-load everything you can think of. The results show which terms land (high hit count) vs dead weight (zero hits, omitted from output), and tag each hit with its `project` (and `agent`, if it came from a subagent body). Omit `projects` to sweep everything; pass it once you know where to look.
 
-Then `grep_session` on the hot sessions with your best patterns. Like `search_project`, it takes a `patterns` list and returns per-pattern hit counts plus match blocks with surrounding context — front-load all your candidate terms in one call instead of OR-ing them into a kitchen-sink regex. When you find the moment you need, `read_turn` gives you the full untruncated text.
+Then `grep_session` on the hot sessions with your best patterns, passing the `project` the search returned. Like `search_projects`, it takes a `patterns` list and returns per-pattern hit counts plus match blocks with surrounding context — front-load all your candidate terms in one call instead of OR-ing them into a kitchen-sink regex. When you find the moment you need, `read_turn` gives you the full untruncated text.
 
 ### The search → grep → read loop
 
-`search_project` locates sessions. `grep_session` examines matches within a session. `read_turn` reads specific moments at full fidelity. Each step uses output from the previous one:
-- search_project → session IDs → grep_session
+`search_projects` locates the project + sessions. `grep_session` examines matches within a session. `read_turn` reads specific moments at full fidelity. Each step uses output from the previous one:
+- search_projects → project + session IDs → grep_session
 - grep_session → turn UUIDs + full_length → read_turn
 
 ### Agent inspection

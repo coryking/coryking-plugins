@@ -130,7 +130,7 @@ Use `Glob` and `Read` on these directly. Don't ask — go look. The test: if a f
 
 Chat logs capture in-the-moment decision traces when they exist — but they're ephemeral (Claude Code purges sessions after ~30 days) so don't assume they'll be there for older projects. When they are available, mine them iteratively, not linearly, using three tools at three zoom levels. The MCP tool descriptions document parameters and output format; this section teaches the research workflow.
 
-**Search** (`search_project`) — cast a wide net across all sessions with several candidate terms. Results show which patterns land (hit count, which sessions) and which are dead weight. Orientation step. Patterns are regex, case-insensitive.
+**Search** (`search_projects`) — cast a wide net across the project's sessions with several candidate terms. Results show which patterns land (hit count, which project/session) and which are dead weight. Orientation step. Patterns are regex, case-insensitive. **Scope it to the project you're mining** by passing `projects=["<your project>"]` — omitting `projects` sweeps every project on disk.
 
 **Grep** (`grep_session` / `grep_sessions`) — drill into specific sessions with multiple patterns at once. Front-load all your candidates in one call to get a per-pattern breakdown. `grep_sessions` fans out across several hot sessions with the same patterns.
 
@@ -138,7 +138,7 @@ Chat logs capture in-the-moment decision traces when they exist — but they're 
 
 **The loop in practice:**
 
-1. `search_project` with 3–4 broad patterns from your search vocabulary
+1. `search_projects` with 3–4 broad patterns from your search vocabulary
 2. `grep_session` or `grep_sessions` on hot sessions with your best patterns
 3. Invent 2–3 new terms from what you see — this is where the inferential work happens
 4. Re-search with the new terms

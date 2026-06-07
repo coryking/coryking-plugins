@@ -329,7 +329,7 @@ def test_load_sessions_present_matches_discover(tmp_path):
 
 def test_load_sessions_skips_subagent_walk_by_default(tmp_path):
     """agents_present is opt-in: tools that only need transcripts (read_turn,
-    grep_session, search_project, ...) must not pay the per-session subagents
+    grep_session, search_projects, ...) must not pay the per-session subagents
     walk. Default leaves the count at 0 without touching the filesystem tree."""
     session = _setup_workflow_only_session(tmp_path, n=3)
     conversations = {SID: ConversationRef(path=session, worktree=None)}

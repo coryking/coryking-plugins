@@ -59,13 +59,15 @@ in the moment, unfiltered. Mining them is iterative, not linear. Three tools at
 three zoom levels — the MCP tool descriptions document parameters and output format;
 this section teaches the research workflow.
 
-**Search** (`search_project`) — cast a wide net across all sessions. Give it several
+**Search** (`search_projects`) — cast a wide net across the project's sessions. Give it several
 candidate terms from your search vocabulary. Results show which patterns are productive
-(hit count, which sessions) and which are dead weight (omitted). This is your
-orientation step. Patterns are regex (case-insensitive).
+(hit count, which project/session) and which are dead weight (omitted). This is your
+orientation step. Patterns are regex (case-insensitive). **Scope it to the project you're
+mining** by passing `projects=["<your project>"]` — omitting `projects` sweeps *every*
+project on disk, which dilutes project-scoped mining with unrelated history.
 
 **Grep** (`grep_session`) — drill into a specific session with multiple patterns at once.
-Like `search_project`, it takes a `patterns` list and returns per-pattern hit counts plus
+Like `search_projects`, it takes a `patterns` list and returns per-pattern hit counts plus
 matching entries with surrounding context. Front-load all your candidate terms in one call
 instead of OR-ing them into a kitchen-sink regex — you get a per-term breakdown that tells
 you which alternatives landed.
@@ -83,7 +85,7 @@ Use `full_length` from grep output to gauge entry size before reading. Large ent
 
 **The loop in practice.** A typical chat mining session:
 
-1. `search_project` with 3-4 broad patterns from your search vocabulary — see which terms land and which sessions are hot
+1. `search_projects` with 3-4 broad patterns from your search vocabulary — see which terms land and which sessions are hot
 2. `grep_session` (or `grep_sessions` for fan-out) on hot sessions with your best patterns — read matches in context
 3. Invent 2-3 new search terms from what you see (this is the point)
 4. Search/grep with those new terms
@@ -106,7 +108,7 @@ Source field.
 The cc-explorer MCP tools are automatically available to named agents within this plugin. The tool descriptions document parameters, output format, and usage — refer to them for mechanics.
 
 **Conversation exploration** (progressive zoom):
-- `search_project` — scan all sessions for patterns, see which terms land and where
+- `search_projects` — scan all sessions for patterns, see which terms land and where
 - `grep_session` — examine matches for multiple patterns within a single session, with context
 - `grep_sessions` — fan out the same patterns across N sessions in one call
 - `read_turn` — read a specific conversation moment at full fidelity
