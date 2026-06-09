@@ -155,6 +155,44 @@ class TestBaseTranscriptEntryDisplay:
         assert str(e.uuid) not in e.display(truncate=0)
 
 
+class TestSystemTurnTiming:
+    """turn_duration timing must survive parsing — it was silently dropped
+    before durationMs/messageCount were declared on SystemTranscriptEntry."""
+
+    def _raw(self, **extra):
+        base = {
+            "type": "system",
+            "uuid": FULL_UUID,
+            "timestamp": "2026-06-08T15:25:36.183Z",
+            "sessionId": "bbbbbbbb-1111-2222-3333-444444444444",
+        }
+        base.update(extra)
+        return base
+
+    def test_turn_duration_parsed_from_raw(self):
+        from cc_explorer.parser import create_transcript_entry
+
+        e = create_transcript_entry(
+            self._raw(subtype="turn_duration", durationMs=103774, messageCount=19)
+        )
+        assert isinstance(e, SystemTranscriptEntry)
+        assert e.durationMs == 103774
+        assert e.messageCount == 19
+        assert e.turn_duration_ms == 103774
+
+    def test_turn_duration_ms_none_for_other_subtypes(self):
+        e = SystemTranscriptEntry(
+            uuid=FULL_UUID,
+            timestamp=TS,
+            sessionId="bbbbbbbb-1111-2222-3333-444444444444",
+            type="system",
+            subtype="away_summary",
+            content="you were idle",
+            durationMs=None,
+        )
+        assert e.turn_duration_ms is None
+
+
 class TestFormatEntryLineNoDuplicateIdentity:
     def test_human_pipe_fifth_field_is_body_only(self, human_entry):
         line = format_entry_line(human_entry, truncate=500)

@@ -297,15 +297,32 @@ class SummaryTranscriptEntry(BaseModel):
 
 
 class SystemTranscriptEntry(BaseTranscriptEntry):
-    """System messages — warnings, notifications, hook summaries."""
+    """System messages — warnings, notifications, hook summaries.
+
+    Two subtypes carry timing/orchestration data the harness computes for us:
+      - subtype="turn_duration": durationMs is the wall-clock the agent spent
+        on the just-finished turn (prompt → idle), and messageCount is how many
+        messages that turn produced. Emitted only on *clean* turn completion —
+        an interrupted turn produces none, so durationMs undercounts agent-active
+        time on its own and must be cross-checked against timestamp deltas.
+      - subtype="away_summary": content prose summarizing what happened while
+        the human was idle — the harness's own "user walked away here" marker.
+    """
     type: Literal["system"]
     content: Optional[str] = None
     subtype: Optional[str] = None
     level: Optional[str] = None
+    durationMs: Optional[int] = None
+    messageCount: Optional[int] = None
     hasOutput: Optional[bool] = None
     hookErrors: Optional[list[str]] = None
     hookInfos: Optional[list[dict[str, Any]]] = None
     preventedContinuation: Optional[bool] = None
+
+    @property
+    def turn_duration_ms(self) -> Optional[int]:
+        """durationMs when this is a turn_duration marker, else None."""
+        return self.durationMs if self.subtype == "turn_duration" else None
 
 
 class QueueOperationTranscriptEntry(BaseModel):
