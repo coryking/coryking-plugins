@@ -174,6 +174,15 @@ class BaseTranscriptEntry(BaseModel):
     version: str = ""
     agentId: Optional[PrefixId] = None
     gitBranch: Optional[str] = None
+    # How this session was invoked. "cli" = interactive; "sdk-cli" = headless
+    # (claude -p / SDK / cron — e.g. the nightly dreamer runs). Distinguishes
+    # Cory-driven attention from automated runs.
+    entrypoint: Optional[str] = None
+
+    @property
+    def is_headless(self) -> bool:
+        """True for non-interactive invocations (claude -p / SDK / cron)."""
+        return self.entrypoint == "sdk-cli"
 
     def display(
         self,
@@ -189,6 +198,8 @@ class HumanEntry(BaseTranscriptEntry):
     type: Literal["user"]
     message: UserMessageModel
     isMeta: Optional[bool] = None
+    # "sdk" for headless/SDK-driven prompts (cron/-p), absent/other for typed input.
+    promptSource: Optional[str] = None
 
     def display(
         self,
