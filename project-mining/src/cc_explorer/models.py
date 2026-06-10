@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, BeforeValidator
@@ -120,6 +121,98 @@ ContentItem = Union[
 
 
 # =============================================================================
+# Teammate messages — agent-team orchestration DMs
+# =============================================================================
+#
+# In an agent-team session, an orchestrator (or peer worker) DMs a worker's pane
+# by writing a user-role turn whose content opens with `<teammate-message ...>`.
+# These are the orchestration protocol, not human attention. The markup grammar
+# is fixed: `<teammate-message teammate_id="..." [color="..."] [summary="..."]>`
+# wrapping a body of free prose or embedded JSON. We parse the attributes into
+# structure but keep the body as a raw string (never parse embedded JSON).
+
+
+class TeammateMessage(BaseModel):
+    """A teammate-injected user turn, parsed from its `<teammate-message>` markup.
+
+    `teammate_id` is the sender (orchestrator or peer worker). `color`/`summary`
+    are optional presentation attributes. `body` is the raw content inside/after
+    the tag — free prose or embedded JSON, kept verbatim (never JSON-parsed).
+    """
+
+    teammate_id: str
+    color: Optional[str] = None
+    summary: Optional[str] = None
+    body: str = ""
+
+
+# `<teammate-message teammate_id="..." [color="..."] [summary="..."]>BODY[</teammate-message>]`
+# The closing tag is optional in the wild; body is everything after the opening
+# tag, with a trailing close stripped. Attributes are order-independent.
+_TEAMMATE_OPEN_RE = re.compile(
+    r"<teammate-message\b([^>]*)>",
+    re.IGNORECASE,
+)
+_TEAMMATE_ATTR_RE = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
+_TEAMMATE_CLOSE_RE = re.compile(r"</teammate-message>\s*$", re.IGNORECASE)
+
+
+def parse_teammate_message(text: str) -> Optional[TeammateMessage]:
+    """Parse `<teammate-message ...>` markup into a TeammateMessage, else None.
+
+    Only fires when the (left-stripped) text OPENS with the marker — a turn that
+    merely mentions the string mid-prose is not a teammate DM. `teammate_id` is
+    required; markup missing it is not a valid teammate message.
+    """
+    stripped = text.lstrip()
+    m = _TEAMMATE_OPEN_RE.match(stripped)
+    if not m:
+        return None
+    attrs = dict(_TEAMMATE_ATTR_RE.findall(m.group(1)))
+    if "teammate_id" not in attrs:
+        return None
+    body = stripped[m.end():]
+    body = _TEAMMATE_CLOSE_RE.sub("", body).strip()
+    return TeammateMessage(
+        teammate_id=attrs["teammate_id"],
+        color=attrs.get("color"),
+        summary=attrs.get("summary"),
+        body=body,
+    )
+
+
+# =============================================================================
+# User-turn origin — what a user-role entry really is
+# =============================================================================
+
+
+class UserOrigin(str, Enum):
+    """What a user-role transcript entry actually is.
+
+    User-role JSONL entries are a grab bag: real human prompts, teammate DMs in
+    agent-team sessions, tool outputs fed back to the model, system-injected meta
+    messages, bare command scaffolding (a `/clear` with no prompt), and interrupt
+    sentinels. This is the ONE place that answers "what is this entry, really?";
+    the scattered helpers (substantive_human_text, is_teammate_injected, the
+    interrupt-sentinel checks) are views consistent with it.
+
+    Note: `meta`/`command_scaffolding` turns still count as human turns in the
+    current counting paths (list_project_sessions, activity.py) — a deliberate
+    deferred decision. `origin` exposes the classification; tools opt in later.
+    """
+
+    human = "human"                          # a genuine human-typed prompt
+    teammate = "teammate"                    # a `<teammate-message>` DM (agent-team)
+    tool_result = "tool_result"              # tool output fed back to the model
+    command_scaffolding = "command_scaffolding"  # bare command, no human prose
+    interrupt = "interrupt"                  # `[Request interrupted` esc sentinel
+    meta = "meta"                            # system-injected (isMeta) message
+
+
+_INTERRUPT_SENTINEL = "[Request interrupted"
+
+
+# =============================================================================
 # Message Models
 # =============================================================================
 
@@ -201,18 +294,59 @@ class BaseTranscriptEntry(BaseModel):
 
 
 class HumanEntry(BaseTranscriptEntry):
-    """Actual human messages — the user talking."""
+    """Actual human messages — the user talking.
+
+    Despite the name, a user-role entry may not be a human prompt at all: in
+    agent-team sessions an orchestrator/peer DMs the pane (see teammate_message),
+    a bare slash command carries no prose, an esc produces an interrupt sentinel.
+    `origin` is the authoritative classification.
+    """
     type: Literal["user"]
     message: UserMessageModel
     isMeta: Optional[bool] = None
     # "sdk" for headless/SDK-driven prompts (cron/-p), absent/other for typed input.
     promptSource: Optional[str] = None
 
+    @property
+    def teammate_message(self) -> Optional[TeammateMessage]:
+        """Parsed `<teammate-message>` DM if this turn is teammate-injected, else None.
+
+        The marker arrives as a bare string in raw JSONL; the parser normalizes
+        user content to `[TextContent]`, so detection keys on the leading text
+        (which survives normalization), not the str/list shape (which does not).
+        """
+        return parse_teammate_message(_leading_user_text(self))
+
+    @property
+    def origin(self) -> UserOrigin:
+        """What this user-role entry really is — the single classification source."""
+        if self.isMeta:
+            return UserOrigin.meta
+        raw = _leading_user_text(self)
+        if _INTERRUPT_SENTINEL in raw:
+            return UserOrigin.interrupt
+        if parse_teammate_message(raw) is not None:
+            return UserOrigin.teammate
+        if substantive_human_text(self):
+            return UserOrigin.human
+        return UserOrigin.command_scaffolding
+
     def display(
         self,
         truncate: int,
         hide: frozenset[str] = frozenset(),
     ) -> str:
+        tm = self.teammate_message
+        if tm is not None:
+            # Render the orchestration DM labeled instead of as raw XML, so a
+            # teammate turn reads as `[teammate: <sender> → <recipient>] body`.
+            # Body is the full message (preserved at full fidelity); the summary,
+            # when present, leads as a compact gloss.
+            recipient = self.agentName or "?"
+            head = f"[teammate: {tm.teammate_id} → {recipient}]"
+            body = f"{tm.summary} — {tm.body}".strip(" —") if tm.summary else tm.body
+            line = f"{head} {body}".strip() if body else head
+            return smart_truncate(line, truncate)
         text = extract_text(self)
         return smart_truncate(text, truncate)
 
@@ -224,6 +358,14 @@ class ToolResultEntry(BaseTranscriptEntry):
     toolUseResult: Optional[ToolUseResult] = None
     isMeta: Optional[bool] = None
     # agentId is inherited from BaseTranscriptEntry — do not redeclare
+
+    @property
+    def origin(self) -> UserOrigin:
+        """A tool result is tool output — unless an esc cut off the tool call,
+        in which case it carries the interrupt sentinel."""
+        if _INTERRUPT_SENTINEL in _leading_user_text(self):
+            return UserOrigin.interrupt
+        return UserOrigin.tool_result
 
     def display(
         self,
@@ -266,6 +408,10 @@ class MetaEntry(BaseTranscriptEntry):
     message: UserMessageModel
     isMeta: Literal[True] = True
     toolUseResult: Optional[ToolUseResult] = None
+
+    @property
+    def origin(self) -> UserOrigin:
+        return UserOrigin.meta
 
 
 class AssistantTranscriptEntry(BaseTranscriptEntry):
@@ -524,39 +670,36 @@ _COMMAND_ARGS_RE = re.compile(r"<command-args>([\s\S]*?)</command-args>")
 _LEADING_XML_RE = re.compile(r"^<[^>]+>[\s\S]*?</[^>]+>\s*")
 
 
-_TEAMMATE_MARKER = "<teammate-message"
+def _leading_user_text(entry: BaseTranscriptEntry) -> str:
+    """Raw leading text of a user-role entry, for marker/sentinel classification.
+
+    Reads content blocks directly (no system-XML stripping) so the teammate
+    marker and interrupt sentinel — both of which live at the very front of the
+    content — survive. The parser normalizes user content to `[TextContent]`, so
+    the leading marker text survives even though the original str/list shape does
+    not; we still handle a bare str for safety.
+    """
+    content = entry.message.content
+    if isinstance(content, str):
+        return content
+    if content and isinstance(content[0], TextContent):
+        return content[0].text
+    return ""
 
 
 def is_teammate_injected(entry: BaseTranscriptEntry) -> bool:
     """True if this user turn was injected by a teammate, not typed by the human.
 
-    In agent-team sessions an orchestrator (or peer worker) DMs a worker's pane
-    by writing a user-role turn whose message content opens with
-    `<teammate-message ...>` (grammar: `<teammate-message teammate_id="..."
-    [color="..."] [summary="..."]>`). There is no JSON boolean for it — the
-    marker IS the content. Human-typed turns in the same session are normal
-    turns (plain prose or `<command-` stanzas).
-
-    In the raw JSONL this marker arrives as a bare string; the parser normalizes
-    every user turn's content into a `[TextContent]` list, so detection keys on
-    the leading marker text (which survives normalization), not on the str/list
-    shape (which does not). Only HumanEntry is considered — ToolResultEntry and
-    MetaEntry are never teammate DMs.
+    A trivial view over `HumanEntry.teammate_message`: an agent-team
+    orchestrator/peer DMs a worker's pane by writing a user-role turn whose
+    content opens with `<teammate-message ...>`. Only HumanEntry is considered —
+    ToolResultEntry and MetaEntry are never teammate DMs.
 
     These injected turns are the orchestration protocol, not human attention:
     callers must not count them as human turns, interrupts, or opening/closing
     candidates.
     """
-    if not isinstance(entry, HumanEntry):
-        return False
-    content = entry.message.content
-    if isinstance(content, str):
-        text = content
-    elif content and isinstance(content[0], TextContent):
-        text = content[0].text
-    else:
-        return False
-    return text.lstrip().startswith(_TEAMMATE_MARKER)
+    return isinstance(entry, HumanEntry) and entry.teammate_message is not None
 
 
 def substantive_human_text(entry: HumanEntry) -> str:
