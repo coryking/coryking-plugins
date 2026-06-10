@@ -54,8 +54,10 @@ class SessionSummary(SparseModel):
         default=None,
         description="Git worktree name this session lived in. Absent for the main worktree; present (e.g. 'happy-lehmann') for linked worktrees, which includes Claude Desktop dispatched sessions under `.claude-worktrees/`. Labeled sessions are often programmatically dispatched rather than interactively typed — calibrate signal accordingly.",
     )
-    messages: int = Field(description="Total message count (human + assistant turns).")
-    user_turns: int = Field(description="Human prompts — how many times the user actually spoke. A small number against many agents or messages flags a single prompt that fanned out into a long autonomous run.")
+    messages: int = Field(description="Total message count (human + assistant turns). Teammate DMs (agent-team orchestration) ARE counted here but NOT in `user_turns`, so a team-worker session legitimately shows user_turns=0 with a high message_count — check `team` to tell that apart from autonomous fan-out.")
+    user_turns: int = Field(description="Human prompts — how many times the user actually spoke. A small number against many agents or messages flags a single prompt that fanned out into a long autonomous run. EXCLUDES teammate-injected turns (agent-team orchestration DMs, see `team`) AND interrupt sentinels (mid-turn esc, not a prompt): in a worker session most user-role turns are peer/orchestrator DMs, not human attention, so they don't count here. Aligned with the activity timeline's human_turns.")
+    team: str | None = Field(default=None, description="Agent-team name (teamName) when this session is a team worker, else absent. Its user-role turns are mostly teammate-injected (orchestration), not human-typed — see `user_turns`.")
+    team_role: str | None = Field(default=None, description="This worker's role in the team (agentName), e.g. 'reviewer-3'. Absent outside agent-team sessions.")
     agents: int = Field(description="Subagents dispatched directly by the parent transcript (Task/Agent/TaskCreate blocks). Top-down view — does NOT count workflow-orchestrated agents.")
     agents_present: int = Field(description="Full discovered subagent population — direct dispatches plus on-disk orphans (notably workflow-orchestrated agents). Matches list_session_agents' total_agents. When this exceeds `agents`, the session ran workflows. The min_agents filter matches on this number.")
     context_tokens: int = Field(description="Last assistant turn's input tokens (context window size).")
@@ -76,6 +78,8 @@ class SessionSummary(SparseModel):
             worktree=s.worktree,
             messages=s.message_count,
             user_turns=s.user_turns,
+            team=s.team,
+            team_role=s.team_role,
             agents=s.stats.agent_count,
             agents_present=s.agents_present,
             context_tokens=s.stats.context_tokens,
@@ -776,3 +780,125 @@ class SessionToolAuditResponse(SparseModel):
         description="Substring filter applied to tool names, if any.",
     )
     agents: list[AgentToolAudit] = Field(description="Per-agent audits in dispatch order.")
+
+
+# =============================================================================
+# Activity timeline (get_activity_timeline)
+# =============================================================================
+#
+# A cross-project attention timeline over a time window. The payload leads with
+# rollups (window, summary) because truncation eats the bottom — the sessions
+# list and the sparse timeline grid, the two large sections, come last.
+#
+# Timestamp labels are all rendered in `window.tz`: "Day MM-DD HH:MM" for
+# session start/end and the summary/day peaks, "MM-DD HH:MM" for timeline keys,
+# "HH:MM" for within-day fields. Session `id`s are 8-char prefixes and `project`
+# values are repo names — both can be passed straight back to the other
+# cc-explorer tools (read_turn, grep_session, list_session_agents, ...).
+
+
+class ActivityWindow(SparseModel):
+    """The resolved time window and grid grain."""
+
+    after: str = Field(description="Window start (inclusive), ISO-8601 in `tz`.")
+    before: str = Field(description="Window end (exclusive), ISO-8601 in `tz`.")
+    tz: str = Field(description="IANA tz name all labels and day/hour bucketing use.")
+    bucket_minutes: int = Field(description="Grid grain in minutes.")
+    days: int = Field(description="Number of whole days the window spans (DST-robust: a 7-local-day window reports 7 even when it straddles a DST transition). The top-level `days` array is keyed by local calendar date and may contain one MORE entry than this when the window's edges land mid-day across calendar boundaries.")
+
+
+class ActivityProjectRollup(SparseModel):
+    """Per-project aggregates. Interactive and headless are both reflected, but
+    active_min/human_turns count interactive work only."""
+
+    project: str = Field(description="Repo name — pass to `projects` on other tools.")
+    sessions: int = Field(description="Interactive sessions touching this window.")
+    headless_sessions: int = Field(description="Headless (sdk-cli) sessions — machine runs.")
+    active_min: int = Field(description="Minutes with >=1 interactive human turn in this project (union across its sessions).")
+    human_turns: int = Field(description="Interactive human turns in-window.")
+    turn_min: int = Field(description="Sum of turn_duration minutes (interactive + headless). FLOOR — interrupted turns emit no duration.")
+
+
+class ActivityInteractiveSummary(SparseModel):
+    """Interactive (human-driven) attention rollup. Headless work is excluded."""
+
+    sessions: int = Field(description="Distinct interactive sessions with in-window activity.")
+    active_min: int = Field(description="Minutes with >=1 interactive human turn in any session = (#such buckets) x bucket_minutes.")
+    multitask_min: int = Field(description="Minutes with >=2 distinct interactive sessions taking human turns in the same bucket.")
+    peak_sessions_driven: int = Field(description="Max distinct interactive sessions with a human turn in one bucket.")
+    peak_at: str | None = Field(default=None, description="When peak_sessions_driven occurred (Day MM-DD HH:MM).")
+    peak_autonomous_sessions: int = Field(description="Max distinct sessions with agent activity and NO human turn in one bucket.")
+    peak_autonomous_at: str | None = Field(default=None, description="When peak_autonomous_sessions occurred.")
+    human_turns: int = Field(description="Interactive human turns (interrupts excluded).")
+    interrupts: int = Field(description="Times the human stopped the agent mid-turn (esc) across interactive sessions. A fact, no valence.")
+    machine_hours: int | float = Field(description="Sum of interactive turn_min, in hours. FLOOR.")
+    team_sessions: int = Field(description="Interactive sessions belonging to an agent team (non-null team). Their user-role turns are mostly teammate-injected, not human-typed — counted as agent activity, not attention.")
+
+
+class ActivityHeadlessSummary(SparseModel):
+    """Headless (sdk-cli) rollup — automated/cron/SDK runs, segregated from attention."""
+
+    sessions: int = Field(description="Headless sessions with in-window activity.")
+    human_turns: int = Field(description="Internal human turns in headless transcripts (orchestration prompts, not human attention).")
+    machine_hours: int | float = Field(description="Sum of headless turn_min, in hours.")
+
+
+class ActivitySummary(SparseModel):
+    """Top-of-payload rollup: interactive attention, headless machine work, by-project."""
+
+    interactive: ActivityInteractiveSummary
+    headless: ActivityHeadlessSummary
+    by_project: list[ActivityProjectRollup] = Field(description="Per-project rollups, busiest first.")
+
+
+class ActivityDay(SparseModel):
+    """One local calendar day, interactive sessions only."""
+
+    date: str = Field(description="Local date label (Day MM-DD).")
+    active_min: int = Field(description="Minutes this day with >=1 interactive human turn.")
+    multitask_min: int = Field(description="Minutes this day with >=2 interactive sessions driven at once.")
+    peak: int = Field(description="Max distinct interactive sessions driven in one bucket this day.")
+    peak_at: str | None = Field(default=None, description="When the day's peak occurred (HH:MM).")
+    human_turns_by_hour: list[int] = Field(description="24 ints — interactive human turns per local hour (0-23).")
+    sessions_driven_by_hour: list[int] = Field(description="24 ints — distinct interactive sessions with >=1 human turn in that local hour (union of session ids across the hour's buckets; a session active across several buckets of the hour counts once).")
+    agent_turns_by_hour: list[int] = Field(description="24 ints — interactive agent turns per local hour.")
+
+
+class ActivitySession(SparseModel):
+    """One session's roll-up. id and project pass straight back to other tools."""
+
+    id: PrefixId = Field(description="8-char session id — pass as `session` to read_turn/grep_session/list_session_agents.")
+    project: str = Field(description="Repo name — pass to `projects`.")
+    headless: bool = Field(description="True for sdk-cli (claude -p / SDK / cron). Machine work, excluded from interactive rollups.")
+    entrypoint: str | None = Field(default=None, description="Raw entrypoint value, e.g. 'cli' (interactive) or 'sdk-cli' (headless); other values are possible. Don't switch on it for the interactive/headless split — the `headless` boolean is authoritative.")
+    team: str | None = Field(default=None, description="Agent-team name (teamName) when this session is a team worker, else null. Its user-role turns are mostly teammate-injected (orchestration), not human-typed.")
+    team_role: str | None = Field(default=None, description="This worker's role in the team (agentName), e.g. 'reviewer-3'. null outside agent-team sessions.")
+    model: str | None = Field(default=None, description="Dominant (most frequent) assistant model id in-window.")
+    branches: list[str] = Field(description="Distinct gitBranch values, first-appearance order.")
+    start: str | None = Field(default=None, description="First in-window activity bucket (Day MM-DD HH:MM).")
+    end: str | None = Field(default=None, description="Last in-window activity bucket (Day MM-DD HH:MM).")
+    human_turns: int = Field(description="Non-interrupt human turns in-window.")
+    agent_turns: int = Field(description="Agent turns (deduped API requests + tool-result markers); subagent activity folded in.")
+    amplification: float | None = Field(default=None, description="agent_turns / human_turns. null when human_turns == 0.")
+    n_sub: int = Field(description="Subagents with any in-window activity, folded into this session.")
+    turn_min: int = Field(description="Sum of turn_duration minutes (incl. folded subagents). FLOOR.")
+    human_active_min: int = Field(description="Buckets with >=1 human turn x bucket_minutes.")
+    agent_only_min: int = Field(description="Buckets with agent activity and 0 human turns x bucket_minutes.")
+    interrupts: int = Field(description="Mid-turn stops (esc) in this session. A fact, no valence.")
+    title: str | None = Field(default=None, description="Auto title from first human message (same logic as list_project_sessions).")
+    opening: str | None = Field(default=None, description="First non-interrupt human turn, whitespace-collapsed, ~300 chars.")
+    closing: str | None = Field(default=None, description="Last non-interrupt human turn, whitespace-collapsed, ~200 chars.")
+    summary: str | None = Field(default=None, description="Latest stored Claude Code summary entry, or null if none.")
+
+
+class ActivityTimelineResponse(SparseModel):
+    """Cross-project activity timeline. Summary first (survives truncation),
+    then per-day rollups, the per-session list, and last the sparse grid."""
+
+    window: ActivityWindow
+    summary: ActivitySummary
+    days: list[ActivityDay] = Field(description="One row per local calendar day, interactive only.")
+    sessions: list[ActivitySession] = Field(description="Interactive sessions first (turn_min desc), then headless (turn_min desc).")
+    timeline: dict[str, dict[str, list[int]]] = Field(
+        description="Time-major sparse grid: {'MM-DD HH:MM': {session_id: [human_turns, agent_turns]}}. Active buckets only; ALL sessions incl. headless; subagents folded into the parent as agent turns."
+    )

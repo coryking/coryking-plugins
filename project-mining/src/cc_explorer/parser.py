@@ -299,10 +299,12 @@ def load_conversations(project_path: str) -> dict[PrefixId, ConversationRef]:
         }
 
     result: dict[PrefixId, ConversationRef] = {}
+    seen_dirs: set[Path] = set()
     for i, wt_path in enumerate(worktree_paths):
         claude_dir = _find_project_dir(wt_path)
         if claude_dir is None or not claude_dir.exists():
             continue
+        seen_dirs.add(claude_dir)
         label: Optional[str] = None if i == 0 else Path(wt_path).name
         for jsonl in claude_dir.glob("*.jsonl"):
             session_id = PrefixId(jsonl.stem)
@@ -312,7 +314,71 @@ def load_conversations(project_path: str) -> dict[PrefixId, ConversationRef]:
             # one — main worktree (i=0) takes priority by construction.
             if session_id not in result:
                 result[session_id] = ConversationRef(path=jsonl, worktree=label)
+
+    # Fold in orphaned dispatch-worktree dirs: a pruned/deleted worktree leaves
+    # its transcripts under ~/.claude/projects/ with no live `git worktree list`
+    # entry, so the loop above never reaches them. They belong to this repo by
+    # path structure — recover and merge them so every tool (search, listing,
+    # activity) sees the full session population, not just live worktrees.
+    for enc_dir, _wt_cwd, wt_name in _orphan_worktree_dirs(canonical, seen_dirs):
+        for jsonl in enc_dir.glob("*.jsonl"):
+            session_id = PrefixId(jsonl.stem)
+            if session_id not in result:
+                result[session_id] = ConversationRef(path=jsonl, worktree=wt_name)
     return result
+
+
+def _orphan_worktree_dirs(
+    repo_root: str, seen_dirs: set[Path]
+) -> list[tuple[Path, str, str]]:
+    """Encoded project dirs for dispatch worktrees of `repo_root` that git missed.
+
+    Scans ~/.claude/projects for dirs whose recovered cwd path-folds into
+    `repo_root` via the `.claude/worktrees` convention but weren't already
+    discovered through `git worktree list` (pruned/deleted worktrees). Returns
+    (encoded_dir, worktree_cwd, worktree_name) tuples. Cheap: a prefix-gated dir
+    scan plus a shallow transcript read per candidate, no git.
+
+    Known accepted limitations:
+    - Hash-truncated sanitized names: for very deep repo paths the encoded dir
+      name is hash-truncated, defeating the `prefix + "-"` startswith gate, so
+      such orphans aren't recovered (accepted — they're rare and the gate keeps
+      the scan cheap).
+    - Orphan recovery requires a functional git main worktree: the repo root is
+      recovered from the worktree path structure, so a repo whose main worktree
+      no longer exists has nothing to pool the orphans back into.
+    """
+    from cc_explorer._claude_paths import (
+        _canonicalize_path,
+        _get_projects_dir,
+        _sanitize_path,
+    )
+    from cc_explorer.search import _cwd_from_transcripts, _repo_root_from_worktree_path
+
+    prefix = _sanitize_path(repo_root)
+    projects_dir = _get_projects_dir()
+    try:
+        candidates = [
+            d
+            for d in projects_dir.iterdir()
+            if d.is_dir() and d not in seen_dirs and d.name.startswith(prefix + "-")
+        ]
+    except OSError:
+        return []
+
+    out: list[tuple[Path, str, str]] = []
+    for d in candidates:
+        jsonls = sorted(d.glob("*.jsonl"))
+        if not jsonls:
+            continue
+        cwd = _cwd_from_transcripts(jsonls)
+        if not cwd:
+            continue
+        wt_root = _repo_root_from_worktree_path(cwd)
+        if wt_root is None or _canonicalize_path(wt_root) != repo_root:
+            continue
+        out.append((d, cwd, Path(cwd).name))
+    return out
 
 
 # extract_text and _strip_system_xml moved to models.py

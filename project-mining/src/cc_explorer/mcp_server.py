@@ -15,11 +15,13 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
+from .activity import build_activity_timeline
 from .formatting import matches_id
 from .models import parse_hide
 from .parser import load_conversations
 from .utils import PrefixId
 from .responses import (
+    ActivityTimelineResponse,
     AgentDetailResponse,
     AgentListResponse,
     AgentToolAudit,
@@ -72,7 +74,9 @@ the main transcript, so an agent's own tool calls / thinking are searchable too
    exists. Within a project, orient with list_project_sessions (like `ls`), then
    zoom in: grep_session / grep_sessions for matches-in-context, read_turn /
    browse_session to read at full fidelity. Every result carries its `project`,
-   so pass that back to scope follow-ups.
+   so pass that back to scope follow-ups. In agent-team sessions, a user turn
+   that is a teammate DM (orchestration, not the human) renders labeled as
+   `[teammate: sender -> recipient] ...` rather than raw <teammate-message> XML.
 
 2. Agent forensics — see what a session's subagents actually did.
    Start from list_project_sessions(min_agents=1) to find sessions that spawned
@@ -80,6 +84,12 @@ the main transcript, so an agent's own tool calls / thinking are searchable too
    ones included), get_agent_detail for one agent's prompt / result / tool-trace,
    and audit_session_tools to check whether the agents used their tools correctly
    (per-tool counts, error rates, retries).
+
+3. Attention reconstruction — what a window of agent-driving looked like.
+   get_activity_timeline rolls every project's transcripts over a time window
+   into a turn-count grid plus pre-computed attention rollups (sessions running
+   at once, peaks, hands-on vs autonomous time). Session ids and projects it
+   returns pass straight back to the tools above.
 """
 
 mcp = FastMCP("cc-explorer", instructions=_INSTRUCTIONS)
@@ -1045,6 +1055,42 @@ def audit_session_tools(
         tool_name_filter=tool_name_filter,
         agents=audits,
     )
+
+
+@mcp.tool(annotations=_TOOL_ANNOTATIONS)
+def get_activity_timeline(
+    projects: ProjectsParam = None,
+    after: Annotated[
+        datetime | None,
+        Field(description="Window start, inclusive. Naive datetimes are read in `tz`. Default: 7 days before `before`."),
+    ] = None,
+    before: Annotated[
+        datetime | None,
+        Field(description="Window end, exclusive (half-open [after, before)). Naive datetimes are read in `tz`. Default: now."),
+    ] = None,
+    bucket_minutes: Annotated[
+        int,
+        Field(description="Grid grain in minutes. The unit for every *_min field and the timeline bucket size."),
+    ] = 5,
+    tz: Annotated[
+        str | None,
+        Field(description="IANA tz name (e.g. 'America/Los_Angeles'). ALL day/hour bucketing and displayed timestamps use it. Omit for system local time."),
+    ] = None,
+) -> ActivityTimelineResponse:
+    """Reconstruct cross-project attention over a time window: a bucket_minutes-grain grid (default 5 min) of turn counts plus pre-computed attention rollups, for analyzing how the fleet was driven.
+
+    Answers 'what did my week of agent-driving actually look like' — how many sessions ran at once, when attention peaked, how much was hands-on vs autonomous machine-time, per project and per day. Omit `projects` to span EVERY project (cross-project attention is the point); pass `projects` to scope. Every session `id` and `project` returned can be passed straight back to read_turn / grep_session / list_session_agents to drill into a specific moment.
+
+    The payload leads with rollups (summary, by-project, per-day) and ends with the per-session list and the sparse time-major grid, so the actionable aggregates survive truncation. Read the output schema for exact field definitions — key ones: a *human turn* is a non-interrupt user message; `interrupts` count mid-turn esc stops (a neutral fact); `turn_min` sums the harness's turn_duration records and is a FLOOR (interrupted turns emit none); subagent activity folds into its parent as agent turns. Agent-team worker sessions (non-null `team`/`team_role`) have user-role turns that are mostly INJECTED BY TEAMMATES (orchestration), not human-typed — those are counted as agent activity, not human turns; `summary.interactive.team_sessions` flags how many such sessions are in the window. Headless (sdk-cli) sessions are machine work — present in the sessions list and timeline grid, but excluded from every interactive attention rollup (active_min, multitask, peaks, the day arrays).
+    """
+    result = build_activity_timeline(
+        projects=projects,
+        after=after,
+        before=before,
+        bucket_minutes=bucket_minutes,
+        tz=tz,
+    )
+    return ActivityTimelineResponse.model_validate(result)
 
 
 def main():

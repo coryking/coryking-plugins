@@ -91,6 +91,30 @@ def _match_example(text: str, pattern: re.Pattern, width: int = 150) -> str:
 # =============================================================================
 
 
+def _raw_searchable_text(entry: TranscriptEntry) -> str:
+    """The entry's raw searchable text — what _entry_matches actually matched on.
+
+    The grep example path centers on this when the pattern isn't in the display
+    rendering (display strips/reformats; a hit can live in thinking, tool inputs,
+    or system-XML-stripped output). Mirrors _entry_matches's per-type coverage.
+    """
+    from .models import (
+        extract_output_text,
+        extract_text,
+        extract_thinking_text,
+    )
+    from .search import extract_tool_text
+
+    if isinstance(entry, HumanEntry):
+        return extract_text(entry)
+    if isinstance(entry, AssistantTranscriptEntry):
+        parts = [extract_text(entry), extract_tool_text(entry), extract_thinking_text(entry)]
+        return "\n".join(p for p in parts if p)
+    if isinstance(entry, ToolResultEntry):
+        return extract_output_text(entry)
+    return ""
+
+
 def format_entry_line(
     entry: TranscriptEntry,
     truncate: int,
@@ -118,8 +142,20 @@ def format_entry_line(
     # Resolve the displayed text
     if truncate:
         if center_pattern is not None:
-            # Center the excerpt on the first match so mid-entry hits stay visible
-            display = _match_example(full, center_pattern, width=truncate)
+            # Center the excerpt on the first match so mid-entry hits stay visible.
+            # The match was found against the entry's RAW searchable text (which
+            # can differ from the display rendering — e.g. thinking blocks, tool
+            # inputs, system-XML-stripped output). When the pattern isn't in the
+            # display text, center the excerpt on the raw text instead of silently
+            # showing the display head, so the matched content is always visible.
+            if center_pattern.search(full):
+                display = _match_example(full, center_pattern, width=truncate)
+            else:
+                raw = _raw_searchable_text(entry)
+                if raw and center_pattern.search(raw):
+                    display = _match_example(raw, center_pattern, width=truncate)
+                else:
+                    display = entry.display(truncate=truncate, hide=hide)
         else:
             display = entry.display(truncate=truncate, hide=hide)
     else:

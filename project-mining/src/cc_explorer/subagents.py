@@ -39,6 +39,7 @@ from .models import (
     TranscriptEntry,
     TranscriptStats,
     extract_text,
+    substantive_human_text,
 )
 from .parser import load_transcript
 from .utils import PrefixId
@@ -537,13 +538,31 @@ def _extract_tool_result_text(
 
 
 def _first_user_text(entries: list[TranscriptEntry]) -> str:
-    """First human turn's text — a subagent's spawn prompt, recovered from its transcript."""
+    """First human turn's text — a subagent's spawn prompt, recovered from its transcript.
+
+    Routes through `substantive_human_text` (the single source of truth for "what
+    did the human actually say"): it recovers command-args prompts and skips
+    command scaffolding, interrupt sentinels, and teammate DMs — so a leading
+    `<teammate-message>` orchestration DM is never mistaken for the spawn prompt.
+
+    A team-worker orphan agent may have NO substantive human turn at all — its
+    real driving instruction is a teammate DM. Rather than show an empty prompt,
+    fall back to the first teammate message rendered from its parsed structure as
+    `[teammate: <sender>] <body>` (never the raw XML).
+    """
+    first_teammate: Optional[str] = None
     for entry in entries:
-        if isinstance(entry, HumanEntry):
-            text = extract_text(entry).strip()
-            if text:
-                return text
-    return ""
+        if not isinstance(entry, HumanEntry):
+            continue
+        text = substantive_human_text(entry)
+        if text:
+            return text
+        if first_teammate is None:
+            tm = entry.teammate_message
+            if tm is not None:
+                body = tm.body.strip()
+                first_teammate = f"[teammate: {tm.teammate_id}] {body}".strip()
+    return first_teammate or ""
 
 
 def _last_assistant_text(entries: list[TranscriptEntry]) -> str:

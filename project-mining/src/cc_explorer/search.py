@@ -21,9 +21,11 @@ from .models import (
     ToolUseContent,
     TranscriptEntry,
     TranscriptStats,
+    UserOrigin,
     extract_output_text,
     extract_text,
     extract_thinking_text,
+    substantive_human_text,
 )
 from .formatting import _match_example
 from .parser import load_conversations, load_transcript
@@ -102,6 +104,32 @@ def resolve_projects(projects: Optional[list[str]] = None) -> list[str]:
 # Project discovery (cross-project) — enumerate ~/.claude/projects, flatten
 # worktrees back into their repo so one logical project is one entry.
 # =============================================================================
+
+
+# Claude Code dispatch creates linked worktrees under a fixed in-repo location.
+# Two conventions have shipped: the current `<repo>/.claude/worktrees/<name>` and
+# the older `<repo>/.claude-worktrees/<name>`. The path *structure* alone names
+# the repo — everything before the marker segment is the main worktree root.
+_WORKTREE_MARKERS = ("/.claude/worktrees/", "/.claude-worktrees/")
+
+
+def _repo_root_from_worktree_path(cwd: str) -> Optional[str]:
+    """Recover a repo root from a Claude-dispatch worktree cwd by path structure.
+
+    `git worktree list` is the authoritative pooling source, but it only knows
+    about worktrees that still exist on disk: a pruned/deleted worktree leaves its
+    transcripts behind under `~/.claude/projects/` with no live git entry, so the
+    shell-out returns nothing and the orphaned sessions float as their own
+    fragment "project" (labeled with the worktree basename). The dispatch path
+    convention is stable, so we can fold those orphans back by string structure
+    alone — no git, no disk access. Returns None when cwd is not a dispatch
+    worktree (the caller then falls back to git / cwd-as-repo).
+    """
+    for marker in _WORKTREE_MARKERS:
+        idx = cwd.find(marker)
+        if idx > 0:
+            return cwd[:idx]
+    return None
 
 
 @dataclass
@@ -187,8 +215,16 @@ def discover_projects() -> list[ProjectInfo]:
             return main_cache[canonical]
         worktrees = _get_worktree_paths(canonical)
         if not worktrees:
-            main_cache[canonical] = canonical
-            return canonical
+            # git knows nothing (no repo, or a pruned worktree whose transcripts
+            # outlived it). Fold a dispatch worktree back into its repo by path
+            # structure; otherwise the cwd pools under itself. Canonicalize the
+            # recovered root so it pools under the SAME key the main worktree uses
+            # (which also goes through _canonicalize_path) — an uncanonicalized
+            # root would float as its own fragment project.
+            recovered = _repo_root_from_worktree_path(canonical)
+            root = _canonicalize_path(recovered) if recovered else canonical
+            main_cache[canonical] = root
+            return root
         main = worktrees[0]
         for wt in worktrees:
             main_cache.setdefault(wt, main)
@@ -341,7 +377,14 @@ class SessionInfo:
     # Number of human prompts (entries where the user actually spoke), distinct
     # from message_count which also counts assistant turns. Signals how much the
     # human drove the session vs one prompt fanning out into a long agent run.
+    # Teammate-injected turns (agent-team orchestration DMs) are EXCLUDED — they
+    # are not human attention; counting them would inflate the "single prompt
+    # fanned out" signal for worker sessions.
     user_turns: int = 0
+    # Agent-team membership (teamName/agentName), stamped on every entry of a
+    # team-worker session. None outside agent-team sessions.
+    team: Optional[str] = None
+    team_role: Optional[str] = None
     # Full discovered subagent population — parent dispatches plus on-disk
     # orphans (notably workflow-orchestrated agents). Equals list_session_agents'
     # total_agents, unlike stats.agent_count which is top-down dispatches only.
@@ -446,22 +489,20 @@ def conversation_types_for(
 
 
 def session_title(entries: list[TranscriptEntry]) -> str:
-    """Extract title from first non-meta, non-tool-result human message.
+    """Extract title from the first human turn that carries substantive text.
 
-    Truncates to ~60 chars. Strips XML wrappers (skill invocations).
+    Routes through `substantive_human_text` (the single source of truth for
+    "what did the human actually say"): bare slash commands, command stdout,
+    caveats, and interrupt sentinels all reduce to '' and are skipped, while a
+    real prompt — including one recovered from `<command-args>` — wins. Truncates
+    to ~60 chars.
     """
     for entry in entries:
         if not isinstance(entry, HumanEntry):
             continue
-        text = extract_text(entry)
+        text = substantive_human_text(entry)
         if not text:
             continue
-        # Strip leading XML-like content (skill invocations)
-        text = re.sub(r"^<[^>]+>[\s\S]*?</[^>]+>\s*", "", text)
-        text = text.strip()
-        if not text:
-            continue
-        # Single line, truncated
         first_line = text.split("\n")[0].strip()
         return smart_truncate(first_line, 60)
     return "(empty session)"
@@ -498,18 +539,36 @@ def load_sessions(
         if message_count == 0:
             continue
 
-        # Human prompts only — how many times the user actually spoke.
+        # Human prompts only — how many times the user actually spoke. Teammate
+        # DMs (orchestration) and interrupt sentinels (mid-turn esc, not a prompt)
+        # are user-role turns but not human attention, so both are excluded —
+        # consistent with the activity timeline's human_turns.
         user_turns = sum(
             1
             for e in entries
-            if isinstance(e, HumanEntry) and len(e.display(truncate=0)) > 0
+            if isinstance(e, HumanEntry)
+            and len(e.display(truncate=0)) > 0
+            and e.origin not in (UserOrigin.teammate, UserOrigin.interrupt)
         )
 
-        # Find first timestamp from any entry that has one (typed access)
+        # Find first timestamp and agent-team membership. first_ts is the first
+        # timestamped entry. Team identity is stamped on every entry of a worker
+        # session, but the leading entries (summaries, early system records) can
+        # lack it, so scan until the first non-null teamName/agentName rather than
+        # trusting entry zero (mirrors activity.py's _scan).
         first_ts: Optional[datetime] = None
+        team: Optional[str] = None
+        team_role: Optional[str] = None
         for e in entries:
-            if isinstance(e, BaseTranscriptEntry):
+            if not isinstance(e, BaseTranscriptEntry):
+                continue
+            if first_ts is None:
                 first_ts = e.timestamp
+            if team is None and e.teamName:
+                team = e.teamName
+            if team_role is None and e.agentName:
+                team_role = e.agentName
+            if first_ts is not None and team is not None and team_role is not None:
                 break
 
         title = session_title(entries)
@@ -533,6 +592,8 @@ def load_sessions(
                 stats=stats,
                 worktree=ref.worktree,
                 user_turns=user_turns,
+                team=team,
+                team_role=team_role,
                 agents_present=agents_present,
                 project_path=project_path,
             )
