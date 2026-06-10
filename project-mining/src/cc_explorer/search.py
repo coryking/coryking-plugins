@@ -21,10 +21,10 @@ from .models import (
     ToolUseContent,
     TranscriptEntry,
     TranscriptStats,
+    UserOrigin,
     extract_output_text,
     extract_text,
     extract_thinking_text,
-    is_teammate_injected,
     substantive_human_text,
 )
 from .formatting import _match_example
@@ -217,8 +217,12 @@ def discover_projects() -> list[ProjectInfo]:
         if not worktrees:
             # git knows nothing (no repo, or a pruned worktree whose transcripts
             # outlived it). Fold a dispatch worktree back into its repo by path
-            # structure; otherwise the cwd pools under itself.
-            root = _repo_root_from_worktree_path(canonical) or canonical
+            # structure; otherwise the cwd pools under itself. Canonicalize the
+            # recovered root so it pools under the SAME key the main worktree uses
+            # (which also goes through _canonicalize_path) — an uncanonicalized
+            # root would float as its own fragment project.
+            recovered = _repo_root_from_worktree_path(canonical)
+            root = _canonicalize_path(recovered) if recovered else canonical
             main_cache[canonical] = root
             return root
         main = worktrees[0]
@@ -536,27 +540,35 @@ def load_sessions(
             continue
 
         # Human prompts only — how many times the user actually spoke. Teammate
-        # DMs are user-role turns but orchestration, not human attention, so they
-        # are excluded (consistent with the activity timeline's human_turns).
+        # DMs (orchestration) and interrupt sentinels (mid-turn esc, not a prompt)
+        # are user-role turns but not human attention, so both are excluded —
+        # consistent with the activity timeline's human_turns.
         user_turns = sum(
             1
             for e in entries
             if isinstance(e, HumanEntry)
             and len(e.display(truncate=0)) > 0
-            and not is_teammate_injected(e)
+            and e.origin not in (UserOrigin.teammate, UserOrigin.interrupt)
         )
 
-        # Find first timestamp and agent-team membership. Team identity is stamped
-        # on every entry of a worker session, so the first entry carrying it
-        # settles it; the first BaseTranscriptEntry is the cheapest read.
+        # Find first timestamp and agent-team membership. first_ts is the first
+        # timestamped entry. Team identity is stamped on every entry of a worker
+        # session, but the leading entries (summaries, early system records) can
+        # lack it, so scan until the first non-null teamName/agentName rather than
+        # trusting entry zero (mirrors activity.py's _scan).
         first_ts: Optional[datetime] = None
         team: Optional[str] = None
         team_role: Optional[str] = None
         for e in entries:
-            if isinstance(e, BaseTranscriptEntry):
+            if not isinstance(e, BaseTranscriptEntry):
+                continue
+            if first_ts is None:
                 first_ts = e.timestamp
+            if team is None and e.teamName:
                 team = e.teamName
+            if team_role is None and e.agentName:
                 team_role = e.agentName
+            if first_ts is not None and team is not None and team_role is not None:
                 break
 
         title = session_title(entries)

@@ -54,8 +54,8 @@ class SessionSummary(SparseModel):
         default=None,
         description="Git worktree name this session lived in. Absent for the main worktree; present (e.g. 'happy-lehmann') for linked worktrees, which includes Claude Desktop dispatched sessions under `.claude-worktrees/`. Labeled sessions are often programmatically dispatched rather than interactively typed — calibrate signal accordingly.",
     )
-    messages: int = Field(description="Total message count (human + assistant turns).")
-    user_turns: int = Field(description="Human prompts — how many times the user actually spoke. A small number against many agents or messages flags a single prompt that fanned out into a long autonomous run. EXCLUDES teammate-injected turns (agent-team orchestration DMs, see `team`): in a worker session most user-role turns are peer/orchestrator DMs, not human attention, so they don't count here.")
+    messages: int = Field(description="Total message count (human + assistant turns). Teammate DMs (agent-team orchestration) ARE counted here but NOT in `user_turns`, so a team-worker session legitimately shows user_turns=0 with a high message_count — check `team` to tell that apart from autonomous fan-out.")
+    user_turns: int = Field(description="Human prompts — how many times the user actually spoke. A small number against many agents or messages flags a single prompt that fanned out into a long autonomous run. EXCLUDES teammate-injected turns (agent-team orchestration DMs, see `team`) AND interrupt sentinels (mid-turn esc, not a prompt): in a worker session most user-role turns are peer/orchestrator DMs, not human attention, so they don't count here. Aligned with the activity timeline's human_turns.")
     team: str | None = Field(default=None, description="Agent-team name (teamName) when this session is a team worker, else absent. Its user-role turns are mostly teammate-injected (orchestration), not human-typed — see `user_turns`.")
     team_role: str | None = Field(default=None, description="This worker's role in the team (agentName), e.g. 'reviewer-3'. Absent outside agent-team sessions.")
     agents: int = Field(description="Subagents dispatched directly by the parent transcript (Task/Agent/TaskCreate blocks). Top-down view — does NOT count workflow-orchestrated agents.")
@@ -804,7 +804,7 @@ class ActivityWindow(SparseModel):
     before: str = Field(description="Window end (exclusive), ISO-8601 in `tz`.")
     tz: str = Field(description="IANA tz name all labels and day/hour bucketing use.")
     bucket_minutes: int = Field(description="Grid grain in minutes.")
-    days: int = Field(description="Number of whole days the window spans.")
+    days: int = Field(description="Number of whole days the window spans (DST-robust: a 7-local-day window reports 7 even when it straddles a DST transition). The top-level `days` array is keyed by local calendar date and may contain one MORE entry than this when the window's edges land mid-day across calendar boundaries.")
 
 
 class ActivityProjectRollup(SparseModel):
@@ -820,7 +820,7 @@ class ActivityProjectRollup(SparseModel):
 
 
 class ActivityInteractiveSummary(SparseModel):
-    """Interactive (Cory-driven) attention rollup. Headless work is excluded."""
+    """Interactive (human-driven) attention rollup. Headless work is excluded."""
 
     sessions: int = Field(description="Distinct interactive sessions with in-window activity.")
     active_min: int = Field(description="Minutes with >=1 interactive human turn in any session = (#such buckets) x bucket_minutes.")
@@ -839,7 +839,7 @@ class ActivityHeadlessSummary(SparseModel):
     """Headless (sdk-cli) rollup — automated/cron/SDK runs, segregated from attention."""
 
     sessions: int = Field(description="Headless sessions with in-window activity.")
-    human_turns: int = Field(description="Internal human turns in headless transcripts (orchestration prompts, not Cory attention).")
+    human_turns: int = Field(description="Internal human turns in headless transcripts (orchestration prompts, not human attention).")
     machine_hours: int | float = Field(description="Sum of headless turn_min, in hours.")
 
 
@@ -860,7 +860,7 @@ class ActivityDay(SparseModel):
     peak: int = Field(description="Max distinct interactive sessions driven in one bucket this day.")
     peak_at: str | None = Field(default=None, description="When the day's peak occurred (HH:MM).")
     human_turns_by_hour: list[int] = Field(description="24 ints — interactive human turns per local hour (0-23).")
-    sessions_driven_by_hour: list[int] = Field(description="24 ints — summed distinct-sessions-driven per local hour.")
+    sessions_driven_by_hour: list[int] = Field(description="24 ints — distinct interactive sessions with >=1 human turn in that local hour (union of session ids across the hour's buckets; a session active across several buckets of the hour counts once).")
     agent_turns_by_hour: list[int] = Field(description="24 ints — interactive agent turns per local hour.")
 
 
@@ -870,7 +870,7 @@ class ActivitySession(SparseModel):
     id: PrefixId = Field(description="8-char session id — pass as `session` to read_turn/grep_session/list_session_agents.")
     project: str = Field(description="Repo name — pass to `projects`.")
     headless: bool = Field(description="True for sdk-cli (claude -p / SDK / cron). Machine work, excluded from interactive rollups.")
-    entrypoint: str | None = Field(default=None, description="Raw entrypoint: 'cli' interactive, 'sdk-cli' headless.")
+    entrypoint: str | None = Field(default=None, description="Raw entrypoint value, e.g. 'cli' (interactive) or 'sdk-cli' (headless); other values are possible. Don't switch on it for the interactive/headless split — the `headless` boolean is authoritative.")
     team: str | None = Field(default=None, description="Agent-team name (teamName) when this session is a team worker, else null. Its user-role turns are mostly teammate-injected (orchestration), not human-typed.")
     team_role: str | None = Field(default=None, description="This worker's role in the team (agentName), e.g. 'reviewer-3'. null outside agent-team sessions.")
     model: str | None = Field(default=None, description="Dominant (most frequent) assistant model id in-window.")

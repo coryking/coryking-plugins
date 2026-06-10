@@ -1077,7 +1077,7 @@ def get_activity_timeline(
         Field(description="IANA tz name (e.g. 'America/Los_Angeles'). ALL day/hour bucketing and displayed timestamps use it. Omit for system local time."),
     ] = None,
 ) -> ActivityTimelineResponse:
-    """Reconstruct cross-project attention over a time window: a 5-minute turn-count grid plus pre-computed attention rollups, for analyzing how the fleet was driven.
+    """Reconstruct cross-project attention over a time window: a bucket_minutes-grain grid (default 5 min) of turn counts plus pre-computed attention rollups, for analyzing how the fleet was driven.
 
     Answers 'what did my week of agent-driving actually look like' — how many sessions ran at once, when attention peaked, how much was hands-on vs autonomous machine-time, per project and per day. Omit `projects` to span EVERY project (cross-project attention is the point); pass `projects` to scope. Every session `id` and `project` returned can be passed straight back to read_turn / grep_session / list_session_agents to drill into a specific moment.
 

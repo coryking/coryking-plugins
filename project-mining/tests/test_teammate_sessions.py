@@ -53,6 +53,15 @@ def _teammate(uuid, team="cef-integration", team_role="reviewer-3", body="do X")
     )
 
 
+def _interrupt(uuid, content=None):
+    """A turn-level interrupt sentinel (esc) — a user-role turn but not a prompt."""
+    return _human(
+        "", uuid,
+        content=content if content is not None
+        else [TextContent(type="text", text="[Request interrupted by user]")],
+    )
+
+
 def _assistant(text, uuid, team=None, team_role=None):
     return AssistantTranscriptEntry(
         uuid=uuid,
@@ -115,6 +124,19 @@ class TestUserTurnsExcludesTeammates:
         sessions = _load(entries)
         assert sessions[0].user_turns == 2
 
+    def test_interrupt_turns_not_counted(self):
+        # Interrupt sentinels (esc) are user-role turns but not prompts — they
+        # must not inflate user_turns (aligns with activity's human_turns).
+        entries = [
+            _human("a real prompt", "u1"),
+            _assistant("ok", "a1"),
+            _interrupt("u2"),
+            _interrupt("u3"),
+            _human("another prompt", "u4"),
+        ]
+        sessions = _load(entries)
+        assert sessions[0].user_turns == 2  # the two interrupts excluded
+
 
 class TestTeamFieldsSurfaced:
     def test_team_fields_present(self):
@@ -131,6 +153,21 @@ class TestTeamFieldsSurfaced:
         sessions = _load(entries)
         assert sessions[0].team is None
         assert sessions[0].team_role is None
+
+    def test_team_fields_recovered_from_later_entry(self):
+        # The first entries lack team fields (e.g. early system/summary records);
+        # team identity appears only later. load_sessions must scan until the
+        # first non-null teamName/agentName, not trust entry zero.
+        entries = [
+            _human("hi", "u1"),  # no team fields
+            _assistant("ok", "a1"),  # no team fields
+            _human("later", "u2", team="cef-integration", team_role="reviewer-3"),
+        ]
+        sessions = _load(entries)
+        assert sessions[0].team == "cef-integration"
+        assert sessions[0].team_role == "reviewer-3"
+        # first_timestamp still comes from the first timestamped entry.
+        assert sessions[0].first_timestamp == TS
 
 
 class TestTitleNeverTeammate:

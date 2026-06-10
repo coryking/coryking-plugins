@@ -24,7 +24,7 @@ Tools for exploring chat content, each operating at a different scope — like `
 | `grep_session` | session | Examine — matches with context inside one conversation |
 | `grep_sessions` | sessions | Fan out — same patterns across N sessions in one call |
 | `read_turn` | turn | Read — full fidelity text around a specific moment |
-| `get_activity_timeline` | projects (all by default) | Reconstruct — cross-project attention over a time window (a 5-min turn-count grid + pre-computed rollups) |
+| `get_activity_timeline` | projects (all by default) | Reconstruct — cross-project attention over a time window (a bucket_minutes-grain grid, default 5 min, of turn counts + pre-computed rollups) |
 
 Project selection is uniform: every tool takes a `projects` list (paths or bare names). Omit it and the search/locate tools sweep **all** projects — the recall path when you remember a conversation but not where it happened. `list_project_sessions` is the exception: it defaults to the current project (use `list_projects` for the cross-project overview). Each result carries its `project`, so pass that back to scope follow-ups.
 

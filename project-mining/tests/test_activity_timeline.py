@@ -127,6 +127,14 @@ def stdout_human(ts, text, session=SESSION_A, uuid="stdout"):
     )
 
 
+def meta_human(ts, text="system-injected note", session=SESSION_A, uuid="meta"):
+    """A system-injected (isMeta) user-role entry. The parser routes it to the
+    distinct MetaEntry type — it is NOT a human turn and NOT agent activity."""
+    e = human(ts, text, session=session, uuid=uuid)
+    e["isMeta"] = True
+    return e
+
+
 def assistant(ts, request_id, session=SESSION_A, model="claude-test-1", entrypoint="cli",
               team=None, team_role=None):
     e = {
@@ -357,6 +365,71 @@ class TestHeadlessSegregation:
         assert all(sum(d["human_turns_by_hour"]) == 0 for d in out["days"])
         assert out["summary"]["interactive"]["active_min"] == 0
 
+    def test_headless_agent_only_not_counted_as_autonomous(self, corpus):
+        # A headless session with pure agent activity (no human turn) must NOT
+        # land in the autonomous vector — that vector counts non-headless
+        # sessions only, matching `driven` and the "headless excluded" promise.
+        corpus(
+            "proj",
+            SESSION_H,
+            [
+                assistant(utc(2026, 6, 3, 18, 0), "rh1", session=SESSION_H, entrypoint="sdk-cli"),
+                assistant(utc(2026, 6, 3, 18, 1), "rh2", session=SESSION_H, entrypoint="sdk-cli"),
+            ],
+        )
+        out = run()
+        assert out["summary"]["interactive"]["peak_autonomous_sessions"] == 0
+        assert out["summary"]["interactive"]["peak_autonomous_at"] is None
+
+    def test_headless_autonomous_excluded_alongside_interactive(self, corpus):
+        # One interactive autonomous session + one headless autonomous session in
+        # the SAME bucket. Only the interactive one counts toward autonomous.
+        corpus(
+            "proj",
+            SESSION_A,
+            [assistant(utc(2026, 6, 3, 18, 0), "ra", session=SESSION_A)],
+        )
+        corpus(
+            "proj",
+            SESSION_H,
+            [assistant(utc(2026, 6, 3, 18, 0), "rh", session=SESSION_H, entrypoint="sdk-cli")],
+        )
+        out = run()
+        assert out["summary"]["interactive"]["peak_autonomous_sessions"] == 1
+
+
+class TestMetaEntries:
+    def test_meta_entry_not_a_human_turn(self, corpus):
+        # A system-injected (isMeta) user-role entry parses to MetaEntry and is
+        # neither a human turn nor agent activity. The real human turn still counts.
+        corpus(
+            "proj",
+            SESSION_A,
+            [
+                meta_human(utc(2026, 6, 3, 18, 0), "skill loaded"),
+                human(utc(2026, 6, 3, 18, 1), "actual prompt"),
+                assistant(utc(2026, 6, 3, 18, 1), "r1"),
+            ],
+        )
+        out = run()
+        assert out["summary"]["interactive"]["human_turns"] == 1
+        sess = out["sessions"][0]
+        assert sess["human_turns"] == 1
+        # agent_turns = the one assistant request only (meta added nothing).
+        assert sess["agent_turns"] == 1
+
+    def test_meta_only_session_has_no_human_turns(self, corpus):
+        corpus(
+            "proj",
+            SESSION_A,
+            [
+                meta_human(utc(2026, 6, 3, 18, 0), "note"),
+                assistant(utc(2026, 6, 3, 18, 0), "r1"),
+            ],
+        )
+        out = run()
+        assert out["summary"]["interactive"]["human_turns"] == 0
+
 
 class TestSubagentFolding:
     def test_sub_human_turns_become_parent_agent_work(self, corpus):
@@ -460,6 +533,34 @@ class TestDaysHourArrays:
             assert len(d["human_turns_by_hour"]) == 24
             assert len(d["sessions_driven_by_hour"]) == 24
             assert len(d["agent_turns_by_hour"]) == 24
+
+    def test_sessions_driven_by_hour_counts_distinct_sessions_not_buckets(self, corpus):
+        # 2026-06-03 18:00 UTC == 11:00 PDT. ONE session takes human turns in
+        # FOUR distinct 5-min buckets of that local hour. sessions_driven_by_hour
+        # must count the session ONCE (distinct sessions), not 4 (summed buckets).
+        corpus(
+            "proj",
+            SESSION_A,
+            [
+                human(utc(2026, 6, 3, 18, 0), "a", uuid="h0"),
+                human(utc(2026, 6, 3, 18, 6), "b", uuid="h1"),
+                human(utc(2026, 6, 3, 18, 12), "c", uuid="h2"),
+                human(utc(2026, 6, 3, 18, 18), "d", uuid="h3"),
+            ],
+        )
+        out = run()
+        day = next(d for d in out["days"] if d["sessions_driven_by_hour"][11] > 0)
+        assert day["sessions_driven_by_hour"][11] == 1
+        # human_turns_by_hour still SUMS the four turns.
+        assert day["human_turns_by_hour"][11] == 4
+
+    def test_sessions_driven_by_hour_unions_two_sessions(self, corpus):
+        # Two distinct sessions each driven in the same local hour => count is 2.
+        corpus("proj", SESSION_A, [human(utc(2026, 6, 3, 18, 0), "a", session=SESSION_A)])
+        corpus("proj", SESSION_B, [human(utc(2026, 6, 3, 18, 30), "b", session=SESSION_B)])
+        out = run()
+        day = next(d for d in out["days"] if d["sessions_driven_by_hour"][11] > 0)
+        assert day["sessions_driven_by_hour"][11] == 2
 
 
 class TestDedupeByUuid:

@@ -52,36 +52,18 @@ from .models import (
     HumanEntry,
     SummaryTranscriptEntry,
     SystemTranscriptEntry,
-    TextContent,
     ToolResultEntry,
-    is_teammate_injected,
+    UserOrigin,
     substantive_human_text,
 )
 from .parser import load_conversations, load_transcript
 from .search import resolve_projects, session_title
 from .subagents import collect_agent_files, resolve_subagents_dir
 
-INTERRUPT = "[Request interrupted"
-
 
 # =============================================================================
 # Text helpers
 # =============================================================================
-
-
-def _user_text(entry: HumanEntry | ToolResultEntry) -> str:
-    """Raw text of a user entry (Human OR ToolResult).
-
-    Interrupt sentinels arrive as ToolResultEntry when they cut off a tool call,
-    where `extract_text` would miss them — so we read the content blocks directly
-    rather than going through the system-XML-stripping path.
-    """
-    content = entry.message.content
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return " ".join(b.text for b in content if isinstance(b, TextContent))
-    return ""
 
 
 def _collapse(text: str, limit: int) -> str:
@@ -165,10 +147,11 @@ def _scan(path: Path, lo: datetime, hi: datetime, bucket_s: int) -> Optional[_Sc
         if isinstance(e, HumanEntry):
             if not in_window(e.timestamp):
                 continue
-            if INTERRUPT in _user_text(e):
+            origin = e.origin
+            if origin is UserOrigin.interrupt:
                 s.interrupts += 1
                 continue
-            if is_teammate_injected(e):
+            if origin is UserOrigin.teammate:
                 # A peer/orchestrator DMed this worker's pane — orchestration
                 # protocol, not human attention. Does NOT count as a human turn,
                 # an interrupt, or an opening/closing candidate; it DOES count as
@@ -177,6 +160,15 @@ def _scan(path: Path, lo: datetime, hi: datetime, bucket_s: int) -> Optional[_Sc
                 b = bucket(e.timestamp)
                 s.agent_req[b].add(f"tm_{b}_{e.uuid}")
                 continue
+            if origin is UserOrigin.meta:
+                # System-injected (isMeta) turns are not human attention and are
+                # not agent activity — fall through silently (preserves prior
+                # behavior, where MetaEntry was a distinct type and never reached
+                # here, and where an isMeta HumanEntry would have been treated as
+                # human; routing it to "not a human turn" is the correct read).
+                continue
+            # origin is human OR command_scaffolding: both still count as a human
+            # turn (deferred decision — see UserOrigin docstring).
             s.human[bucket(e.timestamp)] += 1
             # opening/closing track only SUBSTANTIVE turns — a bare /clear or
             # other command scaffolding still counts as a human turn but carries
@@ -201,7 +193,7 @@ def _scan(path: Path, lo: datetime, hi: datetime, bucket_s: int) -> Optional[_Sc
         if isinstance(e, ToolResultEntry):
             if not in_window(e.timestamp):
                 continue
-            if INTERRUPT in _user_text(e):
+            if e.origin is UserOrigin.interrupt:
                 s.interrupts += 1
                 continue
             b = bucket(e.timestamp)
@@ -259,19 +251,23 @@ def build_activity_timeline(
     lo, hi = _resolve_window(after, before, zone)
     bucket_s = bucket_minutes * 60
     n_buckets = int((hi - lo).total_seconds() // bucket_s)
-    n_days = max(1, (hi - lo).days)
+    # Whole days in the window, DST-robust: a 7-local-day window that straddles a
+    # DST transition spans 7*86400 ± 3600 wall-clock seconds, so floor division
+    # would report 6 or 8; round() recovers the intended day count.
+    n_days = max(1, round((hi - lo).total_seconds() / 86400))
+
+    # Precompute the local datetime of every bucket once — reused by every label
+    # form below and by the day grouping/sort/hour loops in _build_days.
+    labels = [_local(_bucket_dt(b, lo, bucket_s), zone) for b in range(n_buckets)]
 
     def label_dt(b: int) -> datetime:
-        return _local(_bucket_dt(b, lo, bucket_s), zone)
+        return labels[b]
 
     def day_label(b: int) -> str:
-        return label_dt(b).strftime("%a %m-%d %H:%M")
-
-    def hm_label(b: int) -> str:
-        return label_dt(b).strftime("%H:%M")
+        return labels[b].strftime("%a %m-%d %H:%M")
 
     def key_label(b: int) -> str:
-        return label_dt(b).strftime("%m-%d %H:%M")
+        return labels[b].strftime("%m-%d %H:%M")
 
     # ------------------------------------------------------------------ scan
     proj_paths = resolve_projects(projects)
@@ -359,25 +355,37 @@ def build_activity_timeline(
             }
 
     # ------------------------------------------------------- timeline pivot
-    timeline: dict[str, dict[str, list[int]]] = {}
-    for b in range(n_buckets):
-        row = {sid: cells[b] for sid, cells in grid.items() if b in cells}
-        if row:
-            timeline[key_label(b)] = row
+    # Invert grid (sid -> {bucket: cell}) into bucket -> {sid: cell} by walking
+    # each session's active cells once, then emit rows in ascending bucket order
+    # (byte-identical to the prior dense scan over range(n_buckets)).
+    by_bucket: dict[int, dict[str, list[int]]] = defaultdict(dict)
+    for sid, cells in grid.items():
+        for b, cell in cells.items():
+            by_bucket[b][sid] = cell
+    timeline: dict[str, dict[str, list[int]]] = {
+        key_label(b): by_bucket[b] for b in sorted(by_bucket)
+    }
 
     # -------------------------------------- interactive vs headless rollups
     interactive_sids = {sid for sid, r in records.items() if not r["headless"]}
 
-    # Per-bucket interactive attention vectors.
-    driven = [0] * n_buckets       # distinct interactive sessions with a human turn
-    autonomous = [0] * n_buckets   # distinct sessions: agent activity, no human turn
+    # Per-bucket interactive attention vectors, computed ONCE here and reused by
+    # the summary rollup AND _build_days. Headless sessions are machine work and
+    # excluded from every one of these (driven, autonomous, the by-bucket sums).
+    driven = [0] * n_buckets        # distinct interactive sessions with a human turn
+    autonomous = [0] * n_buckets    # distinct interactive sessions: agent activity, no human turn
+    human_by_bucket = [0] * n_buckets   # summed interactive human turns
+    agent_by_bucket = [0] * n_buckets   # summed interactive agent turns
     for sid, cells in grid.items():
-        headless = records[sid]["headless"]
+        if records[sid]["headless"]:
+            continue
         for b, (h, a) in cells.items():
-            if h and not headless:
+            if h:
                 driven[b] += 1
-            elif a and not h:
+                human_by_bucket[b] += h
+            elif a:
                 autonomous[b] += 1
+            agent_by_bucket[b] += a
 
     def peak(vec: list[int]) -> tuple[int, Optional[int]]:
         if not vec:
@@ -421,7 +429,16 @@ def build_activity_timeline(
     }
 
     # ----------------------------------------------------------- days array
-    days = _build_days(grid, records, bucket_minutes, n_buckets, label_dt)
+    days = _build_days(
+        grid,
+        records,
+        bucket_minutes,
+        n_buckets,
+        labels,
+        driven,
+        human_by_bucket,
+        agent_by_bucket,
+    )
 
     # -------------------------------------------------------- sessions list
     sessions_out = _sorted_sessions(records)
@@ -529,32 +546,40 @@ def _by_project(
 
 
 def _build_days(
-    grid, records, bucket_minutes, n_buckets, label_dt,
+    grid: dict[str, dict[int, list[int]]],
+    records: dict[str, dict[str, Any]],
+    bucket_minutes: int,
+    n_buckets: int,
+    labels: list[datetime],
+    driven: list[int],
+    human_by_bucket: list[int],
+    agent_by_bucket: list[int],
 ) -> list[dict[str, Any]]:
-    """One row per local calendar day in the window, interactive sessions only."""
+    """One row per local calendar day in the window, interactive sessions only.
+
+    The per-bucket vectors (driven / human_by_bucket / agent_by_bucket) are
+    computed once in build_activity_timeline (headless already excluded) and
+    passed in. `sessions_driven_by_hour` needs session identity, not just counts,
+    so it unions interactive session ids across each hour's buckets — recovered
+    from `grid` here.
+    """
     # Group buckets by local date.
     buckets_by_date: dict[str, list[int]] = defaultdict(list)
     for b in range(n_buckets):
-        d = label_dt(b)
-        buckets_by_date[d.strftime("%a %m-%d")].append(b)
+        buckets_by_date[labels[b].strftime("%a %m-%d")].append(b)
 
-    # Precompute per-bucket interactive vectors (reuse grid).
-    driven = [0] * n_buckets
-    human_by_bucket = [0] * n_buckets
-    agent_by_bucket = [0] * n_buckets
+    # Per-bucket set of interactive session ids with >=1 human turn in that bucket.
+    driven_sids_by_bucket: dict[int, set[str]] = defaultdict(set)
     for sid, cells in grid.items():
-        headless = records[sid]["headless"]
-        if headless:
+        if records[sid]["headless"]:
             continue
-        for b, (h, a) in cells.items():
+        for b, (h, _a) in cells.items():
             if h:
-                driven[b] += 1
-                human_by_bucket[b] += h
-            agent_by_bucket[b] += a
+                driven_sids_by_bucket[b].add(sid)
 
     days_out: list[dict[str, Any]] = []
     for date_label in sorted(
-        buckets_by_date, key=lambda dl: label_dt(buckets_by_date[dl][0])
+        buckets_by_date, key=lambda dl: labels[buckets_by_date[dl][0]]
     ):
         bs = buckets_by_date[date_label]
         active_min = sum(1 for b in bs if driven[b]) * bucket_minutes
@@ -563,13 +588,16 @@ def _build_days(
         peak_b = next((b for b in bs if driven[b] == peak_v and peak_v), None)
 
         human_by_hour = [0] * 24
-        driven_by_hour = [0] * 24
         agent_by_hour = [0] * 24
+        # Distinct interactive sessions driven in each local hour (union of the
+        # hour's per-bucket session sets), then counted — NOT a sum of per-bucket
+        # counts, so a session active across several buckets of the hour counts once.
+        driven_sids_by_hour: list[set[str]] = [set() for _ in range(24)]
         for b in bs:
-            hour = label_dt(b).hour
+            hour = labels[b].hour
             human_by_hour[hour] += human_by_bucket[b]
-            driven_by_hour[hour] += driven[b]
             agent_by_hour[hour] += agent_by_bucket[b]
+            driven_sids_by_hour[hour] |= driven_sids_by_bucket.get(b, set())
 
         days_out.append(
             {
@@ -577,9 +605,9 @@ def _build_days(
                 "active_min": active_min,
                 "multitask_min": multitask_min,
                 "peak": peak_v,
-                "peak_at": (label_dt(peak_b).strftime("%H:%M") if peak_b is not None else None),
+                "peak_at": (labels[peak_b].strftime("%H:%M") if peak_b is not None else None),
                 "human_turns_by_hour": human_by_hour,
-                "sessions_driven_by_hour": driven_by_hour,
+                "sessions_driven_by_hour": [len(s) for s in driven_sids_by_hour],
                 "agent_turns_by_hour": agent_by_hour,
             }
         )

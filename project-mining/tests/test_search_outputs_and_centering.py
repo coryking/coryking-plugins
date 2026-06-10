@@ -231,6 +231,78 @@ class TestMatchLineCentered:
         assert "HERE_IS_THE_MATCH" in block.match
 
 
+class TestExcerptFallsBackToRawText:
+    """When the matched pattern can't be located in the entry's rendered display
+    text, the excerpt centers on the RAW (extract_*) text instead of silently
+    front-truncating the display. Matching semantics are unchanged."""
+
+    def test_assistant_tool_input_match_centered_via_raw(self):
+        from cc_explorer.formatting import format_entry_line
+        import re
+
+        # The match lives in a tool input (a Bash command) far from the assistant
+        # text. format_tool_input shows the command, but place the token deep in a
+        # long command so the display rendering of the TEXT block doesn't carry it;
+        # the raw extract_tool_text does.
+        long_cmd = ("echo " + "padding " * 60) + "UNIQUE_GREP_TOKEN end"
+        entry = AssistantTranscriptEntry(
+            uuid="44444444-aaaa-bbbb-cccc-dddddddddddd",
+            timestamp=TS,
+            sessionId=SESSION_ID,
+            type="assistant",
+            message=AssistantMessageModel(
+                id="m9", type="message", role="assistant", model="claude-sonnet-4",
+                content=[
+                    TextContent(type="text", text="short reply"),
+                    ToolUseContent(
+                        type="tool_use",
+                        id=PrefixId("tool-9999-2222-3333-444444444444"),
+                        name="Bash",
+                        input={"command": long_cmd},
+                    ),
+                ],
+            ),
+        )
+        pattern = re.compile("UNIQUE_GREP_TOKEN")
+        line = format_entry_line(entry, truncate=60, center_pattern=pattern)
+        display = line.split("|", 4)[4]
+        # The token survives because the excerpt centered on the raw tool text,
+        # not the display head ("short reply  → Bash(echo padding padding ...").
+        assert "UNIQUE_GREP_TOKEN" in display
+
+    def test_fallback_used_when_match_only_in_raw_teammate_xml(self):
+        # A genuine display/raw divergence: a teammate turn renders labeled
+        # ("[teammate: orch → ...] body") so the raw markup attributes are absent
+        # from the display, but _entry_matches searches the raw extract_text. A
+        # pattern matching only the raw XML attribute must still surface in the
+        # excerpt — via the raw fallback, not a front-truncated label.
+        from cc_explorer.formatting import format_entry_line
+        from cc_explorer.parser import create_transcript_entry
+        import re
+
+        entry = create_transcript_entry({
+            "type": "user",
+            "uuid": "aaaaaaaa-1111-2222-3333-444444444444",
+            "timestamp": "2026-03-15T10:30:00Z",
+            "sessionId": SESSION_ID,
+            "agentName": "reviewer-3",
+            "message": {
+                "role": "user",
+                "content": (
+                    '<teammate-message teammate_id="orch" color="blue">'
+                    "please review the PR</teammate-message>"
+                ),
+            },
+        })
+        # Display is labeled and does NOT carry the raw attribute.
+        assert 'color="blue"' not in entry.display(truncate=0)
+
+        pattern = re.compile('color="blue"')
+        line = format_entry_line(entry, truncate=80, center_pattern=pattern)
+        display = line.split("|", 4)[4]
+        assert 'color="blue"' in display
+
+
 class TestMatchBlockShape:
     """MatchBlock should expose before/match/after as three fields, not flat chats."""
 

@@ -525,6 +525,62 @@ class TestUserOrigin:
         assert isinstance(e, ToolResultEntry)
         assert e.origin is UserOrigin.interrupt
 
+    def test_interrupt_sentinel_in_later_block(self):
+        # _user_marker_text joins ALL TextContent blocks (prototype semantics),
+        # so an interrupt sentinel that isn't the first block still classifies.
+        from cc_explorer.models import UserOrigin
+
+        e = self._user([
+            {"type": "text", "text": "leading note"},
+            {"type": "text", "text": "[Request interrupted by user]"},
+        ])
+        assert e.origin is UserOrigin.interrupt
+
+
+class TestSubstantiveHumanTextLeadingXml:
+    """_LEADING_XML_RE strips a leading matched-pair wrapper without leaving a
+    dangling close tag, and preserves a wrapper-only body via the fallback."""
+
+    def _human(self, text):
+        from cc_explorer.models import HumanEntry, TextContent, UserMessageModel
+
+        return HumanEntry(
+            uuid=FULL_UUID,
+            timestamp=TS,
+            sessionId="bbbbbbbb-1111-2222-3333-444444444444",
+            type="user",
+            message=UserMessageModel(
+                role="user", content=[TextContent(type="text", text=text)]
+            ),
+        )
+
+    def test_nested_wrapper_leaves_no_dangling_close_tag(self):
+        from cc_explorer.models import substantive_human_text
+
+        body = "<outer><inner>scaffold</inner></outer>the real prompt"
+        out = substantive_human_text(self._human(body))
+        assert "</outer>" not in out
+        assert "</inner>" not in out
+        assert out == "the real prompt"
+
+    def test_mismatched_tags_not_stripped_as_pair(self):
+        # `<a>...</b>` is not a matched pair — the backreference must not treat it
+        # as a wrapper, so the body survives rather than being mangled.
+        from cc_explorer.models import substantive_human_text
+
+        body = "<a>keep me</b> tail"
+        out = substantive_human_text(self._human(body))
+        assert "keep me" in out
+
+    def test_wrapper_only_body_falls_back_to_original(self):
+        # A body that is ENTIRELY a wrapper (nothing real follows) must not reduce
+        # to '' — the `stripped or body` fallback preserves the original.
+        from cc_explorer.models import substantive_human_text
+
+        body = "<skill>just the wrapper</skill>"
+        out = substantive_human_text(self._human(body))
+        assert out == body
+
 
 class TestTeammateRendering:
     """A teammate turn renders labeled, not as raw <teammate-message> XML."""

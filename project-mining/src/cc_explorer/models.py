@@ -269,7 +269,7 @@ class BaseTranscriptEntry(BaseModel):
     gitBranch: Optional[str] = None
     # How this session was invoked. "cli" = interactive; "sdk-cli" = headless
     # (claude -p / SDK / cron — e.g. the nightly dreamer runs). Distinguishes
-    # Cory-driven attention from automated runs.
+    # human-driven attention from automated runs.
     entrypoint: Optional[str] = None
     # Agent-team membership, stamped on every entry of a team-worker session.
     # teamName is the team the pane belongs to (e.g. "cef-integration");
@@ -315,17 +315,16 @@ class HumanEntry(BaseTranscriptEntry):
         user content to `[TextContent]`, so detection keys on the leading text
         (which survives normalization), not the str/list shape (which does not).
         """
-        return parse_teammate_message(_leading_user_text(self))
+        return parse_teammate_message(_user_marker_text(self))
 
     @property
     def origin(self) -> UserOrigin:
         """What this user-role entry really is — the single classification source."""
         if self.isMeta:
             return UserOrigin.meta
-        raw = _leading_user_text(self)
-        if _INTERRUPT_SENTINEL in raw:
+        if _INTERRUPT_SENTINEL in _user_marker_text(self):
             return UserOrigin.interrupt
-        if parse_teammate_message(raw) is not None:
+        if self.teammate_message is not None:
             return UserOrigin.teammate
         if substantive_human_text(self):
             return UserOrigin.human
@@ -363,7 +362,7 @@ class ToolResultEntry(BaseTranscriptEntry):
     def origin(self) -> UserOrigin:
         """A tool result is tool output — unless an esc cut off the tool call,
         in which case it carries the interrupt sentinel."""
-        if _INTERRUPT_SENTINEL in _leading_user_text(self):
+        if _INTERRUPT_SENTINEL in _user_marker_text(self):
             return UserOrigin.interrupt
         return UserOrigin.tool_result
 
@@ -667,23 +666,41 @@ def extract_text(entry: Union[HumanEntry, AssistantTranscriptEntry]) -> str:
 
 
 _COMMAND_ARGS_RE = re.compile(r"<command-args>([\s\S]*?)</command-args>")
-_LEADING_XML_RE = re.compile(r"^<[^>]+>[\s\S]*?</[^>]+>\s*")
+# A leading XML wrapper: an opening tag, its content, and the MATCHING close tag
+# (paired via the \1 backreference so `<a>...</b>` never matches and no dangling
+# `</tag>` survives). Stripped repeatedly by _strip_leading_xml while a wrapper
+# remains at the front.
+_LEADING_XML_RE = re.compile(r"^<(\w[\w-]*)\b[^>]*>[\s\S]*?</\1>\s*")
 
 
-def _leading_user_text(entry: BaseTranscriptEntry) -> str:
-    """Raw leading text of a user-role entry, for marker/sentinel classification.
+def _strip_leading_xml(body: str) -> str:
+    """Strip leading matched-pair XML wrappers, bounded. Returns body unchanged
+    if no leading wrapper is present."""
+    text = body
+    for _ in range(8):  # bounded: real prompts nest only a couple wrappers deep
+        stripped = _LEADING_XML_RE.sub("", text, count=1)
+        if stripped == text:
+            break
+        text = stripped
+    return text
 
-    Reads content blocks directly (no system-XML stripping) so the teammate
-    marker and interrupt sentinel — both of which live at the very front of the
-    content — survive. The parser normalizes user content to `[TextContent]`, so
-    the leading marker text survives even though the original str/list shape does
-    not; we still handle a bare str for safety.
+
+def _user_marker_text(entry: BaseTranscriptEntry) -> str:
+    """Raw text of a user-role entry, for marker/sentinel classification.
+
+    The single authoritative raw-text source for sentinel/teammate detection.
+    Joins ALL TextContent blocks (the field-proven all-blocks semantics from the
+    fleet-timeline prototype) with no system-XML stripping, so the teammate marker
+    and interrupt sentinel — both of which live at the very front of the content —
+    survive. The teammate marker check still works because `parse_teammate_message`
+    lstrips and matches at the start. The parser normalizes user content to
+    `[TextContent]`; we still handle a bare str for safety.
     """
     content = entry.message.content
     if isinstance(content, str):
         return content
-    if content and isinstance(content[0], TextContent):
-        return content[0].text
+    if isinstance(content, list):
+        return " ".join(b.text for b in content if isinstance(b, TextContent))
     return ""
 
 
@@ -728,8 +745,8 @@ def substantive_human_text(entry: HumanEntry) -> str:
         return ""
     body = extract_text(entry).strip()
     if body:
-        # Strip a leading skill/command XML wrapper if a real prompt follows it.
-        stripped = _LEADING_XML_RE.sub("", body).strip()
+        # Strip leading skill/command XML wrappers if a real prompt follows them.
+        stripped = _strip_leading_xml(body).strip()
         return stripped or body
 
     # extract_text came back empty (command scaffolding / noise). Recover real

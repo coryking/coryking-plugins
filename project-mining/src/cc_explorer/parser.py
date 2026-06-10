@@ -338,6 +338,15 @@ def _orphan_worktree_dirs(
     discovered through `git worktree list` (pruned/deleted worktrees). Returns
     (encoded_dir, worktree_cwd, worktree_name) tuples. Cheap: a prefix-gated dir
     scan plus a shallow transcript read per candidate, no git.
+
+    Known accepted limitations:
+    - Hash-truncated sanitized names: for very deep repo paths the encoded dir
+      name is hash-truncated, defeating the `prefix + "-"` startswith gate, so
+      such orphans aren't recovered (accepted — they're rare and the gate keeps
+      the scan cheap).
+    - Orphan recovery requires a functional git main worktree: the repo root is
+      recovered from the worktree path structure, so a repo whose main worktree
+      no longer exists has nothing to pool the orphans back into.
     """
     from cc_explorer._claude_paths import (
         _canonicalize_path,

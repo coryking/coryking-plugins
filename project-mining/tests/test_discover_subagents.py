@@ -339,3 +339,115 @@ def test_load_sessions_skips_subagent_walk_by_default(tmp_path):
 
     walk.assert_not_called()
     assert sessions[0].agents_present == 0
+
+
+# =============================================================================
+# _first_user_text: spawn-prompt recovery via substantive_human_text
+# =============================================================================
+
+
+def _parse(entries: list[dict]):
+    """Parse raw JSONL dicts into typed entries via a tmp transcript."""
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".jsonl", delete=False, encoding="utf-8"
+    ) as f:
+        f.write("\n".join(json.dumps(e) for e in entries) + "\n")
+        path = Path(f.name)
+    try:
+        return load_transcript(path)
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_first_user_text_recovers_command_args_prompt():
+    """A worker whose first human turn is a slash-command stanza carrying real
+    words in <command-args>: _first_user_text routes through substantive_human_text
+    and recovers the args, rather than returning the raw scaffolding or ''."""
+    from cc_explorer.subagents import _first_user_text
+
+    entries = _parse([
+        {
+            "type": "user",
+            "uuid": "u1",
+            "timestamp": TS,
+            "sessionId": SID,
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "<command-name>/wrapup</command-name> "
+                        "<command-args>ship the parquet emitter</command-args>"
+                    ),
+                }],
+            },
+        },
+    ])
+    assert _first_user_text(entries) == "ship the parquet emitter"
+
+
+def test_first_user_text_skips_scaffolding_for_real_prompt():
+    """A bare /clear (pure scaffolding) is skipped; the genuine prompt wins."""
+    from cc_explorer.subagents import _first_user_text
+
+    entries = _parse([
+        {
+            "type": "user", "uuid": "u1", "timestamp": TS, "sessionId": SID,
+            "message": {"role": "user", "content": [{
+                "type": "text", "text": "<command-name>/clear</command-name>",
+            }]},
+        },
+        {
+            "type": "user", "uuid": "u2", "timestamp": TS, "sessionId": SID,
+            "message": {"role": "user", "content": [{
+                "type": "text", "text": "the actual driving prompt",
+            }]},
+        },
+    ])
+    assert _first_user_text(entries) == "the actual driving prompt"
+
+
+def test_first_user_text_falls_back_to_teammate_dm():
+    """A team-worker orphan with NO substantive human turn — only a teammate DM.
+    _first_user_text renders the parsed teammate message as `[teammate: <id>] body`
+    (never raw XML) instead of an empty prompt."""
+    from cc_explorer.subagents import _first_user_text
+
+    entries = _parse([
+        {
+            "type": "user", "uuid": "u1", "timestamp": TS, "sessionId": SID,
+            "teamName": "cef-integration", "agentName": "reviewer-3",
+            "message": {"role": "user", "content": (
+                '<teammate-message teammate_id="orch" color="blue">'
+                "go review PR 42</teammate-message>"
+            )},
+        },
+        {
+            "type": "assistant", "uuid": "a1", "timestamp": TS, "sessionId": SID,
+            "message": {
+                "id": "m1", "type": "message", "role": "assistant",
+                "model": "claude-test", "content": [{"type": "text", "text": "ok"}],
+            },
+        },
+    ])
+    result = _first_user_text(entries)
+    assert result == "[teammate: orch] go review PR 42"
+    assert "<teammate-message" not in result
+
+
+def test_first_user_text_empty_when_no_human_or_teammate():
+    """No human turn and no teammate DM => empty string."""
+    from cc_explorer.subagents import _first_user_text
+
+    entries = _parse([
+        {
+            "type": "assistant", "uuid": "a1", "timestamp": TS, "sessionId": SID,
+            "message": {
+                "id": "m1", "type": "message", "role": "assistant",
+                "model": "claude-test", "content": [{"type": "text", "text": "ok"}],
+            },
+        },
+    ])
+    assert _first_user_text(entries) == ""
