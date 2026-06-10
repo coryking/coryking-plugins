@@ -11,12 +11,15 @@ _find_project_dir) so the parser's behavior can be verified without
 spinning up a real git repo + worktrees.
 """
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+import cc_explorer._claude_paths as paths
 from cc_explorer.parser import ConversationRef, load_conversations
+from cc_explorer._claude_paths import _sanitize_path
 
 
 class _FakeDir:
@@ -146,3 +149,77 @@ class TestWorktreePooling:
         assert len(result) == 1
         ref = next(iter(result.values()))
         assert ref.worktree is None  # main (first-wins)
+
+
+class TestPrunedWorktreeFolding:
+    """Pruned/deleted dispatch worktrees outlive git but leave transcripts behind.
+
+    `git worktree list` only reports live worktrees, so a deleted one's sessions
+    are invisible to the git-driven scan and would float as their own fragment
+    "project" (labeled with the worktree basename). load_conversations folds them
+    back into the repo by the `.claude/worktrees/<name>` path convention, with no
+    git and no live worktree dir on disk.
+
+    These tests use a real temp CLAUDE_CONFIG_DIR so the projects-dir scan and
+    cwd recovery run for real; only `_get_worktree_paths` is stubbed to model git
+    knowing about the main worktree alone.
+    """
+
+    REPO = "/work/repos/myrepo"
+    WT_CWD = "/work/repos/myrepo/.claude/worktrees/pruned-feature"
+
+    def _make_corpus(self, tmp_path: Path):
+        """Lay out encoded project dirs under a temp CLAUDE_CONFIG_DIR."""
+        projects = tmp_path / ".claude" / "projects"
+        projects.mkdir(parents=True)
+
+        def write(encoded: str, session: str, cwd: str):
+            d = projects / encoded
+            d.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "type": "user",
+                "uuid": f"u-{session}",
+                "timestamp": "2026-06-03T18:00:00Z",
+                "cwd": cwd,
+                "sessionId": session,
+                "message": {"role": "user", "content": "hi"},
+            }
+            (d / f"{session}.jsonl").write_text(json.dumps(entry), encoding="utf-8")
+
+        write(_sanitize_path(self.REPO), "aaaa1111", self.REPO)
+        write(_sanitize_path(self.WT_CWD), "bbbb2222", self.WT_CWD)
+        return tmp_path
+
+    def test_pruned_worktree_sessions_folded_into_repo(self, tmp_path, monkeypatch):
+        self._make_corpus(tmp_path)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+        # git knows ONLY the live main worktree (the pruned one is gone).
+        with patch.object(paths, "_get_worktree_paths", return_value=[self.REPO]):
+            result = load_conversations(self.REPO)
+
+        by_stem = {ref.path.stem: ref for ref in result.values()}
+        assert set(by_stem) == {"aaaa1111", "bbbb2222"}
+        assert by_stem["aaaa1111"].worktree is None          # main
+        assert by_stem["bbbb2222"].worktree == "pruned-feature"  # folded orphan
+
+    def test_unrelated_sibling_repo_not_folded(self, tmp_path, monkeypatch):
+        # A sibling repo sharing a name prefix must NOT be pulled in by the
+        # prefix-gated scan: the path-fold check rejects it.
+        self._make_corpus(tmp_path)
+        projects = tmp_path / ".claude" / "projects"
+        sibling = "/work/repos/myrepo-other"
+        d = projects / _sanitize_path(sibling)
+        d.mkdir(parents=True)
+        entry = {
+            "type": "user", "uuid": "u-x", "timestamp": "2026-06-03T18:00:00Z",
+            "cwd": sibling, "sessionId": "cccc3333",
+            "message": {"role": "user", "content": "hi"},
+        }
+        (d / "cccc3333.jsonl").write_text(json.dumps(entry), encoding="utf-8")
+
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude"))
+        with patch.object(paths, "_get_worktree_paths", return_value=[self.REPO]):
+            result = load_conversations(self.REPO)
+
+        stems = {ref.path.stem for ref in result.values()}
+        assert stems == {"aaaa1111", "bbbb2222"}  # sibling's cccc3333 excluded

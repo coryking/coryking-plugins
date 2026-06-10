@@ -24,6 +24,7 @@ from .models import (
     extract_output_text,
     extract_text,
     extract_thinking_text,
+    substantive_human_text,
 )
 from .formatting import _match_example
 from .parser import load_conversations, load_transcript
@@ -102,6 +103,32 @@ def resolve_projects(projects: Optional[list[str]] = None) -> list[str]:
 # Project discovery (cross-project) — enumerate ~/.claude/projects, flatten
 # worktrees back into their repo so one logical project is one entry.
 # =============================================================================
+
+
+# Claude Code dispatch creates linked worktrees under a fixed in-repo location.
+# Two conventions have shipped: the current `<repo>/.claude/worktrees/<name>` and
+# the older `<repo>/.claude-worktrees/<name>`. The path *structure* alone names
+# the repo — everything before the marker segment is the main worktree root.
+_WORKTREE_MARKERS = ("/.claude/worktrees/", "/.claude-worktrees/")
+
+
+def _repo_root_from_worktree_path(cwd: str) -> Optional[str]:
+    """Recover a repo root from a Claude-dispatch worktree cwd by path structure.
+
+    `git worktree list` is the authoritative pooling source, but it only knows
+    about worktrees that still exist on disk: a pruned/deleted worktree leaves its
+    transcripts behind under `~/.claude/projects/` with no live git entry, so the
+    shell-out returns nothing and the orphaned sessions float as their own
+    fragment "project" (labeled with the worktree basename). The dispatch path
+    convention is stable, so we can fold those orphans back by string structure
+    alone — no git, no disk access. Returns None when cwd is not a dispatch
+    worktree (the caller then falls back to git / cwd-as-repo).
+    """
+    for marker in _WORKTREE_MARKERS:
+        idx = cwd.find(marker)
+        if idx > 0:
+            return cwd[:idx]
+    return None
 
 
 @dataclass
@@ -187,8 +214,12 @@ def discover_projects() -> list[ProjectInfo]:
             return main_cache[canonical]
         worktrees = _get_worktree_paths(canonical)
         if not worktrees:
-            main_cache[canonical] = canonical
-            return canonical
+            # git knows nothing (no repo, or a pruned worktree whose transcripts
+            # outlived it). Fold a dispatch worktree back into its repo by path
+            # structure; otherwise the cwd pools under itself.
+            root = _repo_root_from_worktree_path(canonical) or canonical
+            main_cache[canonical] = root
+            return root
         main = worktrees[0]
         for wt in worktrees:
             main_cache.setdefault(wt, main)
@@ -446,22 +477,20 @@ def conversation_types_for(
 
 
 def session_title(entries: list[TranscriptEntry]) -> str:
-    """Extract title from first non-meta, non-tool-result human message.
+    """Extract title from the first human turn that carries substantive text.
 
-    Truncates to ~60 chars. Strips XML wrappers (skill invocations).
+    Routes through `substantive_human_text` (the single source of truth for
+    "what did the human actually say"): bare slash commands, command stdout,
+    caveats, and interrupt sentinels all reduce to '' and are skipped, while a
+    real prompt — including one recovered from `<command-args>` — wins. Truncates
+    to ~60 chars.
     """
     for entry in entries:
         if not isinstance(entry, HumanEntry):
             continue
-        text = extract_text(entry)
+        text = substantive_human_text(entry)
         if not text:
             continue
-        # Strip leading XML-like content (skill invocations)
-        text = re.sub(r"^<[^>]+>[\s\S]*?</[^>]+>\s*", "", text)
-        text = text.strip()
-        if not text:
-            continue
-        # Single line, truncated
         first_line = text.split("\n")[0].strip()
         return smart_truncate(first_line, 60)
     return "(empty session)"

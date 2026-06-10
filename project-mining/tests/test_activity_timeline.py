@@ -78,6 +78,28 @@ def interrupt_toolresult(ts, session=SESSION_A):
     }
 
 
+def command_human(ts, name, args="", session=SESSION_A, uuid="cmd"):
+    """A human turn that is a slash-command stanza (scaffolding, not a prompt).
+
+    Empty args is pure noise (e.g. /clear); non-empty args carries real user
+    words inside <command-args>.
+    """
+    body = (
+        f"<command-name>/{name}</command-name> "
+        f"<command-message>{name}</command-message> "
+        f"<command-args>{args}</command-args>"
+    )
+    return human(ts, body, session=session, uuid=uuid)
+
+
+def stdout_human(ts, text, session=SESSION_A, uuid="stdout"):
+    """A human turn that is a <local-command-stdout> echo (scaffolding)."""
+    return human(
+        ts, f"<local-command-stdout>{text}</local-command-stdout>",
+        session=session, uuid=uuid,
+    )
+
+
 def assistant(ts, request_id, session=SESSION_A, model="claude-test-1", entrypoint="cli"):
     return {
         "type": "assistant",
@@ -474,3 +496,60 @@ class TestSessionFields:
         ids = [x["id"] for x in out["sessions"]]
         # Interactive first (B with 10min before A with 1min), headless last despite 100min.
         assert ids == [SESSION_B[:8], SESSION_A[:8], SESSION_H[:8]]
+
+
+class TestOpeningClosingSubstance:
+    """opening/closing must surface real prompts, never command scaffolding."""
+
+    def test_command_scaffolding_skipped_for_opening_and_closing(self, corpus):
+        # First and last turns are bare /clear and a stdout echo (noise); the
+        # real prompts are in the middle. opening/closing must land on those.
+        corpus(
+            "proj",
+            SESSION_A,
+            [
+                command_human(utc(2026, 6, 3, 18, 0), "clear"),         # noise (first)
+                human(utc(2026, 6, 3, 18, 5), "hey load up issue 17"),  # real opening
+                assistant(utc(2026, 6, 3, 18, 5), "r1"),
+                human(utc(2026, 6, 3, 18, 10), "now ship it"),          # real closing
+                stdout_human(utc(2026, 6, 3, 18, 15), "build output noise"),  # noise (last)
+            ],
+        )
+        sess = run()["sessions"][0]
+        assert sess["opening"] == "hey load up issue 17"
+        assert sess["closing"] == "now ship it"
+        # Every scaffolding turn still counts as a human turn (the user acted).
+        assert sess["human_turns"] == 4
+
+    def test_command_args_recovered_as_text(self, corpus):
+        # A session whose ONLY turns are commands: bare /clear (skipped) and a
+        # /wrapup carrying real words in <command-args> (recovered, not skipped).
+        corpus(
+            "proj",
+            SESSION_A,
+            [
+                command_human(utc(2026, 6, 3, 18, 0), "clear"),
+                command_human(
+                    utc(2026, 6, 3, 18, 5), "wrapup",
+                    args="just fyi -- the build is green", uuid="wrap",
+                ),
+            ],
+        )
+        sess = run()["sessions"][0]
+        assert sess["opening"] == "just fyi -- the build is green"
+        assert sess["closing"] == "just fyi -- the build is green"
+
+    def test_all_scaffolding_yields_null_opening(self, corpus):
+        # Only noise turns, no recoverable args => no opening/closing text.
+        corpus(
+            "proj",
+            SESSION_A,
+            [
+                command_human(utc(2026, 6, 3, 18, 0), "clear"),
+                stdout_human(utc(2026, 6, 3, 18, 5), "some output"),
+            ],
+        )
+        sess = run()["sessions"][0]
+        assert sess["opening"] is None
+        assert sess["closing"] is None
+        assert sess["human_turns"] == 2  # still real human turns

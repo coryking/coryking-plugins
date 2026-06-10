@@ -46,6 +46,7 @@ from .models import (
     SystemTranscriptEntry,
     TextContent,
     ToolResultEntry,
+    substantive_human_text,
 )
 from .parser import load_conversations, load_transcript
 from .search import resolve_projects, session_title
@@ -145,14 +146,18 @@ def _scan(path: Path, lo: datetime, hi: datetime, bucket_s: int) -> Optional[_Sc
         if isinstance(e, HumanEntry):
             if not in_window(e.timestamp):
                 continue
-            txt = _user_text(e).strip()
-            if INTERRUPT in txt:
+            if INTERRUPT in _user_text(e):
                 s.interrupts += 1
                 continue
             s.human[bucket(e.timestamp)] += 1
-            if s.first_human is None:
-                s.first_human = txt
-            s.last_human = txt
+            # opening/closing track only SUBSTANTIVE turns — a bare /clear or
+            # other command scaffolding still counts as a human turn but carries
+            # no prompt, so it must not become the opening/closing text.
+            txt = substantive_human_text(e)
+            if txt:
+                if s.first_human is None:
+                    s.first_human = txt
+                s.last_human = txt
             continue
 
         if isinstance(e, AssistantTranscriptEntry):

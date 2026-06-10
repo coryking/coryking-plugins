@@ -513,6 +513,44 @@ def extract_text(entry: Union[HumanEntry, AssistantTranscriptEntry]) -> str:
     return "\n".join(parts)
 
 
+_COMMAND_ARGS_RE = re.compile(r"<command-args>([\s\S]*?)</command-args>")
+_LEADING_XML_RE = re.compile(r"^<[^>]+>[\s\S]*?</[^>]+>\s*")
+
+
+def substantive_human_text(entry: HumanEntry) -> str:
+    """The substantive prompt text of a human turn, or '' for pure scaffolding.
+
+    A human turn often carries no real prompt — a bare slash command
+    (`<command-name>/clear</command-name>`), a `<local-command-stdout>` echo,
+    caveat boilerplate, or an interrupt sentinel. `extract_text` already strips
+    all of that to '', which is the signal "skip this turn".
+
+    The one case where a command turn DOES carry intent is `<command-args>` with
+    real text (`/wrapup just fyi -- ...`): the args are the user's actual words,
+    so we recover them rather than discarding the turn. Leading skill/command XML
+    wrappers around an otherwise-real prompt are also stripped.
+
+    This is the single source of truth for "what did the human actually say in
+    this turn" — `session_title` and the activity timeline's opening/closing both
+    route through it so they agree on what counts as substance.
+    """
+    body = extract_text(entry).strip()
+    if body:
+        # Strip a leading skill/command XML wrapper if a real prompt follows it.
+        stripped = _LEADING_XML_RE.sub("", body).strip()
+        return stripped or body
+
+    # extract_text came back empty (command scaffolding / noise). Recover real
+    # user text carried in <command-args>, if any.
+    raw = entry.message.content
+    if not isinstance(raw, str):
+        raw = " ".join(
+            b.text for b in raw if isinstance(b, TextContent)
+        )
+    args = " ".join(m.group(1).strip() for m in _COMMAND_ARGS_RE.finditer(raw))
+    return args.strip()
+
+
 def extract_thinking_text(entry: AssistantTranscriptEntry) -> str:
     """Extract thinking-block text from an assistant entry. Empty string if none."""
     parts: list[str] = []
