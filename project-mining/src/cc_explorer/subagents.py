@@ -39,6 +39,7 @@ from .models import (
     TranscriptEntry,
     TranscriptStats,
     extract_text,
+    is_teammate_injected,
 )
 from .parser import load_transcript
 from .utils import PrefixId
@@ -537,9 +538,14 @@ def _extract_tool_result_text(
 
 
 def _first_user_text(entries: list[TranscriptEntry]) -> str:
-    """First human turn's text — a subagent's spawn prompt, recovered from its transcript."""
+    """First human turn's text — a subagent's spawn prompt, recovered from its transcript.
+
+    Skips teammate-injected turns: in an agent-team body a leading
+    `<teammate-message>` DM is orchestration, not the spawn prompt, and its raw
+    XML must not be mistaken for prompt text.
+    """
     for entry in entries:
-        if isinstance(entry, HumanEntry):
+        if isinstance(entry, HumanEntry) and not is_teammate_injected(entry):
             text = extract_text(entry).strip()
             if text:
                 return text

@@ -74,7 +74,9 @@ the main transcript, so an agent's own tool calls / thinking are searchable too
    exists. Within a project, orient with list_project_sessions (like `ls`), then
    zoom in: grep_session / grep_sessions for matches-in-context, read_turn /
    browse_session to read at full fidelity. Every result carries its `project`,
-   so pass that back to scope follow-ups.
+   so pass that back to scope follow-ups. In agent-team sessions, a user turn
+   that is a teammate DM (orchestration, not the human) renders labeled as
+   `[teammate: sender -> recipient] ...` rather than raw <teammate-message> XML.
 
 2. Agent forensics — see what a session's subagents actually did.
    Start from list_project_sessions(min_agents=1) to find sessions that spawned
@@ -82,6 +84,12 @@ the main transcript, so an agent's own tool calls / thinking are searchable too
    ones included), get_agent_detail for one agent's prompt / result / tool-trace,
    and audit_session_tools to check whether the agents used their tools correctly
    (per-tool counts, error rates, retries).
+
+3. Attention reconstruction — what a window of agent-driving looked like.
+   get_activity_timeline rolls every project's transcripts over a time window
+   into a turn-count grid plus pre-computed attention rollups (sessions running
+   at once, peaks, hands-on vs autonomous time). Session ids and projects it
+   returns pass straight back to the tools above.
 """
 
 mcp = FastMCP("cc-explorer", instructions=_INSTRUCTIONS)

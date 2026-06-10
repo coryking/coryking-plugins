@@ -24,6 +24,7 @@ from .models import (
     extract_output_text,
     extract_text,
     extract_thinking_text,
+    is_teammate_injected,
     substantive_human_text,
 )
 from .formatting import _match_example
@@ -372,7 +373,14 @@ class SessionInfo:
     # Number of human prompts (entries where the user actually spoke), distinct
     # from message_count which also counts assistant turns. Signals how much the
     # human drove the session vs one prompt fanning out into a long agent run.
+    # Teammate-injected turns (agent-team orchestration DMs) are EXCLUDED — they
+    # are not human attention; counting them would inflate the "single prompt
+    # fanned out" signal for worker sessions.
     user_turns: int = 0
+    # Agent-team membership (teamName/agentName), stamped on every entry of a
+    # team-worker session. None outside agent-team sessions.
+    team: Optional[str] = None
+    team_role: Optional[str] = None
     # Full discovered subagent population — parent dispatches plus on-disk
     # orphans (notably workflow-orchestrated agents). Equals list_session_agents'
     # total_agents, unlike stats.agent_count which is top-down dispatches only.
@@ -527,18 +535,28 @@ def load_sessions(
         if message_count == 0:
             continue
 
-        # Human prompts only — how many times the user actually spoke.
+        # Human prompts only — how many times the user actually spoke. Teammate
+        # DMs are user-role turns but orchestration, not human attention, so they
+        # are excluded (consistent with the activity timeline's human_turns).
         user_turns = sum(
             1
             for e in entries
-            if isinstance(e, HumanEntry) and len(e.display(truncate=0)) > 0
+            if isinstance(e, HumanEntry)
+            and len(e.display(truncate=0)) > 0
+            and not is_teammate_injected(e)
         )
 
-        # Find first timestamp from any entry that has one (typed access)
+        # Find first timestamp and agent-team membership. Team identity is stamped
+        # on every entry of a worker session, so the first entry carrying it
+        # settles it; the first BaseTranscriptEntry is the cheapest read.
         first_ts: Optional[datetime] = None
+        team: Optional[str] = None
+        team_role: Optional[str] = None
         for e in entries:
             if isinstance(e, BaseTranscriptEntry):
                 first_ts = e.timestamp
+                team = e.teamName
+                team_role = e.agentName
                 break
 
         title = session_title(entries)
@@ -562,6 +580,8 @@ def load_sessions(
                 stats=stats,
                 worktree=ref.worktree,
                 user_turns=user_turns,
+                team=team,
+                team_role=team_role,
                 agents_present=agents_present,
                 project_path=project_path,
             )

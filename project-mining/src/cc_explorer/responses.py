@@ -55,7 +55,9 @@ class SessionSummary(SparseModel):
         description="Git worktree name this session lived in. Absent for the main worktree; present (e.g. 'happy-lehmann') for linked worktrees, which includes Claude Desktop dispatched sessions under `.claude-worktrees/`. Labeled sessions are often programmatically dispatched rather than interactively typed — calibrate signal accordingly.",
     )
     messages: int = Field(description="Total message count (human + assistant turns).")
-    user_turns: int = Field(description="Human prompts — how many times the user actually spoke. A small number against many agents or messages flags a single prompt that fanned out into a long autonomous run.")
+    user_turns: int = Field(description="Human prompts — how many times the user actually spoke. A small number against many agents or messages flags a single prompt that fanned out into a long autonomous run. EXCLUDES teammate-injected turns (agent-team orchestration DMs, see `team`): in a worker session most user-role turns are peer/orchestrator DMs, not human attention, so they don't count here.")
+    team: str | None = Field(default=None, description="Agent-team name (teamName) when this session is a team worker, else absent. Its user-role turns are mostly teammate-injected (orchestration), not human-typed — see `user_turns`.")
+    team_role: str | None = Field(default=None, description="This worker's role in the team (agentName), e.g. 'reviewer-3'. Absent outside agent-team sessions.")
     agents: int = Field(description="Subagents dispatched directly by the parent transcript (Task/Agent/TaskCreate blocks). Top-down view — does NOT count workflow-orchestrated agents.")
     agents_present: int = Field(description="Full discovered subagent population — direct dispatches plus on-disk orphans (notably workflow-orchestrated agents). Matches list_session_agents' total_agents. When this exceeds `agents`, the session ran workflows. The min_agents filter matches on this number.")
     context_tokens: int = Field(description="Last assistant turn's input tokens (context window size).")
@@ -76,6 +78,8 @@ class SessionSummary(SparseModel):
             worktree=s.worktree,
             messages=s.message_count,
             user_turns=s.user_turns,
+            team=s.team,
+            team_role=s.team_role,
             agents=s.stats.agent_count,
             agents_present=s.agents_present,
             context_tokens=s.stats.context_tokens,
