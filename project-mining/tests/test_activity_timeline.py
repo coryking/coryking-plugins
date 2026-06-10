@@ -43,7 +43,8 @@ SUB_ID = "dddddddd-1111-2222-3333-444444444444"
 # --------------------------------------------------------------------------- #
 
 
-def human(ts, text, session=SESSION_A, branch=None, entrypoint="cli", uuid="u"):
+def human(ts, text, session=SESSION_A, branch=None, entrypoint="cli", uuid="u",
+          team=None, team_role=None):
     e = {
         "type": "user",
         "uuid": f"{uuid}-{ts}",
@@ -54,7 +55,33 @@ def human(ts, text, session=SESSION_A, branch=None, entrypoint="cli", uuid="u"):
     }
     if branch:
         e["gitBranch"] = branch
+    if team:
+        e["teamName"] = team
+    if team_role:
+        e["agentName"] = team_role
     return e
+
+
+def teammate_human(ts, session=SESSION_A, team="cef-integration", team_role="reviewer-3",
+                   uuid="tm", body="do the thing"):
+    """A teammate-injected user turn — string content opening <teammate-message.
+
+    Mostly what a worker session's user-role turns are: an orchestrator/peer
+    DMing the pane. NOT a human turn. Content is always a bare string.
+    """
+    return {
+        "type": "user",
+        "uuid": f"{uuid}-{ts}",
+        "timestamp": ts,
+        "sessionId": session,
+        "entrypoint": "cli",
+        "teamName": team,
+        "agentName": team_role,
+        "message": {
+            "role": "user",
+            "content": f'<teammate-message teammate_id="orch" color="blue">{body}</teammate-message>',
+        },
+    }
 
 
 def interrupt_human(ts, session=SESSION_A):
@@ -100,8 +127,9 @@ def stdout_human(ts, text, session=SESSION_A, uuid="stdout"):
     )
 
 
-def assistant(ts, request_id, session=SESSION_A, model="claude-test-1", entrypoint="cli"):
-    return {
+def assistant(ts, request_id, session=SESSION_A, model="claude-test-1", entrypoint="cli",
+              team=None, team_role=None):
+    e = {
         "type": "assistant",
         "uuid": f"a-{request_id}",
         "timestamp": ts,
@@ -116,6 +144,11 @@ def assistant(ts, request_id, session=SESSION_A, model="claude-test-1", entrypoi
             "content": [{"type": "text", "text": "ok"}],
         },
     }
+    if team:
+        e["teamName"] = team
+    if team_role:
+        e["agentName"] = team_role
+    return e
 
 
 def turn_duration(ts, ms, session=SESSION_A):
@@ -553,3 +586,93 @@ class TestOpeningClosingSubstance:
         assert sess["opening"] is None
         assert sess["closing"] is None
         assert sess["human_turns"] == 2  # still real human turns
+
+
+class TestTeammateInjection:
+    """Agent-team worker sessions: teammate-injected user turns are orchestration,
+    not human attention. They reclassify as bucket agent activity, never as human
+    turns / interrupts / opening-closing. team/team_role surface; team_sessions
+    counts them. A genuine human-typed turn in the same session survives."""
+
+    def test_teammate_turn_not_human_but_is_agent_activity(self, corpus):
+        # A pure-worker session: 3 teammate DMs + 1 assistant reply, no human.
+        corpus(
+            "proj",
+            SESSION_A,
+            [
+                teammate_human(utc(2026, 6, 3, 18, 0)),
+                assistant(utc(2026, 6, 3, 18, 0), "r1", team="cef-integration",
+                          team_role="reviewer-3"),
+                teammate_human(utc(2026, 6, 3, 18, 1), uuid="tm2"),
+                teammate_human(utc(2026, 6, 3, 18, 2), uuid="tm3"),
+            ],
+        )
+        out = run()
+        sess = out["sessions"][0]
+        assert sess["human_turns"] == 0
+        assert sess["interrupts"] == 0
+        assert sess["opening"] is None
+        assert sess["closing"] is None
+        # Each teammate turn is one agent marker in its bucket; plus the assistant
+        # request in bucket 0 (which dedups with the tm marker into 2 markers).
+        assert sess["agent_turns"] >= 3
+        # Not counted as interactive attention.
+        assert out["summary"]["interactive"]["human_turns"] == 0
+        assert out["summary"]["interactive"]["active_min"] == 0
+
+    def test_teammate_turn_is_bucket_agent_activity(self, corpus):
+        # One teammate turn alone lights its bucket as agent (autonomous) activity.
+        corpus("proj", SESSION_A, [teammate_human(utc(2026, 6, 3, 18, 0))])
+        out = run()
+        sess = out["sessions"][0]
+        assert sess["agent_turns"] == 1
+        assert out["summary"]["interactive"]["peak_autonomous_sessions"] == 1
+
+    def test_team_and_team_role_surface(self, corpus):
+        corpus(
+            "proj",
+            SESSION_A,
+            [
+                teammate_human(utc(2026, 6, 3, 18, 0), team="alpha-team",
+                               team_role="builder-1"),
+                assistant(utc(2026, 6, 3, 18, 0), "r1", team="alpha-team",
+                          team_role="builder-1"),
+            ],
+        )
+        out = run()
+        sess = out["sessions"][0]
+        assert sess["team"] == "alpha-team"
+        assert sess["team_role"] == "builder-1"
+        assert out["summary"]["interactive"]["team_sessions"] == 1
+
+    def test_non_team_session_has_null_team(self, corpus):
+        corpus("proj", SESSION_A, [human(utc(2026, 6, 3, 18, 0), "normal prompt")])
+        out = run()
+        sess = out["sessions"][0]
+        assert sess["team"] is None
+        assert sess["team_role"] is None
+        assert out["summary"]["interactive"]["team_sessions"] == 0
+
+    def test_mixed_session_one_genuine_human_turn(self, corpus):
+        # The real-world case: a worker session that is mostly teammate DMs but
+        # has exactly ONE genuine human-typed pane touch (e.g. /code-review).
+        corpus(
+            "proj",
+            SESSION_A,
+            [
+                teammate_human(utc(2026, 6, 3, 18, 0), uuid="tm1"),
+                teammate_human(utc(2026, 6, 3, 18, 1), uuid="tm2"),
+                human(utc(2026, 6, 3, 18, 5), "real human pane touch",
+                      team="cef-integration", team_role="reviewer-3"),
+                teammate_human(utc(2026, 6, 3, 18, 10), uuid="tm3"),
+            ],
+        )
+        out = run()
+        sess = out["sessions"][0]
+        assert sess["human_turns"] == 1
+        assert sess["opening"] == "real human pane touch"
+        assert sess["closing"] == "real human pane touch"
+        assert sess["team"] == "cef-integration"
+        assert sess["team_role"] == "reviewer-3"
+        assert out["summary"]["interactive"]["human_turns"] == 1
+        assert out["summary"]["interactive"]["team_sessions"] == 1

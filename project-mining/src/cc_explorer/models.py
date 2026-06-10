@@ -178,6 +178,13 @@ class BaseTranscriptEntry(BaseModel):
     # (claude -p / SDK / cron — e.g. the nightly dreamer runs). Distinguishes
     # Cory-driven attention from automated runs.
     entrypoint: Optional[str] = None
+    # Agent-team membership, stamped on every entry of a team-worker session.
+    # teamName is the team the pane belongs to (e.g. "cef-integration");
+    # agentName is this worker's role in it (e.g. "reviewer-3"). Both absent
+    # outside agent-team sessions. A worker's user-role turns are mostly
+    # INJECTED BY TEAMMATES, not typed by the human — see is_teammate_injected.
+    teamName: Optional[str] = None
+    agentName: Optional[str] = None
 
     @property
     def is_headless(self) -> bool:
@@ -517,6 +524,41 @@ _COMMAND_ARGS_RE = re.compile(r"<command-args>([\s\S]*?)</command-args>")
 _LEADING_XML_RE = re.compile(r"^<[^>]+>[\s\S]*?</[^>]+>\s*")
 
 
+_TEAMMATE_MARKER = "<teammate-message"
+
+
+def is_teammate_injected(entry: BaseTranscriptEntry) -> bool:
+    """True if this user turn was injected by a teammate, not typed by the human.
+
+    In agent-team sessions an orchestrator (or peer worker) DMs a worker's pane
+    by writing a user-role turn whose message content opens with
+    `<teammate-message ...>` (grammar: `<teammate-message teammate_id="..."
+    [color="..."] [summary="..."]>`). There is no JSON boolean for it — the
+    marker IS the content. Human-typed turns in the same session are normal
+    turns (plain prose or `<command-` stanzas).
+
+    In the raw JSONL this marker arrives as a bare string; the parser normalizes
+    every user turn's content into a `[TextContent]` list, so detection keys on
+    the leading marker text (which survives normalization), not on the str/list
+    shape (which does not). Only HumanEntry is considered — ToolResultEntry and
+    MetaEntry are never teammate DMs.
+
+    These injected turns are the orchestration protocol, not human attention:
+    callers must not count them as human turns, interrupts, or opening/closing
+    candidates.
+    """
+    if not isinstance(entry, HumanEntry):
+        return False
+    content = entry.message.content
+    if isinstance(content, str):
+        text = content
+    elif content and isinstance(content[0], TextContent):
+        text = content[0].text
+    else:
+        return False
+    return text.lstrip().startswith(_TEAMMATE_MARKER)
+
+
 def substantive_human_text(entry: HumanEntry) -> str:
     """The substantive prompt text of a human turn, or '' for pure scaffolding.
 
@@ -530,10 +572,17 @@ def substantive_human_text(entry: HumanEntry) -> str:
     so we recover them rather than discarding the turn. Leading skill/command XML
     wrappers around an otherwise-real prompt are also stripped.
 
+    A teammate-injected turn (`<teammate-message ...>`) carries no human prompt —
+    it is a peer/orchestrator DMing this worker's pane — so it is never
+    substantive. A worker session's opening/closing therefore lands on a genuine
+    human turn if one exists, else stays null.
+
     This is the single source of truth for "what did the human actually say in
     this turn" — `session_title` and the activity timeline's opening/closing both
     route through it so they agree on what counts as substance.
     """
+    if is_teammate_injected(entry):
+        return ""
     body = extract_text(entry).strip()
     if body:
         # Strip a leading skill/command XML wrapper if a real prompt follows it.

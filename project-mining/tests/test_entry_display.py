@@ -264,6 +264,105 @@ class TestEntrypointAndPromptSource:
         assert e.is_headless is True
 
 
+class TestTeamMembership:
+    """teamName/agentName must survive parsing on every entry type (they are
+    stamped per-entry like gitBranch/entrypoint), and is_teammate_injected must
+    fire only on string-content user turns opening with <teammate-message."""
+
+    def _human_raw(self, content, **extra):
+        base = {
+            "type": "user",
+            "uuid": FULL_UUID,
+            "timestamp": "2026-06-08T15:25:36.183Z",
+            "sessionId": "bbbbbbbb-1111-2222-3333-444444444444",
+            "message": {"role": "user", "content": content},
+        }
+        base.update(extra)
+        return base
+
+    def test_team_fields_parsed_on_human(self):
+        from cc_explorer.models import HumanEntry
+        from cc_explorer.parser import create_transcript_entry
+
+        e = create_transcript_entry(
+            self._human_raw("hi", teamName="cef-integration", agentName="reviewer-3")
+        )
+        assert isinstance(e, HumanEntry)
+        assert e.teamName == "cef-integration"
+        assert e.agentName == "reviewer-3"
+
+    def test_team_fields_parsed_on_assistant(self):
+        from cc_explorer.models import AssistantTranscriptEntry
+        from cc_explorer.parser import create_transcript_entry
+
+        raw = {
+            "type": "assistant",
+            "uuid": FULL_UUID,
+            "timestamp": "2026-06-08T15:25:36.183Z",
+            "sessionId": "bbbbbbbb-1111-2222-3333-444444444444",
+            "teamName": "cef-integration",
+            "agentName": "reviewer-3",
+            "message": {
+                "id": "m1", "type": "message", "role": "assistant",
+                "model": "claude-test", "content": [{"type": "text", "text": "ok"}],
+            },
+        }
+        e = create_transcript_entry(raw)
+        assert isinstance(e, AssistantTranscriptEntry)
+        assert e.teamName == "cef-integration"
+        assert e.agentName == "reviewer-3"
+
+    def test_team_fields_absent_default_none(self):
+        from cc_explorer.parser import create_transcript_entry
+
+        e = create_transcript_entry(self._human_raw("hi"))
+        assert e.teamName is None
+        assert e.agentName is None
+
+    def test_is_teammate_injected_true_for_marker_string(self):
+        from cc_explorer.models import is_teammate_injected
+        from cc_explorer.parser import create_transcript_entry
+
+        e = create_transcript_entry(
+            self._human_raw('<teammate-message teammate_id="orch" color="blue">do X</teammate-message>')
+        )
+        assert is_teammate_injected(e) is True
+
+    def test_is_teammate_injected_false_for_human_prose(self):
+        from cc_explorer.models import is_teammate_injected
+        from cc_explorer.parser import create_transcript_entry
+
+        e = create_transcript_entry(self._human_raw("just a normal typed prompt"))
+        assert is_teammate_injected(e) is False
+
+    def test_is_teammate_injected_false_when_marker_not_leading(self):
+        # The marker must OPEN the content. A turn that merely mentions the string
+        # mid-text (or carries a leading non-text block) is not teammate-injected.
+        from cc_explorer.models import is_teammate_injected
+        from cc_explorer.parser import create_transcript_entry
+
+        e = create_transcript_entry(
+            self._human_raw("here is what a <teammate-message> looks like, fyi")
+        )
+        assert is_teammate_injected(e) is False
+
+    def test_is_teammate_injected_false_for_non_human(self):
+        from cc_explorer.models import is_teammate_injected
+        from cc_explorer.parser import create_transcript_entry
+
+        e = create_transcript_entry({
+            "type": "assistant",
+            "uuid": FULL_UUID,
+            "timestamp": "2026-06-08T15:25:36.183Z",
+            "sessionId": "bbbbbbbb-1111-2222-3333-444444444444",
+            "message": {
+                "id": "m1", "type": "message", "role": "assistant",
+                "model": "x", "content": [{"type": "text", "text": "ok"}],
+            },
+        })
+        assert is_teammate_injected(e) is False
+
+
 class TestFormatEntryLineNoDuplicateIdentity:
     def test_human_pipe_fifth_field_is_body_only(self, human_entry):
         line = format_entry_line(human_entry, truncate=500)

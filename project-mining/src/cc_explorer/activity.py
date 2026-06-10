@@ -20,6 +20,14 @@ Vocabulary (these are the field definitions surfaced in the MCP output schema):
   tool-result activity in that bucket. A subagent's internal activity — INCLUDING
   its own internal human turns, which are the orchestration protocol, not human
   attention — folds into the parent as agent turns.
+- In an *agent-team* session, a worker's user-role turns are mostly INJECTED BY
+  TEAMMATES (an orchestrator/peer DMing the pane via `<teammate-message ...>`),
+  not typed by the human. A teammate-injected turn is NOT a human turn, NOT an
+  interrupt, and NOT an opening/closing candidate; it counts as agent activity
+  in its bucket (one `tm_` marker per turn). A genuine human-typed turn in the
+  same session survives as a human turn. `team`/`team_role` on a session row
+  carry the session's `teamName`/`agentName`; `summary.interactive.team_sessions`
+  counts interactive sessions with a non-null team.
 - `active_min` = (# buckets with >=1 human turn in >=1 interactive session) x
   bucket_minutes. `multitask_min` requires >=2 distinct interactive sessions
   with human turns in the bucket.
@@ -46,6 +54,7 @@ from .models import (
     SystemTranscriptEntry,
     TextContent,
     ToolResultEntry,
+    is_teammate_injected,
     substantive_human_text,
 )
 from .parser import load_conversations, load_transcript
@@ -92,7 +101,8 @@ class _Scan:
     """In-window tallies for one transcript (a session OR a subagent body)."""
 
     __slots__ = ("human", "agent_req", "turn_ms", "interrupts", "branches",
-                 "models", "first_human", "last_human", "summary")
+                 "models", "first_human", "last_human", "summary",
+                 "team", "team_role")
 
     def __init__(self) -> None:
         self.human: Counter[int] = Counter()           # bucket -> human turn count
@@ -104,6 +114,8 @@ class _Scan:
         self.first_human: Optional[str] = None         # first non-interrupt human text
         self.last_human: Optional[str] = None           # last non-interrupt human text
         self.summary: Optional[str] = None              # latest stored summary entry
+        self.team: Optional[str] = None                 # teamName (agent-team worker)
+        self.team_role: Optional[str] = None            # agentName (this worker's role)
 
 
 def _scan(path: Path, lo: datetime, hi: datetime, bucket_s: int) -> Optional[_Scan]:
@@ -132,6 +144,13 @@ def _scan(path: Path, lo: datetime, hi: datetime, bucket_s: int) -> Optional[_Sc
             seen_branches.add(e.gitBranch)
             s.branches.append(e.gitBranch)
 
+        # Agent-team membership (whole-file identity, stamped on every entry).
+        if isinstance(e, BaseTranscriptEntry):
+            if s.team is None and e.teamName:
+                s.team = e.teamName
+            if s.team_role is None and e.agentName:
+                s.team_role = e.agentName
+
         if isinstance(e, SummaryTranscriptEntry):
             # Summary entries carry no timestamp; keep the last one in file order.
             if e.summary:
@@ -148,6 +167,15 @@ def _scan(path: Path, lo: datetime, hi: datetime, bucket_s: int) -> Optional[_Sc
                 continue
             if INTERRUPT in _user_text(e):
                 s.interrupts += 1
+                continue
+            if is_teammate_injected(e):
+                # A peer/orchestrator DMed this worker's pane — orchestration
+                # protocol, not human attention. Does NOT count as a human turn,
+                # an interrupt, or an opening/closing candidate; it DOES count as
+                # agent activity in its bucket (one marker per turn, same dedup
+                # mechanism as the subagent fold's subh_ markers).
+                b = bucket(e.timestamp)
+                s.agent_req[b].add(f"tm_{b}_{e.uuid}")
                 continue
             s.human[bucket(e.timestamp)] += 1
             # opening/closing track only SUBSTANTIVE turns — a bare /clear or
@@ -304,6 +332,8 @@ def build_activity_timeline(
                 "project": proj_name,
                 "headless": headless,
                 "entrypoint": entrypoint,
+                "team": scan.team,
+                "team_role": scan.team_role,
                 "model": (scan.models.most_common(1)[0][0] if scan.models else None),
                 "branches": scan.branches,
                 "start": day_label(active[0]),
@@ -380,6 +410,7 @@ def build_activity_timeline(
             "machine_hours": round(
                 sum(r["turn_min"] for r in inter_records) / 60, 1
             ),
+            "team_sessions": sum(1 for r in inter_records if r["team"]),
         },
         "headless": {
             "sessions": len(head_records),

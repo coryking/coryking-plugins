@@ -828,6 +828,7 @@ class ActivityInteractiveSummary(SparseModel):
     human_turns: int = Field(description="Interactive human turns (interrupts excluded).")
     interrupts: int = Field(description="Times the human stopped the agent mid-turn (esc) across interactive sessions. A fact, no valence.")
     machine_hours: int | float = Field(description="Sum of interactive turn_min, in hours. FLOOR.")
+    team_sessions: int = Field(description="Interactive sessions belonging to an agent team (non-null team). Their user-role turns are mostly teammate-injected, not human-typed — counted as agent activity, not attention.")
 
 
 class ActivityHeadlessSummary(SparseModel):
@@ -866,6 +867,8 @@ class ActivitySession(SparseModel):
     project: str = Field(description="Repo name — pass to `projects`.")
     headless: bool = Field(description="True for sdk-cli (claude -p / SDK / cron). Machine work, excluded from interactive rollups.")
     entrypoint: str | None = Field(default=None, description="Raw entrypoint: 'cli' interactive, 'sdk-cli' headless.")
+    team: str | None = Field(default=None, description="Agent-team name (teamName) when this session is a team worker, else null. Its user-role turns are mostly teammate-injected (orchestration), not human-typed.")
+    team_role: str | None = Field(default=None, description="This worker's role in the team (agentName), e.g. 'reviewer-3'. null outside agent-team sessions.")
     model: str | None = Field(default=None, description="Dominant (most frequent) assistant model id in-window.")
     branches: list[str] = Field(description="Distinct gitBranch values, first-appearance order.")
     start: str | None = Field(default=None, description="First in-window activity bucket (Day MM-DD HH:MM).")
