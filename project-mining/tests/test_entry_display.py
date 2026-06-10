@@ -193,6 +193,77 @@ class TestSystemTurnTiming:
         assert e.turn_duration_ms is None
 
 
+class TestEntrypointAndPromptSource:
+    """entrypoint/promptSource must survive parsing, and is_headless must read
+    from entrypoint. Closes the gap from commit f06266f (which declared the
+    fields but had no parse test), mirroring TestSystemTurnTiming above."""
+
+    def _human_raw(self, **extra):
+        base = {
+            "type": "user",
+            "uuid": FULL_UUID,
+            "timestamp": "2026-06-08T15:25:36.183Z",
+            "sessionId": "bbbbbbbb-1111-2222-3333-444444444444",
+            "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        }
+        base.update(extra)
+        return base
+
+    def test_entrypoint_and_prompt_source_parsed(self):
+        from cc_explorer.models import HumanEntry
+        from cc_explorer.parser import create_transcript_entry
+
+        e = create_transcript_entry(
+            self._human_raw(entrypoint="sdk-cli", promptSource="sdk")
+        )
+        assert isinstance(e, HumanEntry)
+        assert e.entrypoint == "sdk-cli"
+        assert e.promptSource == "sdk"
+
+    def test_is_headless_true_for_sdk_cli(self):
+        from cc_explorer.parser import create_transcript_entry
+
+        e = create_transcript_entry(self._human_raw(entrypoint="sdk-cli"))
+        assert e.is_headless is True
+
+    def test_is_headless_false_for_cli(self):
+        from cc_explorer.parser import create_transcript_entry
+
+        e = create_transcript_entry(self._human_raw(entrypoint="cli"))
+        assert e.is_headless is False
+
+    def test_is_headless_false_when_absent(self):
+        from cc_explorer.parser import create_transcript_entry
+
+        e = create_transcript_entry(self._human_raw())
+        assert e.entrypoint is None
+        assert e.promptSource is None
+        assert e.is_headless is False
+
+    def test_entrypoint_on_assistant_entry(self):
+        from cc_explorer.models import AssistantTranscriptEntry
+        from cc_explorer.parser import create_transcript_entry
+
+        raw = {
+            "type": "assistant",
+            "uuid": FULL_UUID,
+            "timestamp": "2026-06-08T15:25:36.183Z",
+            "sessionId": "bbbbbbbb-1111-2222-3333-444444444444",
+            "entrypoint": "sdk-cli",
+            "message": {
+                "id": "m1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-test",
+                "content": [{"type": "text", "text": "ok"}],
+            },
+        }
+        e = create_transcript_entry(raw)
+        assert isinstance(e, AssistantTranscriptEntry)
+        assert e.entrypoint == "sdk-cli"
+        assert e.is_headless is True
+
+
 class TestFormatEntryLineNoDuplicateIdentity:
     def test_human_pipe_fifth_field_is_body_only(self, human_entry):
         line = format_entry_line(human_entry, truncate=500)
