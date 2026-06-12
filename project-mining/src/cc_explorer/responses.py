@@ -67,6 +67,10 @@ class SessionSummary(SparseModel):
         default=None,
         description="True for the calling conversation itself — the session you are reading this from. Absent for every other session. Use it to skip yourself.",
     )
+    is_conversion_artifact: bool | None = Field(
+        default=None,
+        description="True when this session is a conversion artifact — copied here via convert_session, not an original conversation. Its content duplicates the source transcript. Remove with delete_conversions (converted sessions are managed manually). Absent for normal sessions.",
+    )
 
     @classmethod
     def from_session_info(cls, s: SessionInfo, is_current: bool = False) -> SessionSummary:
@@ -86,6 +90,7 @@ class SessionSummary(SparseModel):
             output_tokens=s.stats.output_tokens,
             tools=s.stats.tool_use_count,
             is_current=is_current or None,
+            is_conversion_artifact=s.is_conversion_artifact or None,
         )
 
 
@@ -537,6 +542,10 @@ class AgentSummary(SparseModel):
         default=None,
         description="The workflow run this agent belongs to; null if it wasn't spawned by a workflow. Agents sharing a value ran in the same workflow.",
     )
+    is_conversion_artifact: bool | None = Field(
+        default=None,
+        description="True when this agent is a CONVERSION ARTIFACT — a session or subagent copied here via convert_session, not a real dispatched run. Its transcript duplicates a real one and is excluded from search. Remove it with delete_conversions. Absent for normal agents.",
+    )
     date: datetime | None = Field(default=None, description="Timestamp when agent was spawned.")
     type: str = Field(description="Subagent type (e.g. 'general-purpose', 'Explore').")
     status: str = Field(description="Agent status: completed, error, async_launched, unknown.")
@@ -553,6 +562,7 @@ class AgentSummary(SparseModel):
             tool_use_id=sa.tool_use_id,
             source=sa.source,
             workflow_run_id=sa.workflow_run_id,
+            is_conversion_artifact=sa.is_conversion_artifact or None,
             date=sa.timestamp,
             type=sa.subagent_type or "",
             status=sa.status,
@@ -901,4 +911,149 @@ class ActivityTimelineResponse(SparseModel):
     sessions: list[ActivitySession] = Field(description="Interactive sessions first (turn_min desc), then headless (turn_min desc).")
     timeline: dict[str, dict[str, list[int]]] = Field(
         description="Time-major sparse grid: {'MM-DD HH:MM': {session_id: [human_turns, agent_turns]}}. Active buckets only; ALL sessions incl. headless; subagents folded into the parent as agent turns."
+    )
+
+
+# =============================================================================
+# convert_session
+# =============================================================================
+#
+# Lead with the actionable: `operation`/`direction`/`created_id`/`invocation`
+# come first so the agent sees "what was created and how to use it" before the
+# diagnostic detail (environment, models, lineage) that survives truncation
+# below it.
+
+
+class ConversionModels(SparseModel):
+    """Assistant model history of the converted transcript."""
+
+    first: str | None = Field(default=None, description="First assistant model id in the copy.")
+    last: str | None = Field(default=None, description="Last assistant model id in the copy.")
+    counts: dict[str, int] = Field(
+        default_factory=dict, description="model id -> number of assistant turns."
+    )
+
+
+class ConversionEnvironment(SparseModel):
+    """The converted conversation's original runtime context.
+
+    A converted conversation has no live environment of its own — these are read
+    off the source transcript so the caller can judge whether the cwd/branch it
+    assumed still exist before acting on its answers.
+    """
+
+    original_cwd: str | None = Field(default=None, description="cwd the source ran in.")
+    cwd_exists: bool = Field(description="Whether original_cwd still exists on disk.")
+    original_branch: str | None = Field(default=None, description="gitBranch the source ran on.")
+    branch_exists: bool | None = Field(
+        default=None,
+        description="Whether original_branch is still a valid ref. null when the cwd is gone or isn't a git repo (can't tell).",
+    )
+    cc_version: str | None = Field(default=None, description="Claude Code version the source ran under.")
+    last_timestamp: str | None = Field(default=None, description="Timestamp of the source's last turn.")
+    age_days: int | None = Field(default=None, description="Whole days from the source's last turn to now.")
+
+
+class ConvertSessionResponse(SparseModel):
+    """Result of a session<->subagent conversion (always a copy).
+
+    Leads with what was created and the exact next step (`invocation`). The
+    source transcript is never touched. `suggested_handoff` is the first message
+    to send a converted session, since a copied conversation can't tell its
+    interlocutor changed.
+    """
+
+    operation: str = Field(description="Always 'copy' — the source is never modified, moved, or deleted.")
+    direction: str = Field(description="'session_to_subagent' or 'subagent_to_session'.")
+    created_id: str = Field(description="The new agent id (session_to_subagent) or session uuid (subagent_to_session).")
+    invocation: str = Field(description="The exact next step to use the created artifact.")
+    parent_session: str | None = Field(
+        default=None,
+        description="session_to_subagent: the session the new subagent is parented under.",
+    )
+    title: str | None = Field(default=None, description="subagent_to_session: the new session's custom title.")
+    project: str | None = Field(default=None, description="subagent_to_session: the project the new session was written to.")
+    turns: int = Field(description="Conversation turns copied (user+assistant), after trailing trim.")
+    trimmed_trailing: int = Field(description="Trailing noise turns dropped (empty/interrupt/command scaffolding).")
+    dropped_branches: int | None = Field(
+        default=None,
+        description="Lines dropped because they were on abandoned edit-branches or embedded sidechain turns not on the active thread. 0 when nothing was dropped; absent when no walk was possible (fallback to file order).",
+    )
+    tail_state: str = Field(description="'clean' (ends on an assistant turn) or 'pending_user_input' (ends on a real user turn awaiting a reply).")
+    nested_agents: int | None = Field(
+        default=None,
+        description="session_to_subagent only: subagents the SOURCE session ran. They are NOT copied — their results already appear inline in the conversation. Absent/0 for subagent sources.",
+    )
+    models: ConversionModels = Field(description="Assistant model history of the copy.")
+    environment: ConversionEnvironment = Field(description="The source's original cwd/branch/version/age.")
+    suggested_handoff: str | None = Field(
+        default=None,
+        description="session_to_subagent only: the first message to send the converted subagent, telling it its interlocutor changed (senders are not labeled on the wire).",
+    )
+    lineage: list[dict[str, str]] = Field(
+        description="Accumulated conversion chain: each hop is {as: 'session'|'subagent', id: ...}, oldest first.",
+    )
+
+    @classmethod
+    def from_result(cls, r) -> "ConvertSessionResponse":
+        if r.direction == "session_to_subagent":
+            invocation = f'SendMessage(to: "{r.created_id}")'
+        else:
+            invocation = (
+                f"claude -r {r.created_id}   "
+                f'(or: claude --resume "{r.title}" — resolves by title too)'
+            )
+        return cls(
+            operation="copy",
+            direction=r.direction,
+            created_id=r.created_id,
+            invocation=invocation,
+            parent_session=r.parent_session,
+            title=r.title,
+            project=r.project,
+            turns=r.turns,
+            trimmed_trailing=r.trimmed_trailing,
+            dropped_branches=r.dropped_branches if r.dropped_branches is not None else None,
+            tail_state=r.tail_state,
+            nested_agents=(r.nested_agents or None) if r.direction == "session_to_subagent" else None,
+            models=ConversionModels(**r.models),
+            environment=ConversionEnvironment(**r.environment),
+            suggested_handoff=r.suggested_handoff,
+            lineage=r.lineage,
+        )
+
+
+# =============================================================================
+# delete_conversions
+# =============================================================================
+
+
+class DeletedConversion(SparseModel):
+    """One conversion artifact that was deleted."""
+
+    id: str = Field(description="The agent id or session id deleted.")
+    kind: str = Field(description="'subagent' or 'session'.")
+    path: str = Field(description="Transcript file that was removed.")
+
+
+class RefusedDeletion(SparseModel):
+    """One id that was NOT deleted, with the reason."""
+
+    id: str = Field(description="The id that was refused.")
+    reason: str = Field(description="Why it wasn't deleted: not found, not a conversion artifact (no provenance line), grown since creation (resumed/built upon), or a converted session (humans manage those).")
+
+
+class DeleteConversionsResponse(SparseModel):
+    """Result of delete_conversions: what was removed and what was refused.
+
+    Only SUBAGENT artifacts carrying a valid x-converter-provenance line AND
+    unchanged since creation are deletable. Grown artifacts, converted sessions,
+    and non-conversion files are refused with a per-id reason rather than touched.
+    """
+
+    deleted: list[DeletedConversion] = Field(
+        default_factory=list, description="Conversion artifacts removed."
+    )
+    refused: list[RefusedDeletion] = Field(
+        default_factory=list, description="Ids not removed, each with a reason."
     )

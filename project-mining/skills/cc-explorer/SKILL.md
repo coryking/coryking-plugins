@@ -5,7 +5,8 @@ description: >
   find what was discussed, trace subagent execution, inspect what an agent did, or browse chat logs.
   Triggers on: "search my chats", "what did that agent do", "trace that session", "look at my
   conversations", "check my chat history", "find where we talked about X", "which sessions used
-  agents". Do NOT use for behavioral evidence mining or resume work — that's the project-mining skill.
+  agents", "ask a past session", "convert a session into a subagent", "question that old conversation".
+  Do NOT use for behavioral evidence mining or evidence-document work — that's the project-mining skill.
 ---
 
 # cc-explorer
@@ -57,6 +58,25 @@ Tools for tracing subagent execution — a separate axis from conversation conte
 
 Use when tracing what an agent did, correlating outputs with sessions, or building timelines that distinguish "discussed doing X" from "dispatched agents to do X."
 
+## The conversion tools
+
+Tools that create new transcripts — the one mutating axis in the toolset. Both only ever copy; no existing session or subagent is modified.
+
+- **`convert_session`** — copy a session into a subagent under the calling session (direction `session_to_subagent`), or a subagent out to a top-level session (direction `subagent_to_session`).
+- **`delete_conversions`** — remove subagent artifacts the converter created. Refuses everything else, including converted sessions. Permanent — no undo.
+
+Convert a session to a subagent when the question needs the session itself, not excerpts from it: the reasoning behind a decision, a synthesis of the whole arc, a judgment call on evidence it hasn't seen, or a domain expert whose built-up context would be expensive to rebuild. Resume the new agent with `SendMessage(to: <created_id>)`; its reply is its final message; message it again to follow up. For facts, quotes, locations, and tool-call ground truth, stay on the read tools.
+
+Convert a subagent to a session when the user wants to read or continue an agent's run themselves — hand them the `claude -r` command from the response.
+
+### Composing the first message to a converted conversation
+
+Open with the `suggested_handoff` from the tool response. The conversation has no way to know its interlocutor changed — messages arrive unlabeled, and you occupy the same `user` role its human did — so the handoff's one job is to resolve the contradiction between its runtime ("you are a subagent") and its history (an interactive session, mid-relationship with someone else). Then say who you are and what you want, in whatever role fits the intent: witness, fact-checker, expert consult, plain continuation. The framing controls stance, not correctness — without one, the conversation defaults to being its old user's assistant and offers to resume the relationship.
+
+Mind the knowledge asymmetry (the emic/etic gap): you've read excerpts from the outside; it lived the whole thing and is the authority on what its conversation was about. Offer your reading as a reading — "my understanding from the outside is this session was about X; correct me if that's off" — never as established fact. A presupposed frame invites it to elaborate your guess instead of reporting its reality, and when the premise is flat wrong it has to spend its whole answer fighting the frame. Converted conversations do push back rather than play along — but don't bet on that against a confidently-asserted wrong premise.
+
+Its knowledge ends where the conversation ended. If the answer should account for the present, brief it on what changed first, then ask for the judgment. Relay `environment` facts from the response only when the ask depends on them — e.g. it will run tools in a cwd it doesn't remember having left.
+
 ## Worktree pooling
 
 Sessions from every git worktree of a project are pooled under one project — and this holds cross-project too: `list_projects` and an omitted-`projects` search show one row per repo, not one per worktree. Claude Desktop dispatch creates real git worktrees under `<project>/.claude-worktrees/<name>/`, so dispatched work shows up alongside interactive sessions automatically — no need to specify a worktree or know which branch work happened on.
@@ -74,6 +94,8 @@ Each session carries a `worktree` field (absent for the main worktree, set to th
 **"Show me what was said"** → `grep_session` for pattern-matched content with context, or `read_turn` to read a specific moment at full fidelity. Use `full_length` values in grep output to gauge entry size before reading.
 
 **"Trace agent execution"** → `list_project_sessions(min_agents=1)` → `list_session_agents` → `get_agent_detail` (or `audit_session_tools` for the whole-session tool-usage view). Top-down zoom from project to session to individual agent.
+
+**"Why did that session decide X? What did it learn?"** → `convert_session`, then `SendMessage`. Grep finds what was said; a converted session can answer for what it meant.
 
 ## Key workflows
 
@@ -99,3 +121,4 @@ Trace subagent execution top-down: `list_project_sessions(min_agents=1)` identif
 - `full_length` in grep output tells you how big an entry is before you read it. Large values (5000+) mean tool results or long outputs — use `read_turn` with a `limit` to avoid pulling in too much.
 - High agent counts in session listings signal orchestration sessions (fan-out research, multi-step workflows).
 - Search is exhaustive by default — patterns match against text, tool inputs (Bash commands, file paths, grep patterns), tool outputs, and assistant thinking. Write tight regex to narrow noisy searches.
+- Converted conversations push back on wrong premises rather than play along — but offer your understanding as understanding anyway; don't make them fight a frame you asserted as fact.

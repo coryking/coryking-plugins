@@ -41,6 +41,7 @@ from .models import (
     extract_text,
     substantive_human_text,
 )
+from .conversion import read_provenance
 from .parser import load_transcript
 from .utils import PrefixId
 
@@ -66,6 +67,8 @@ class SubagentInfo:
     source: str = ""
     # Workflow run id for agents under subagents/workflows/<runId>/, else None.
     workflow_run_id: Optional[str] = None
+    # Conversion artifact (made by convert_session), not a real dispatched run.
+    is_conversion_artifact: bool = False
 
     # Completion stats (from toolUseResult on completed agents)
     # Optional here is meaningful — distinguishes "no data" from "zero usage"
@@ -257,6 +260,8 @@ class AgentFile:
     agent_type: str = ""  # meta.json agentType
     description: str = ""  # meta.json description
     tool_use_id: str = ""  # meta.json toolUseId (links back to a parent dispatch)
+    # Conversion artifact — keyed on the provenance line; conversion.py owns the why.
+    is_conversion_artifact: bool = False
 
 
 def resolve_subagents_dir(session_path: Path) -> Path:
@@ -283,7 +288,7 @@ def _workflow_run_id(path: Path, base_dir: Path) -> Optional[str]:
     return None
 
 
-def _read_agent_meta(transcript_path: Path) -> dict[str, str]:
+def _read_agent_meta(transcript_path: Path) -> dict[str, Any]:
     """Read the `.meta.json` sidecar next to an agent transcript. Empty dict if absent."""
     meta_path = transcript_path.with_suffix(".meta.json")
     try:
@@ -331,6 +336,7 @@ def collect_agent_files(subagents_dir: Path) -> list[AgentFile]:
                         agent_type=meta.get("agentType", ""),
                         description=meta.get("description", ""),
                         tool_use_id=meta.get("toolUseId", ""),
+                        is_conversion_artifact=read_provenance(entry) is not None,
                     )
                 )
 
@@ -403,6 +409,7 @@ def discover_subagents(
                 target.agent_id = PrefixId(af.agent_id)
             target.workflow_run_id = af.workflow_run_id
             target.source = "dispatched"
+            target.is_conversion_artifact = af.is_conversion_artifact
             _attach_transcript_file(target, af.path)
             matched.add(id(target))
         else:
@@ -413,6 +420,7 @@ def discover_subagents(
                 description=af.description,
                 workflow_run_id=af.workflow_run_id,
                 source="orphan",
+                is_conversion_artifact=af.is_conversion_artifact,
             )
             _attach_transcript_file(info, af.path)
             orphans.append(info)
