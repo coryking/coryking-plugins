@@ -23,7 +23,7 @@ from .conversion import (
     delete_agent_conversion,
     existing_custom_titles,
     growth_exceeded,
-    is_conversion,
+    is_conversion_artifact,
 )
 from .formatting import matches_id
 from .models import parse_hide
@@ -1041,6 +1041,10 @@ def audit_session_tools(
     total_calls = 0
     total_errors = 0
     for sa in agents:
+        # Conversion artifacts are copies of real transcripts — skip them so
+        # their tool calls (which are the source's) are not counted twice.
+        if sa.is_conversion_artifact:
+            continue
         if not sa.agent_id or sa.agent_id not in entries_map:
             continue
 
@@ -1220,7 +1224,7 @@ def convert_session(
 
     direction='subagent_to_session': copy a subagent out to a top-level session a human can open — the response carries the exact `claude -r` command. Use when the user wants to read or continue an agent's run interactively.
 
-    The response includes what you need to compose the first message: suggested_handoff (a converted conversation has no way to know its interlocutor changed — message senders are not labeled on the wire), the original environment (cwd and whether it still exists, git branch, Claude Code version, age), model history, turn count, and tail state. Conversion artifacts carry lineage, are excluded from search by default, and are labeled in agent listings; remove them with delete_conversions."""
+    The response includes what you need to compose the first message: suggested_handoff (a converted conversation has no way to know its interlocutor changed — message senders are not labeled on the wire), the original environment (cwd and whether it still exists, git branch, Claude Code version, age), model history, turn count, and tail state. Conversion artifacts carry lineage, are excluded from search, and are labeled in agent listings; remove them with delete_conversions."""
     if direction == "session_to_subagent":
         src = _resolve_session_for_convert(src_id, src_project)
 
@@ -1240,7 +1244,11 @@ def convert_session(
 
         # Subagents the SOURCE session ran are NOT copied — their results already
         # appear inline. Report the count so the caller knows context was folded in.
-        nested = len(discover_subagents(src.path))
+        # Conversion artifacts are excluded — they are copies, not dispatched runs.
+        nested = sum(
+            1 for sa in discover_subagents(src.path)
+            if not sa.is_conversion_artifact
+        )
 
         result = convert_session_to_subagent(
             src_session_id=src.session_id.full,
@@ -1280,16 +1288,25 @@ def convert_session(
     # main transcript dir), so the new session is discoverable under that project.
     dest_proj_dir = holding.path.parent if not dest_project else _dest_project_dir(dest_proj_path)
 
+    # src_project_path is the HOLDING project (where the source subagent lives),
+    # not the destination. This is what gets stamped into provenance/from.project
+    # and _converted_from.project. The response.project continues to carry the
+    # destination project (set on ConversionResult.project via the caller below).
+    src_proj_path = holding.project_path or ""
+
     try:
         result = convert_subagent_to_session(
             src_agent_id=agent_full,
             src_path=af.path,
-            src_project_path=dest_proj_path,
+            src_project_path=src_proj_path,
             dest_project_dir=dest_proj_dir,
             dest_title=title,
         )
     except FileExistsError as e:
         raise ToolError(str(e))
+    # Override result.project to the destination (conversion.py sets it to
+    # src_project_path; callers expect response.project == destination project).
+    result.project = dest_proj_path
     return ConvertSessionResponse.from_result(result)
 
 
@@ -1355,10 +1372,14 @@ def delete_conversions(
             )
         try:
             holding = _resolve_session_for_convert(current, None)
-        except ToolError:
-            return DeleteConversionsResponse(deleted=[], refused=[])
+        except ToolError as e:
+            raise ToolError(
+                f"delete_conversions sweep failed: could not resolve the calling "
+                f"session ({current!r}): {e}. "
+                f"Pass explicit ids instead of relying on the sweep."
+            ) from e
         for af in collect_agent_files(resolve_subagents_dir(holding.path)):
-            if not af.is_conversion:
+            if not af.is_conversion_artifact:
                 continue
             if growth_exceeded(af.path):
                 refused.append(RefusedDeletion(id=af.agent_id, reason=_REFUSE_GROWTH))
@@ -1369,20 +1390,22 @@ def delete_conversions(
             )
         return DeleteConversionsResponse(deleted=deleted, refused=refused)
 
-    for raw_id in ids:
-        target = _locate_artifact(raw_id)
-        if target is None:
+    # Load corpus once for all ids.
+    all_sessions, _ = _load_all_sessions(None)
+    resolved = _resolve_artifacts_corpus(ids, all_sessions)
+
+    for raw_id, kind, full_id, path in resolved:
+        if not kind:
             refused.append(
                 RefusedDeletion(id=raw_id, reason="no session or subagent matches this id")
             )
             continue
-        kind, full_id, path = target
         if kind == "session":
             # Sessions are never deletable here — even tagged ones.
             refused.append(RefusedDeletion(id=raw_id, reason=_REFUSE_SESSION))
             continue
         # subagent
-        if not is_conversion(path):
+        if not is_conversion_artifact(path):
             refused.append(RefusedDeletion(id=raw_id, reason=_REFUSE_NOT_CONVERSION))
             continue
         if growth_exceeded(path):
@@ -1394,22 +1417,66 @@ def delete_conversions(
     return DeleteConversionsResponse(deleted=deleted, refused=refused)
 
 
-def _locate_artifact(raw_id: str):
-    """Find a session or subagent by id/prefix across all projects.
+_MIN_ID_LEN = 6  # IDs shorter than this are refused to avoid accidental prefix sweeps.
 
-    Returns (kind, full_id, path) where kind is 'session' or 'subagent', or None
-    when nothing matches. Sessions are checked first (an id is a session id or an
-    agent id, never both). The path is the transcript file to act on.
+
+def _resolve_artifacts_corpus(
+    raw_ids: list[str],
+    sessions: list,
+) -> list[tuple[str, str, str, Path]]:
+    """Resolve a list of ids to (raw_id, kind, full_id, path) tuples, raising on any problem.
+
+    Loads the corpus ONCE (caller passes `sessions`). For each id:
+      - Rejects ids shorter than _MIN_ID_LEN with a clear error.
+      - Finds ALL matching sessions and agent files for the id.
+      - Raises ToolError on ambiguity (listing candidates + their projects).
+      - Returns a 4-tuple on unique match, or None-placeholder for no match.
+
+    Returns list of resolved tuples; no-match entries are represented as
+    (raw_id, "", "", None) so the caller can format its own refused reason.
     """
-    sessions, _ = _load_all_sessions(None)
-    for s in sessions:
-        if PrefixId(s.session_id) == raw_id:
-            return ("session", s.session_id.full, s.path)
+    # Build agent index once: (agent_id, session_path, project_path, af_path)
+    agent_index: list[tuple[str, str, Path]] = []
     for s in sessions:
         for af in collect_agent_files(resolve_subagents_dir(s.path)):
-            if af.agent_id and PrefixId(af.agent_id) == raw_id:
-                return ("subagent", af.agent_id, af.path)
-    return None
+            if af.agent_id:
+                agent_index.append((af.agent_id, s.project_path or "?", af.path))
+
+    resolved: list[tuple[str, str, str, Path | None]] = []
+    for raw_id in raw_ids:
+        if len(raw_id) < _MIN_ID_LEN:
+            raise ToolError(
+                f"Id {raw_id!r} is too short ({len(raw_id)} chars) — pass at least "
+                f"{_MIN_ID_LEN} chars to avoid accidental prefix matches. "
+                f"Use list_project_sessions or list_session_agents to find full ids."
+            )
+        # Session matches
+        session_matches = [s for s in sessions if PrefixId(s.session_id) == raw_id]
+        distinct_sess = {s.session_id.full for s in session_matches}
+        # Agent matches
+        agent_matches = [(fid, proj, p) for fid, proj, p in agent_index if PrefixId(fid) == raw_id]
+        distinct_agents = {fid for fid, _, _ in agent_matches}
+
+        total_kinds = len(distinct_sess) + len(distinct_agents)
+        if total_kinds > 1:
+            candidates: list[str] = []
+            for s in session_matches:
+                candidates.append(f"session {s.session_id.full[:12]} in {s.project_path or '?'}")
+            for fid, proj, _ in agent_matches:
+                candidates.append(f"agent {fid[:12]} in {proj}")
+            raise ToolError(
+                f"Id prefix {raw_id!r} is ambiguous — it matches {total_kinds} distinct "
+                f"artifacts: {'; '.join(candidates)}. Pass a longer id to disambiguate."
+            )
+        if len(distinct_sess) == 1:
+            s = session_matches[0]
+            resolved.append((raw_id, "session", s.session_id.full, s.path))
+        elif len(distinct_agents) == 1:
+            fid, _, p = agent_matches[0]
+            resolved.append((raw_id, "subagent", fid, p))
+        else:
+            resolved.append((raw_id, "", "", None))
+    return resolved
 
 
 def main():

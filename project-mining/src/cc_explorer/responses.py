@@ -67,6 +67,10 @@ class SessionSummary(SparseModel):
         default=None,
         description="True for the calling conversation itself — the session you are reading this from. Absent for every other session. Use it to skip yourself.",
     )
+    is_conversion_artifact: bool | None = Field(
+        default=None,
+        description="True when this session is a conversion artifact — copied here via convert_session, not an original conversation. Its content duplicates the source transcript. Remove with delete_conversions (converted sessions are managed manually). Absent for normal sessions.",
+    )
 
     @classmethod
     def from_session_info(cls, s: SessionInfo, is_current: bool = False) -> SessionSummary:
@@ -86,6 +90,7 @@ class SessionSummary(SparseModel):
             output_tokens=s.stats.output_tokens,
             tools=s.stats.tool_use_count,
             is_current=is_current or None,
+            is_conversion_artifact=s.is_conversion_artifact or None,
         )
 
 
@@ -537,9 +542,9 @@ class AgentSummary(SparseModel):
         default=None,
         description="The workflow run this agent belongs to; null if it wasn't spawned by a workflow. Agents sharing a value ran in the same workflow.",
     )
-    is_conversion: bool | None = Field(
+    is_conversion_artifact: bool | None = Field(
         default=None,
-        description="True when this agent is a CONVERSION ARTIFACT — a session or subagent copied here via convert_session, not a real dispatched run. Its transcript duplicates a real one and is excluded from search by default. Remove it with delete_conversions. Absent for normal agents.",
+        description="True when this agent is a CONVERSION ARTIFACT — a session or subagent copied here via convert_session, not a real dispatched run. Its transcript duplicates a real one and is excluded from search. Remove it with delete_conversions. Absent for normal agents.",
     )
     date: datetime | None = Field(default=None, description="Timestamp when agent was spawned.")
     type: str = Field(description="Subagent type (e.g. 'general-purpose', 'Explore').")
@@ -557,7 +562,7 @@ class AgentSummary(SparseModel):
             tool_use_id=sa.tool_use_id,
             source=sa.source,
             workflow_run_id=sa.workflow_run_id,
-            is_conversion=sa.is_conversion or None,
+            is_conversion_artifact=sa.is_conversion_artifact or None,
             date=sa.timestamp,
             type=sa.subagent_type or "",
             status=sa.status,
@@ -970,6 +975,10 @@ class ConvertSessionResponse(SparseModel):
     project: str | None = Field(default=None, description="subagent_to_session: the project the new session was written to.")
     turns: int = Field(description="Conversation turns copied (user+assistant), after trailing trim.")
     trimmed_trailing: int = Field(description="Trailing noise turns dropped (empty/interrupt/command scaffolding).")
+    dropped_branches: int | None = Field(
+        default=None,
+        description="Lines dropped because they were on abandoned edit-branches or embedded sidechain turns not on the active thread. 0 when nothing was dropped; absent when no walk was possible (fallback to file order).",
+    )
     tail_state: str = Field(description="'clean' (ends on an assistant turn) or 'pending_user_input' (ends on a real user turn awaiting a reply).")
     nested_agents: int | None = Field(
         default=None,
@@ -1004,6 +1013,7 @@ class ConvertSessionResponse(SparseModel):
             project=r.project,
             turns=r.turns,
             trimmed_trailing=r.trimmed_trailing,
+            dropped_branches=r.dropped_branches if r.dropped_branches is not None else None,
             tail_state=r.tail_state,
             nested_agents=(r.nested_agents or None) if r.direction == "session_to_subagent" else None,
             models=ConversionModels(**r.models),

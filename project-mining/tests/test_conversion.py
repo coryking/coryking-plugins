@@ -266,6 +266,9 @@ def test_session_to_subagent_source_untouched(fake_claude):
 
 def test_session_to_subagent_relinearizes_tree(fake_claude):
     # A TREE: two assistant siblings off the same user turn (a message edit).
+    # EDIT-ONE is an abandoned branch; EDIT-TWO is the active branch (the last
+    # user and assistant turns continue from it). The active-thread extraction
+    # walks parentUuid backward from the tip, so EDIT-ONE is DROPPED.
     lines = [
         _user("u0000000-0000-0000-0000-000000000001", "ROOT"),
         _assistant("a0000000-0000-0000-0000-0000000000a1", "EDIT-ONE", parent="u0000000-0000-0000-0000-000000000001"),
@@ -289,8 +292,11 @@ def test_session_to_subagent_relinearizes_tree(fake_claude):
     assert out[0]["parentUuid"] is None
     for prev, cur in zip(out, out[1:]):
         assert cur["parentUuid"] == prev["uuid"]
-    # All five turns preserved in file order (siblings linearized, not dropped).
-    assert len(out) == 5
+    # Active thread: ROOT → EDIT-TWO → NEXT → LAST (4 turns).
+    # EDIT-ONE is the abandoned sibling branch and is DROPPED.
+    assert len(out) == 4
+    assert _convo_texts(out) == ["ROOT", "EDIT-TWO", "NEXT", "LAST"]
+    assert resp.dropped_branches == 1
 
 
 def test_session_to_subagent_trims_trailing_noise(fake_claude):
@@ -373,13 +379,13 @@ def _lay_down_subagent(
     fake_claude,
     agent_id: str,
     *,
-    is_conversion=False,
+    is_conversion_artifact=False,
     lines=None,
     extra_lines=0,
 ) -> Path:
     """Write a subagent transcript (+meta) under SID_PARENT's subagents dir.
 
-    When `is_conversion` is True the file is stamped with a real x-converter-
+    When `is_conversion_artifact` is True the file is stamped with a real x-converter-
     provenance line at the top (the only trust surface) — its lines_at_creation
     matches the file as written so the growth guard sees no growth. Pass
     `extra_lines` to append N junk lines AFTER recording lines_at_creation,
@@ -393,7 +399,7 @@ def _lay_down_subagent(
     ]
 
     out_lines: list[dict]
-    if is_conversion:
+    if is_conversion_artifact:
         # lines_at_creation = provenance line + body (what we write now).
         created = 1 + len(body)
         prov = _fake_provenance_line(agent_id, lines_at_creation=created)
@@ -618,7 +624,7 @@ def test_cross_project_src_resolution(fake_claude):
 def test_delete_conversions_removes_tagged_subagent(fake_claude):
     fake_claude.write_session(SID_PARENT, _simple_session_lines())
     conv_agent = "a" + "2" * 16
-    path = _lay_down_subagent(fake_claude, conv_agent, is_conversion=True)
+    path = _lay_down_subagent(fake_claude, conv_agent, is_conversion_artifact=True)
     assert path.exists()
 
     resp = srv.delete_conversions(ids=[conv_agent])
@@ -633,7 +639,7 @@ def test_delete_conversions_refuses_subagent_without_provenance_line(fake_claude
     """No provenance line (meta is no longer a signal) → refused as non-conversion."""
     fake_claude.write_session(SID_PARENT, _simple_session_lines())
     real_agent = "a" + "3" * 16
-    path = _lay_down_subagent(fake_claude, real_agent, is_conversion=False)
+    path = _lay_down_subagent(fake_claude, real_agent, is_conversion_artifact=False)
 
     resp = srv.delete_conversions(ids=[real_agent])
     assert not resp.deleted
@@ -656,12 +662,12 @@ def test_delete_conversions_refuses_real_session(fake_claude):
 def test_delete_conversions_refuses_converted_session_even_when_tagged(fake_claude):
     """Sessions are NEVER deleted by this tool — even a genuine, provenance-tagged one."""
     fake_claude.write_session(SID_PARENT, _simple_session_lines())
-    _lay_down_subagent(fake_claude, AGENT_ID, is_conversion=True)
+    _lay_down_subagent(fake_claude, AGENT_ID, is_conversion_artifact=True)
     r = srv.convert_session(direction="subagent_to_session", src_id=AGENT_ID, src_project=PROJECT)
     out_path = fake_claude.project_dir(PROJECT) / f"{r.created_id}.jsonl"
     assert out_path.exists()
     # Sanity: it really IS a tagged conversion (the file carries a provenance line).
-    from cc_explorer.conversion import is_conversion as _is_conv
+    from cc_explorer.conversion import is_conversion_artifact as _is_conv
     assert _is_conv(out_path)
 
     resp = srv.delete_conversions(ids=[r.created_id])
@@ -675,7 +681,7 @@ def test_delete_conversions_refuses_grown_subagent(fake_claude):
     """Growth guard: a tagged subagent that grew past lines_at_creation is refused."""
     fake_claude.write_session(SID_PARENT, _simple_session_lines())
     grown = "a" + "9" * 16
-    path = _lay_down_subagent(fake_claude, grown, is_conversion=True, extra_lines=3)
+    path = _lay_down_subagent(fake_claude, grown, is_conversion_artifact=True, extra_lines=3)
 
     resp = srv.delete_conversions(ids=[grown])
     assert not resp.deleted
@@ -688,7 +694,7 @@ def test_delete_conversions_deletes_subagent_when_growth_guard_passes(fake_claud
     """Provenance line present AND no growth → deleted."""
     fake_claude.write_session(SID_PARENT, _simple_session_lines())
     conv_agent = "a" + "2" * 16
-    path = _lay_down_subagent(fake_claude, conv_agent, is_conversion=True, extra_lines=0)
+    path = _lay_down_subagent(fake_claude, conv_agent, is_conversion_artifact=True, extra_lines=0)
     assert path.exists()
 
     resp = srv.delete_conversions(ids=[conv_agent])
@@ -712,9 +718,9 @@ def test_delete_conversions_sweep_calling_session(fake_claude, monkeypatch):
     conv_a = "a" + "4" * 16
     real_a = "a" + "5" * 16
     grown_a = "a" + "6" * 16
-    conv_path = _lay_down_subagent(fake_claude, conv_a, is_conversion=True)
-    real_path = _lay_down_subagent(fake_claude, real_a, is_conversion=False)
-    grown_path = _lay_down_subagent(fake_claude, grown_a, is_conversion=True, extra_lines=2)
+    conv_path = _lay_down_subagent(fake_claude, conv_a, is_conversion_artifact=True)
+    real_path = _lay_down_subagent(fake_claude, real_a, is_conversion_artifact=False)
+    grown_path = _lay_down_subagent(fake_claude, grown_a, is_conversion_artifact=True, extra_lines=2)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID_PARENT)
 
     resp = srv.delete_conversions()  # ids omitted → sweep
@@ -741,13 +747,13 @@ def test_conversion_agent_excluded_from_search_corpus(fake_claude):
     # A conversion subagent containing a unique token.
     conv_agent = "a" + "6" * 16
     _lay_down_subagent(
-        fake_claude, conv_agent, is_conversion=True,
+        fake_claude, conv_agent, is_conversion_artifact=True,
         lines=[_user("u-conv-0000-0000-0000-00000000c001", "SECRETTOKEN", agentId=conv_agent, isSidechain=True)],
     )
     # A normal subagent containing a different unique token.
     real_agent = "a" + "7" * 16
     _lay_down_subagent(
-        fake_claude, real_agent, is_conversion=False,
+        fake_claude, real_agent, is_conversion_artifact=False,
         lines=[_user("u-real-0000-0000-0000-00000000r001", "VISIBLETOKEN", agentId=real_agent, isSidechain=True)],
     )
 
@@ -772,9 +778,376 @@ def test_conversion_agent_excluded_from_search_corpus(fake_claude):
 def test_list_session_agents_shows_conversion_labeled(fake_claude):
     fake_claude.write_session(SID_PARENT, _simple_session_lines())
     conv_agent = "a" + "8" * 16
-    _lay_down_subagent(fake_claude, conv_agent, is_conversion=True)
+    _lay_down_subagent(fake_claude, conv_agent, is_conversion_artifact=True)
 
     resp = srv.list_session_agents(session=SID_PARENT, projects=[PROJECT])
     ids = {a.agent_id.full: a for a in resp.agents}
     assert conv_agent in ids
-    assert ids[conv_agent].is_conversion is True
+    assert ids[conv_agent].is_conversion_artifact is True
+
+
+# =============================================================================
+# Fix 1: Trim safety — tool_result user turn never trimmed as noise
+# =============================================================================
+
+
+def _tool_use_assistant(uuid: str, tool_use_id: str, *, parent: str | None = None) -> dict:
+    """An assistant turn ending with a tool_use block (e.g. a pending Bash call)."""
+    line = {
+        "type": "assistant",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "timestamp": TS,
+        "sessionId": "SID",
+        "version": "2.1.175",
+        "gitBranch": "main",
+        "message": {
+            "id": "msg_" + uuid,
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-opus-4-8",
+            "content": [
+                {"type": "text", "text": "running tool"},
+                {"type": "tool_use", "id": tool_use_id, "name": "Bash", "input": {"command": "ls"}},
+            ],
+        },
+    }
+    return line
+
+
+def _tool_result_user(uuid: str, tool_use_id: str, *, parent: str | None = None) -> dict:
+    """A user turn carrying ONLY a tool_result block (no text blocks)."""
+    return {
+        "type": "user",
+        "uuid": uuid,
+        "parentUuid": parent,
+        "timestamp": TS,
+        "sessionId": "SID",
+        "version": "2.1.175",
+        "gitBranch": "main",
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": [{"type": "text", "text": "file.txt"}],
+                }
+            ],
+        },
+    }
+
+
+def test_trim_safety_tool_result_user_not_trimmed(fake_claude):
+    """A session ending assistant(tool_use)+user(tool_result) must keep BOTH lines.
+
+    Fix 1: a user turn whose content list contains a tool_result block must never
+    be treated as trailing noise, even though its text content is empty. Trimming
+    it would leave a dangling assistant tool_use that the API rejects on resume.
+    """
+    tool_id = "toolu_test0000000000000000"
+    lines = _simple_session_lines() + [
+        _tool_use_assistant(
+            "a-tool-0000-0000-0000-000000000aa1",
+            tool_id,
+            parent="u1111111-0000-0000-0000-000000000003",
+        ),
+        _tool_result_user(
+            "u-tool-0000-0000-0000-000000000ur1",
+            tool_id,
+            parent="a-tool-0000-0000-0000-000000000aa1",
+        ),
+    ]
+    fake_claude.write_session(SID_A, lines)
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+
+    resp = srv.convert_session(
+        direction="session_to_subagent",
+        src_id=SID_A, src_project=PROJECT, dest_parent_session=SID_PARENT,
+    )
+    # Neither the tool_use assistant turn nor the tool_result user turn should be trimmed.
+    assert resp.trimmed_trailing == 0
+    # The copied transcript includes the tool_use and tool_result turns.
+    agent_file = (
+        fake_claude.project_dir(PROJECT) / SID_PARENT / "subagents" / f"agent-{resp.created_id}.jsonl"
+    )
+    body = _convo_only(_read_jsonl(agent_file))
+    types = [l["type"] for l in body]
+    # Ends with user (tool_result turn) — not trimmed.
+    assert types[-1] == "user"
+    # That user turn's content has a tool_result block.
+    last_content = body[-1]["message"]["content"]
+    assert any(b.get("type") == "tool_result" for b in last_content)
+
+
+# =============================================================================
+# Fix 2: Broken-links fallback (parentUuid walk can't complete)
+# =============================================================================
+
+
+def test_active_thread_broken_links_fallback(fake_claude):
+    """When parentUuid links are broken (missing parent), fall back to file order.
+
+    A session where the last line's parent uuid doesn't exist in the corpus
+    causes the walk to fail and fall back to including all lines (file order).
+    """
+    # Build lines where the last line's parentUuid points to a non-existent uuid.
+    lines = [
+        _user("u0000000-1111-0000-0000-000000000001", "FIRST"),
+        _assistant("a0000000-1111-0000-0000-000000000002", "SECOND", parent="u0000000-1111-0000-0000-000000000001"),
+        _user("u0000000-1111-0000-0000-000000000003", "THIRD", parent="a0000000-1111-0000-0000-000000000002"),
+        # This assistant points to a parent that doesn't exist → broken link.
+        _assistant("a0000000-1111-0000-0000-000000000004", "FOURTH",
+                   parent="nonexistent-0000-0000-0000-000000000000"),
+    ]
+    fake_claude.write_session(SID_A, lines)
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+
+    resp = srv.convert_session(
+        direction="session_to_subagent",
+        src_id=SID_A, src_project=PROJECT, dest_parent_session=SID_PARENT,
+    )
+    # Fallback: all 4 lines kept (file order), none dropped.
+    assert resp.turns == 4
+    assert resp.dropped_branches == 0
+
+
+# =============================================================================
+# Fix 3: Source-project provenance stamped correctly for subagent_to_session
+# =============================================================================
+
+
+def test_subagent_to_session_provenance_from_project_is_holding_project(fake_claude):
+    """Provenance from.project == holding project; response.project == dest project.
+
+    Fix 3: before this fix, src_project_path was incorrectly set to dest_proj_path,
+    so provenance/from.project pointed at the destination instead of the source.
+    """
+    dest = "/Users/test/projects/dest"
+    # Seed the dest project so it has a dir to write into.
+    fake_claude.write_session("eeeeeeee-1111-2222-3333-444444444444", _simple_session_lines(), project_path=dest)
+    fake_claude.write_session(SID_PARENT, _simple_session_lines(), project_path=PROJECT)
+    _lay_down_subagent(fake_claude, AGENT_ID)
+
+    resp = srv.convert_session(
+        direction="subagent_to_session",
+        src_id=AGENT_ID,
+        src_project=PROJECT,
+        dest_project=dest,
+    )
+    # response.project is the DESTINATION.
+    assert resp.project == dest
+
+    # The written file's provenance/from.project is the HOLDING (source) project.
+    out_path = fake_claude.project_dir(dest) / f"{resp.created_id}.jsonl"
+    assert out_path.exists()
+    lines = _read_jsonl(out_path)
+    prov_lines = _provenance_lines(lines)
+    assert len(prov_lines) == 1
+    from_project = prov_lines[0]["x_converter"]["from"]["project"]
+    assert from_project == PROJECT  # holding project, not dest
+    assert from_project != dest
+
+
+# =============================================================================
+# Fix 4: Session conversion artifacts excluded from search but visible in listing
+# =============================================================================
+
+
+def test_session_conversion_artifact_excluded_from_search(fake_claude):
+    """A subagent_to_session artifact is excluded from triage/search results.
+
+    Fix 4: session conversion artifacts (session files carrying x-converter-provenance)
+    should be skipped in search/triage, just like agent-shaped conversion artifacts.
+    """
+    # A normal session with a unique token.
+    normal_sid = "cccccccc-aaaa-0000-0000-000000000001"
+    fake_claude.write_session(
+        normal_sid,
+        [_user("u-norm-0000-0000-0000-0000000n0001", "NORMALTOKEN")],
+    )
+    # A subagent_to_session conversion artifact: has x-converter-provenance header.
+    conv_sid = "cccccccc-bbbb-0000-0000-000000000002"
+    conv_lines = [
+        {"type": "mode", "mode": "normal", "sessionId": conv_sid},
+        {"type": "permission-mode", "permissionMode": "default", "sessionId": conv_sid},
+        {"type": "custom-title", "customTitle": "conv-session", "sessionId": conv_sid},
+        {
+            "type": "x-converter-provenance",
+            "x_converter": {
+                "tool": "convert_session",
+                "v": 1,
+                "from": {"kind": "subagent", "id": "x", "project": PROJECT},
+                "converted_at": TS,
+                "lines_at_creation": 6,
+            },
+            "sessionId": conv_sid,
+            "agentId": None,
+        },
+        _user("u-conv-0000-0000-0000-0000000c0001", "SECRETTOKEN"),
+        _assistant("a-conv-0000-0000-0000-0000000c0002", "reply"),
+    ]
+    for l in conv_lines:
+        l.setdefault("cwd", PROJECT)
+    d = fake_claude.project_dir(PROJECT)
+    d.mkdir(parents=True, exist_ok=True)
+    _write_jsonl(d / f"{conv_sid}.jsonl", conv_lines)
+
+    sessions, _ = srv._load_all_sessions([PROJECT])
+
+    # Triage: conversion artifact session not in search results.
+    from cc_explorer.search import triage_multi
+    secret = triage_multi(sessions, ["SECRETTOKEN"])
+    assert secret[0][1] == []  # no hits from conversion artifact session
+    normal = triage_multi(sessions, ["NORMALTOKEN"])
+    assert len(normal[0][1]) == 1  # normal session found
+
+
+def test_session_conversion_artifact_labeled_in_listing(fake_claude):
+    """A subagent_to_session artifact appears in list_project_sessions with is_conversion_artifact=true."""
+    # Normal session (different prefix from conversion session).
+    normal_sid = "11111111-aaaa-0000-0000-000000000001"
+    fake_claude.write_session(normal_sid, _simple_session_lines())
+
+    # A subagent_to_session conversion artifact.
+    conv_sid = "22222222-bbbb-0000-0000-000000000002"
+    conv_lines = [
+        {"type": "mode", "mode": "normal", "sessionId": conv_sid},
+        {"type": "permission-mode", "permissionMode": "default", "sessionId": conv_sid},
+        {"type": "custom-title", "customTitle": "labeled-conv", "sessionId": conv_sid},
+        {
+            "type": "x-converter-provenance",
+            "x_converter": {
+                "tool": "convert_session",
+                "v": 1,
+                "from": {"kind": "subagent", "id": "x", "project": PROJECT},
+                "converted_at": TS,
+                "lines_at_creation": 6,
+            },
+            "sessionId": conv_sid,
+            "agentId": None,
+        },
+        _user("u-lbl-0000-0000-0000-0000000l0001", "hello"),
+        _assistant("a-lbl-0000-0000-0000-0000000l0002", "world"),
+    ]
+    for l in conv_lines:
+        l.setdefault("cwd", PROJECT)
+    d = fake_claude.project_dir(PROJECT)
+    d.mkdir(parents=True, exist_ok=True)
+    _write_jsonl(d / f"{conv_sid}.jsonl", conv_lines)
+
+    resp = srv.list_project_sessions(projects=[PROJECT], min_messages=1)
+    by_id = {str(s.session)[:8]: s for s in resp.sessions}
+    # Both sessions are listed.
+    assert conv_sid[:8] in by_id
+    assert normal_sid[:8] in by_id
+    # The artifact is labeled.
+    assert by_id[conv_sid[:8]].is_conversion_artifact is True
+    assert by_id[normal_sid[:8]].is_conversion_artifact is None
+
+
+# =============================================================================
+# Fix 5: Delete resolution hardening
+# =============================================================================
+
+
+def test_delete_conversions_short_id_rejected(fake_claude):
+    """An id shorter than 6 chars is rejected with a clear error before any lookup."""
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    with pytest.raises(ToolError) as exc:
+        srv.delete_conversions(ids=["ab"])
+    assert "too short" in str(exc.value).lower()
+
+
+def test_delete_conversions_ambiguous_prefix_raises(fake_claude):
+    """An ambiguous prefix (matches multiple distinct artifacts) raises ToolError naming candidates."""
+    # Two sessions whose ids share a prefix.
+    s1 = "eeeeeeee-1111-2222-3333-444444444441"
+    s2 = "eeeeeeee-1111-2222-3333-444444444442"
+    fake_claude.write_session(s1, _simple_session_lines())
+    fake_claude.write_session(s2, _simple_session_lines())
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+
+    with pytest.raises(ToolError) as exc:
+        srv.delete_conversions(ids=["eeeeeeee"])
+    assert "ambiguous" in str(exc.value).lower()
+
+
+# =============================================================================
+# Fix 6: Sweep error swallow
+# =============================================================================
+
+
+def test_delete_conversions_sweep_raises_on_unresolvable_session(fake_claude, monkeypatch):
+    """Sweep with an unresolvable calling session raises ToolError (not empty success).
+
+    Fix 6: the old behavior silently returned empty deleted/refused on resolution
+    failure, making it indistinguishable from 'nothing to clean'.
+    """
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    # Point the calling session to something that doesn't exist.
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "nonexistent-0000-0000-0000-000000000000")
+    with pytest.raises(ToolError) as exc:
+        srv.delete_conversions()
+    assert "sweep failed" in str(exc.value).lower() or "could not resolve" in str(exc.value).lower()
+
+
+# =============================================================================
+# Fix 8: Population semantics — conversion artifacts not counted as dispatched runs
+# =============================================================================
+
+
+def test_agents_present_excludes_conversion_artifacts(fake_claude):
+    """A session whose ONLY agent file is a conversion artifact has agents_present==0."""
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    conv_agent = "a" + "c" * 16
+    _lay_down_subagent(fake_claude, conv_agent, is_conversion_artifact=True)
+
+    sessions, _ = srv._load_all_sessions([PROJECT], with_agents_present=True)
+    parent_session = next(s for s in sessions if str(s.session_id) == SID_PARENT[:8] or s.session_id.full == SID_PARENT)
+    assert parent_session.agents_present == 0
+
+
+def test_min_agents_filter_excludes_conversion_only_sessions(fake_claude):
+    """A session with only a conversion artifact is absent from min_agents=1 listings.
+
+    Since agents_present==0 for that session, min_agents=1 filters it out.
+    With no other sessions matching, list_project_sessions raises (nothing to return).
+    """
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    conv_agent = "a" + "d" * 16
+    _lay_down_subagent(fake_claude, conv_agent, is_conversion_artifact=True)
+
+    # With min_agents=1, the session (agents_present==0) doesn't match — nothing returned.
+    with pytest.raises(ToolError):
+        srv.list_project_sessions(projects=[PROJECT], min_agents=1, min_messages=1)
+
+    # With min_agents=0, the session is present (no filtering on agents).
+    resp = srv.list_project_sessions(projects=[PROJECT], min_agents=0, min_messages=1)
+    session_ids = {s.session.full for s in resp.sessions}
+    assert SID_PARENT in session_ids
+
+
+def test_nested_agents_excludes_conversion_artifacts(fake_claude):
+    """convert_session's nested_agents count excludes conversion artifacts on the source."""
+    fake_claude.write_session(SID_A, _simple_session_lines())
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+
+    # Put a conversion artifact under SID_A (not a real dispatched run).
+    conv_nested = "a" + "e" * 16
+    sub_dir = fake_claude.project_dir(PROJECT) / SID_A / "subagents"
+    body = [
+        _user("u-n-0000-0000-0000-0000000n0001", "n", agentId=conv_nested, isSidechain=True),
+    ]
+    prov = _fake_provenance_line(conv_nested, lines_at_creation=2, kind="session")
+    _write_jsonl(sub_dir / f"agent-{conv_nested}.jsonl", [prov] + body)
+    (sub_dir / f"agent-{conv_nested}.meta.json").write_text(
+        json.dumps({"agentType": "general-purpose", "description": "d", "toolUseId": "toolu_n"})
+    )
+
+    resp = srv.convert_session(
+        direction="session_to_subagent",
+        src_id=SID_A, src_project=PROJECT, dest_parent_session=SID_PARENT,
+    )
+    # Conversion artifact is not counted as a nested agent.
+    assert resp.nested_agents is None or resp.nested_agents == 0

@@ -288,8 +288,12 @@ def build_activity_timeline(
 
             # Fold subagents: their agent activity unions into the parent, their
             # internal human turns become parent agent work, their turn_min adds.
+            # Conversion artifacts are skipped — they preserve original timestamps
+            # and would double-count the source's history as the parent's agent activity.
             n_sub = 0
             for af in collect_agent_files(resolve_subagents_dir(ref.path)):
+                if af.is_conversion_artifact:
+                    continue
                 cs = _scan(af.path, lo, hi, bucket_s)
                 if cs is None or not _has_activity(cs):
                     continue

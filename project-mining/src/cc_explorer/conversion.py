@@ -202,9 +202,38 @@ def _line_text(line: dict[str, Any]) -> str:
     return ""
 
 
+def _content_has_non_text_block(line: dict[str, Any]) -> bool:
+    """True when message.content is a list containing ANY non-text block.
+
+    A user turn whose content includes tool_result, image, or other non-text
+    blocks carries semantic meaning even if the text blocks are empty — it must
+    never be trimmed as trailing noise.
+    """
+    msg = line.get("message")
+    if not isinstance(msg, dict):
+        return False
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(b, dict) and b.get("type") != "text"
+        for b in content
+    )
+
+
 def _is_trailing_noise(line: dict[str, Any]) -> bool:
-    """True when a trailing user line is empty / interrupt / command scaffolding."""
+    """True when a trailing user line is empty / interrupt / command scaffolding.
+
+    A user line whose content list contains ANY non-text block (tool_result,
+    image, etc.) is NEVER trailing noise — only lines whose content is entirely
+    text (or an empty string) qualify. Without this guard a tool_result-only
+    user turn reads as empty text and gets trimmed, leaving a dangling assistant
+    tool_use that the API rejects on resume.
+    """
     if line.get("type") != "user":
+        return False
+    # If the content has any non-text blocks, preserve the line unconditionally.
+    if _content_has_non_text_block(line):
         return False
     text = _line_text(line).strip()
     if not text:
@@ -259,6 +288,87 @@ def _prior_converted_from(raw: list[dict[str, Any]]) -> Optional[dict[str, Any]]
         if isinstance(cf, dict):
             return cf
     return None
+
+
+def _extract_active_thread(
+    lines: list[dict[str, Any]],
+    *,
+    drop_sidechain: bool = False,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return (active_chain, dropped_count) for the active conversation thread.
+
+    Algorithm: take the LAST user/assistant line in file order as the tip (after
+    optionally dropping isSidechain lines for session_to_subagent), walk
+    parentUuid links backward to the root, keep exactly that chain in
+    root→tip order. Lines not on the chain (abandoned edit-branches, embedded
+    sidechain turns) are dropped.
+
+    `drop_sidechain=True` (session_to_subagent only): drop lines with truthy
+    `isSidechain` BEFORE picking the tip — they are embedded subagent turns from
+    the old format, not main-thread lines. Do NOT set this for subagent sources
+    where every line is isSidechain=True.
+
+    Fallback: if the parentUuid walk breaks (missing parent, cycle, or all lines
+    lack parentUuid — e.g. synthetic transcripts), return lines as-is with 0
+    dropped so file-order behavior is preserved.
+    """
+    candidates = list(lines)
+    if drop_sidechain:
+        candidates = [d for d in candidates if not d.get("isSidechain")]
+
+    if not candidates:
+        return lines, 0
+
+    # Index by uuid for O(1) parent lookup.
+    by_uuid: dict[str, dict[str, Any]] = {}
+    for d in candidates:
+        u = d.get("uuid")
+        if u:
+            by_uuid[u] = d
+
+    # If no line has a uuid at all → synthetic transcript; fall back.
+    if not by_uuid:
+        return lines, 0
+
+    # The canonical root is the FIRST candidate in file order; only parentUuid=null
+    # on that node is a real root — null on any later node means the link is absent
+    # (e.g. synthetic test fixtures that didn't wire parentUuid forward), which is
+    # the "missing parent link" fallback case.
+    first_uuid = candidates[0].get("uuid") if candidates else None
+
+    # Tip: last candidate in file order.
+    tip = candidates[-1]
+
+    # Walk parentUuid links to build the chain.
+    chain: list[dict[str, Any]] = []
+    visited: set[str] = set()
+    current: Optional[dict[str, Any]] = tip
+    while current is not None:
+        uid = current.get("uuid")
+        if uid:
+            if uid in visited:
+                # Cycle — fall back to file order.
+                return lines, 0
+            visited.add(uid)
+        chain.append(current)
+        parent_uuid = current.get("parentUuid")
+        if not parent_uuid:
+            # Null parentUuid: real root only if this is the first file-order node.
+            if uid and uid != first_uuid:
+                # Non-first node with null parent → missing link; fall back.
+                return lines, 0
+            break  # genuine root
+        parent = by_uuid.get(parent_uuid)
+        if parent is None:
+            # Missing parent link — fall back.
+            return lines, 0
+        current = parent
+
+    chain.reverse()  # root → tip order
+
+    kept_set = {id(d) for d in chain}
+    dropped = sum(1 for d in lines if id(d) not in kept_set)
+    return chain, dropped
 
 
 def _relinearize(lines: list[dict[str, Any]]) -> None:
@@ -412,6 +522,7 @@ class ConversionResult:
     environment: dict[str, Any]
     lineage: list[dict[str, str]]
     nested_agents: int = 0
+    dropped_branches: int = 0
     # session_to_subagent
     parent_session: Optional[str] = None
     suggested_handoff: Optional[str] = None
@@ -446,9 +557,13 @@ def convert_session_to_subagent(
     reported so the caller knows context was folded in.
     """
     raw = _read_raw_lines(src_path)
-    lines = _keep_convo_lines(raw)
+    all_lines = _keep_convo_lines(raw)
     prior = _prior_lineage(raw)
     src_converted_from = _prior_converted_from(raw)
+
+    # For session_to_subagent: drop isSidechain lines (embedded subagent turns
+    # from the old format) before picking the active thread tip.
+    lines, dropped_branches = _extract_active_thread(all_lines, drop_sidechain=True)
 
     new_agent = _new_agent_id()
 
@@ -476,6 +591,7 @@ def convert_session_to_subagent(
         "id": src_session_id,
         "project": src_project_path,
     }
+    # Stamp provenance keys in the existing mutation loop (no second pass).
     for d in lines:
         d["_converted_from"] = converted_from
         d["_lineage"] = lineage
@@ -495,8 +611,10 @@ def convert_session_to_subagent(
         agent_id=new_agent,
         lines_at_creation=len(lines) + 1,
     )
+    # Write provenance line then body sequentially (no list concat).
     with open(out_path, "w", encoding="utf-8") as f:
-        for d in [provenance_line] + lines:
+        f.write(json.dumps(provenance_line) + "\n")
+        for d in lines:
             f.write(json.dumps(d) + "\n")
 
     src8 = src_session_id[:8]
@@ -518,6 +636,7 @@ def convert_session_to_subagent(
         created_id=new_agent,
         turns=len(lines),
         trimmed_trailing=trimmed,
+        dropped_branches=dropped_branches,
         tail_state=_tail_state(lines),
         models=_model_stats(lines),
         environment=_environment(lines),
@@ -591,19 +710,14 @@ def convert_subagent_to_session(
     sessionId. Refuses to overwrite an existing session file.
     """
     raw = _read_raw_lines(src_path)
-    lines = _keep_convo_lines(raw)
+    all_lines = _keep_convo_lines(raw)
     prior = _prior_lineage(raw)
 
+    # For subagent_to_session: do NOT drop sidechain lines — every line in a
+    # subagent transcript is isSidechain=True; dropping them would empty the body.
+    lines, dropped_branches = _extract_active_thread(all_lines, drop_sidechain=False)
+
     new_session = str(uuid.uuid4())
-
-    for d in lines:
-        for k in _STRIP_SUBAGENT_TO_SESSION:
-            d.pop(k, None)
-        d["isSidechain"] = False
-        d["sessionId"] = new_session
-
-    _relinearize(lines)
-    trimmed = _trim_trailing_noise(lines)
 
     lineage = list(prior) + [
         {"as": "subagent", "id": src_agent_id},
@@ -614,9 +728,17 @@ def convert_subagent_to_session(
         "id": src_agent_id,
         "project": src_project_path,
     }
+    # Stamp provenance keys and strip/set fields in one loop (no second pass).
     for d in lines:
+        for k in _STRIP_SUBAGENT_TO_SESSION:
+            d.pop(k, None)
+        d["isSidechain"] = False
+        d["sessionId"] = new_session
         d["_converted_from"] = converted_from
         d["_lineage"] = lineage
+
+    _relinearize(lines)
+    trimmed = _trim_trailing_noise(lines)
 
     header = [
         {"type": "mode", "mode": "normal", "sessionId": new_session},
@@ -637,7 +759,6 @@ def convert_subagent_to_session(
         agent_id=None,
         lines_at_creation=len(header) + 1 + len(lines),
     )
-    all_lines = header + [provenance_line] + lines
 
     out_path = dest_project_dir / f"{new_session}.jsonl"
     if out_path.exists():
@@ -645,8 +766,12 @@ def convert_subagent_to_session(
             f"Refusing to overwrite existing session file: {out_path}"
         )
     dest_project_dir.mkdir(parents=True, exist_ok=True)
+    # Write header, provenance, then body sequentially (no list concat).
     with open(out_path, "w", encoding="utf-8") as f:
-        for d in all_lines:
+        for d in header:
+            f.write(json.dumps(d) + "\n")
+        f.write(json.dumps(provenance_line) + "\n")
+        for d in lines:
             f.write(json.dumps(d) + "\n")
 
     return ConversionResult(
@@ -654,6 +779,7 @@ def convert_subagent_to_session(
         created_id=new_session,
         turns=len(lines),
         trimmed_trailing=trimmed,
+        dropped_branches=dropped_branches,
         tail_state=_tail_state(lines),
         models=_model_stats(lines),
         environment=_environment(lines),
@@ -669,7 +795,7 @@ def convert_subagent_to_session(
 # =============================================================================
 
 
-def is_conversion(transcript_path: Path) -> bool:
+def is_conversion_artifact(transcript_path: Path) -> bool:
     """True when a transcript carries a shape-valid x-converter-provenance line.
 
     The single trust signal for both directions: meta.json is no longer a trust

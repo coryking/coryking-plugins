@@ -6,7 +6,7 @@ description: >
   Triggers on: "search my chats", "what did that agent do", "trace that session", "look at my
   conversations", "check my chat history", "find where we talked about X", "which sessions used
   agents", "ask a past session", "convert a session into a subagent", "question that old conversation".
-  Do NOT use for behavioral evidence mining or resume work — that's the project-mining skill.
+  Do NOT use for behavioral evidence mining or evidence-document work — that's the project-mining skill.
 ---
 
 # cc-explorer
@@ -67,9 +67,15 @@ Tools that create new transcripts — the one mutating axis in the toolset. Both
 
 Convert a session to a subagent when the question needs the session itself, not excerpts from it: the reasoning behind a decision, a synthesis of the whole arc, a judgment call on evidence it hasn't seen, or a domain expert whose built-up context would be expensive to rebuild. Resume the new agent with `SendMessage(to: <created_id>)`; its reply is its final message; message it again to follow up. For facts, quotes, locations, and tool-call ground truth, stay on the read tools.
 
-First message to a converted conversation: open with the `suggested_handoff` from the tool response — the conversation has no way to know its interlocutor changed, and nothing on the wire tells it. Then say who you are and what you want. Offer your reading of the session as a reading, not a fact — you have excerpts, it has the whole conversation; let it correct you. If the answer should account for the present, brief it on what changed after the session ended. Relay `environment` facts from the response only when the ask depends on them (e.g. it will run tools in a cwd it doesn't remember).
-
 Convert a subagent to a session when the user wants to read or continue an agent's run themselves — hand them the `claude -r` command from the response.
+
+### Composing the first message to a converted conversation
+
+Open with the `suggested_handoff` from the tool response. The conversation has no way to know its interlocutor changed — messages arrive unlabeled, and you occupy the same `user` role its human did — so the handoff's one job is to resolve the contradiction between its runtime ("you are a subagent") and its history (an interactive session, mid-relationship with someone else). Then say who you are and what you want, in whatever role fits the intent: witness, fact-checker, expert consult, plain continuation. The framing controls stance, not correctness — without one, the conversation defaults to being its old user's assistant and offers to resume the relationship.
+
+Mind the knowledge asymmetry (the emic/etic gap): you've read excerpts from the outside; it lived the whole thing and is the authority on what its conversation was about. Offer your reading as a reading — "my understanding from the outside is this session was about X; correct me if that's off" — never as established fact. A presupposed frame invites it to elaborate your guess instead of reporting its reality, and when the premise is flat wrong it has to spend its whole answer fighting the frame. Converted conversations do push back rather than play along — but don't bet on that against a confidently-asserted wrong premise.
+
+Its knowledge ends where the conversation ended. If the answer should account for the present, brief it on what changed first, then ask for the judgment. Relay `environment` facts from the response only when the ask depends on them — e.g. it will run tools in a cwd it doesn't remember having left.
 
 ## Worktree pooling
 

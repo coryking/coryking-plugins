@@ -67,11 +67,8 @@ class SubagentInfo:
     source: str = ""
     # Workflow run id for agents under subagents/workflows/<runId>/, else None.
     workflow_run_id: Optional[str] = None
-    # True when this agent is a conversion artifact (its jsonl carries an
-    # x-converter-provenance line — written by convert_session). Conversion
-    # artifacts are excluded from the search corpus by default and labeled in
-    # agent listings; delete_conversions removes them.
-    is_conversion: bool = False
+    # Conversion artifact (made by convert_session), not a real dispatched run.
+    is_conversion_artifact: bool = False
 
     # Completion stats (from toolUseResult on completed agents)
     # Optional here is meaningful — distinguishes "no data" from "zero usage"
@@ -263,11 +260,8 @@ class AgentFile:
     agent_type: str = ""  # meta.json agentType
     description: str = ""  # meta.json description
     tool_use_id: str = ""  # meta.json toolUseId (links back to a parent dispatch)
-    # True when the jsonl carries an x-converter-provenance line — this agent is
-    # a conversion artifact (a session/subagent copied via convert_session), not a
-    # real dispatched run. Keyed on the provenance line, NOT meta.json (which the
-    # harness rewrites on resume). Excluded from the search corpus by default.
-    is_conversion: bool = False
+    # Conversion artifact — keyed on the provenance line; conversion.py owns the why.
+    is_conversion_artifact: bool = False
 
 
 def resolve_subagents_dir(session_path: Path) -> Path:
@@ -334,10 +328,6 @@ def collect_agent_files(subagents_dir: Path) -> list[AgentFile]:
             ):
                 agent_id = name[len("agent-") : -len(".jsonl")]
                 meta = _read_agent_meta(entry)
-                # Conversion status keys on the x-converter-provenance line in the
-                # jsonl (written first), NOT meta.json — the harness rewrites
-                # meta.json on resume and drops unknown keys, so it's not a durable
-                # trust surface. read_provenance reads just the head of the file.
                 found.append(
                     AgentFile(
                         agent_id=agent_id,
@@ -346,7 +336,7 @@ def collect_agent_files(subagents_dir: Path) -> list[AgentFile]:
                         agent_type=meta.get("agentType", ""),
                         description=meta.get("description", ""),
                         tool_use_id=meta.get("toolUseId", ""),
-                        is_conversion=read_provenance(entry) is not None,
+                        is_conversion_artifact=read_provenance(entry) is not None,
                     )
                 )
 
@@ -419,7 +409,7 @@ def discover_subagents(
                 target.agent_id = PrefixId(af.agent_id)
             target.workflow_run_id = af.workflow_run_id
             target.source = "dispatched"
-            target.is_conversion = af.is_conversion
+            target.is_conversion_artifact = af.is_conversion_artifact
             _attach_transcript_file(target, af.path)
             matched.add(id(target))
         else:
@@ -430,7 +420,7 @@ def discover_subagents(
                 description=af.description,
                 workflow_run_id=af.workflow_run_id,
                 source="orphan",
-                is_conversion=af.is_conversion,
+                is_conversion_artifact=af.is_conversion_artifact,
             )
             _attach_transcript_file(info, af.path)
             orphans.append(info)

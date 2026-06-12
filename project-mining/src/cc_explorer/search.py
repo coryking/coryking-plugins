@@ -28,6 +28,7 @@ from .models import (
     substantive_human_text,
 )
 from .formatting import _match_example
+from .conversion import read_provenance
 from .parser import load_conversations, load_transcript
 from .subagents import collect_agent_files, discover_subagents, resolve_subagents_dir
 from .utils import PrefixId, smart_truncate
@@ -302,7 +303,7 @@ def session_sources(session: "SessionInfo") -> list["TranscriptSource"]:
     """
     sources: list[TranscriptSource] = [TranscriptSource(agent_id=None, path=session.path)]
     for af in collect_agent_files(resolve_subagents_dir(session.path)):
-        if af.is_conversion:
+        if af.is_conversion_artifact:
             continue
         sources.append(
             TranscriptSource(
@@ -397,6 +398,11 @@ class SessionInfo:
     # orphans (notably workflow-orchestrated agents). Equals list_session_agents'
     # total_agents, unlike stats.agent_count which is top-down dispatches only.
     agents_present: int = 0
+    # True when this session is a conversion artifact (x-converter-provenance line
+    # present). Populated at load time via a cheap head-scan; used to skip
+    # artifacts from search/triage (same rationale as agent-shaped skip) while
+    # still listing them in session list responses (labeled).
+    is_conversion_artifact: bool = False
 
 
 @dataclass
@@ -585,11 +591,17 @@ def load_sessions(
         # count matches list_session_agents and catches workflow orphans. Reuses
         # the already-parsed entries — only the tiny subagents/ dir is walked.
         # Gated: most tools don't need it and shouldn't pay the per-session walk.
+        # Conversion artifacts are excluded — they are copies, not dispatched runs.
         agents_present = (
-            len(discover_subagents(ref.path, entries=entries))
+            sum(
+                1 for sa in discover_subagents(ref.path, entries=entries)
+                if not sa.is_conversion_artifact
+            )
             if with_agents_present
             else 0
         )
+        # Cheap head-scan: is this session a conversion artifact?
+        is_conv = read_provenance(ref.path) is not None
         sessions.append(
             SessionInfo(
                 session_id=session_id,
@@ -604,6 +616,7 @@ def load_sessions(
                 team_role=team_role,
                 agents_present=agents_present,
                 project_path=project_path,
+                is_conversion_artifact=is_conv,
             )
         )
 
@@ -715,6 +728,8 @@ def triage(
     results: list[TriageResult] = []
 
     for session in sessions:
+        if session.is_conversion_artifact:
+            continue
         count = 0
         first_example = ""
         first_agent_id: Optional[PrefixId] = None
@@ -765,6 +780,8 @@ def triage_multi(
     }
 
     for si, session in enumerate(sessions):
+        if session.is_conversion_artifact:
+            continue
         # Search the whole corpus: main transcript + every subagent body (#22).
         for source in session_sources(session):
             entries = load_transcript(source.path)
@@ -827,6 +844,8 @@ def search_multi(
     out: dict[PrefixId, list[tuple[str, list[MatchHit], int]]] = {}
 
     for session in sessions:
+        if session.is_conversion_artifact:
+            continue
         # Per-pattern accumulator for this session: pi -> list[MatchHit]
         per_pattern: dict[int, list[MatchHit]] = {i: [] for i in range(len(compiled))}
         per_pattern_totals: dict[int, int] = {i: 0 for i in range(len(compiled))}
@@ -892,6 +911,8 @@ def search(
         target_sessions = [s for s in sessions if s.session_id == session_id]
 
     for session in target_sessions:
+        if session.is_conversion_artifact:
+            continue
         session_matches: list[MatchHit] = []
 
         for source in session_sources(session):
