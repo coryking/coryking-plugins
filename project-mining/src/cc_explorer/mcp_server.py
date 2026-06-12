@@ -1,21 +1,30 @@
 """MCP server wrapping the cc_explorer library.
 
 Exposes Claude Code chat log exploration as MCP tools via FastMCP.
-All tools are read-only and return typed Pydantic response models.
-FastMCP auto-generates output schemas from return type annotations.
+Most tools are read-only and return typed Pydantic response models; the two
+conversion tools (convert_session, delete_conversions) write/delete transcript
+copies. FastMCP auto-generates output schemas from return type annotations.
 """
 
 import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal, Optional
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from .activity import build_activity_timeline
+from .conversion import (
+    convert_session_to_subagent,
+    convert_subagent_to_session,
+    delete_agent_conversion,
+    existing_custom_titles,
+    growth_exceeded,
+    is_conversion,
+)
 from .formatting import matches_id
 from .models import parse_hide
 from .parser import load_conversations
@@ -27,10 +36,14 @@ from .responses import (
     AgentToolAudit,
     AgentToolCall,
     BrowseSessionResponse,
+    ConvertSessionResponse,
+    DeleteConversionsResponse,
+    DeletedConversion,
     GrepSessionResponse,
     GrepSessionsResponse,
     ProjectListResponse,
     ReadTurnResponse,
+    RefusedDeletion,
     SearchProjectsResponse,
     SessionAgentsResponse,
     SessionListResponse,
@@ -52,9 +65,11 @@ from .search import (
     triage_multi,
 )
 from .subagents import (
+    collect_agent_files,
     discover_subagents,
     extract_agent_tool_audit,
     resolve_output_files,
+    resolve_subagents_dir,
     scan_output_file_stats,
 )
 
@@ -95,6 +110,21 @@ the main transcript, so an agent's own tool calls / thinking are searchable too
 mcp = FastMCP("cc-explorer", instructions=_INSTRUCTIONS)
 
 _TOOL_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": False}
+
+# convert_session writes new transcript copies (never modifying the source) — not
+# read-only, but not destructive either: it only adds files.
+_CONVERT_ANNOTATIONS = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "openWorldHint": False,
+}
+
+# delete_conversions removes conversion artifacts from disk — destructive.
+_DELETE_ANNOTATIONS = {
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "openWorldHint": False,
+}
 
 
 # Shared param: which projects to look in. Omit ⇒ ALL projects (cross-project) for
@@ -1091,6 +1121,295 @@ def get_activity_timeline(
         tz=tz,
     )
     return ActivityTimelineResponse.model_validate(result)
+
+
+# =============================================================================
+# Conversion tools — copy a session into a subagent, or a subagent into a session
+# =============================================================================
+
+
+def _resolve_session_for_convert(
+    src_id: str, src_project: str | None
+) -> SessionInfo:
+    """Resolve a session id/prefix to one SessionInfo for conversion, or raise.
+
+    Scopes to `src_project` when given; otherwise searches all projects (locating
+    the holding project cheaply via load_conversations). Ambiguous prefixes raise
+    with the candidate projects listed.
+    """
+    projects = [src_project] if src_project else None
+    narrowed = _projects_for_sessions([src_id], projects)
+    if not narrowed:
+        raise ToolError(f"No session matching: {src_id}")
+    sessions, _ = _load_all_sessions(narrowed)
+    return _resolve_unique_session(sessions, src_id)
+
+
+def _resolve_agent_for_convert(src_id: str, src_project: str | None):
+    """Resolve an agent id/prefix to (AgentFile, holding SessionInfo), or raise.
+
+    Walks every session's subagents dir across the selected projects. A prefix
+    matching agent files in more than one distinct full id raises with the
+    holding sessions listed, mirroring session-prefix ambiguity handling.
+    """
+    proj_sel = [src_project] if src_project else None
+    sessions, _ = _load_all_sessions(proj_sel)
+
+    matches: list[tuple] = []  # (AgentFile, SessionInfo)
+    for s in sessions:
+        for af in collect_agent_files(resolve_subagents_dir(s.path)):
+            if af.agent_id and PrefixId(af.agent_id) == src_id:
+                matches.append((af, s))
+
+    if not matches:
+        raise ToolError(f"No subagent matching: {src_id}")
+    distinct = {af.agent_id for af, _ in matches}
+    if len(distinct) > 1:
+        where = ", ".join(sorted({s.project_path or "?" for _, s in matches}))
+        raise ToolError(
+            f"Agent prefix {src_id!r} is ambiguous — it matches {len(distinct)} "
+            f"distinct agents (in: {where}). Pass a longer id or scope with src_project."
+        )
+    return matches[0]
+
+
+def _project_dirs_for(project_path: str) -> list[Path]:
+    """Every encoded ~/.claude/projects dir that pools into a project.
+
+    Title-collision detection must span the whole project (all worktrees), so we
+    reuse load_conversations' worktree pooling and collect the parent dirs of the
+    discovered transcript files.
+    """
+    refs = load_conversations(project_path)
+    dirs: set[Path] = set()
+    for ref in refs.values():
+        dirs.add(ref.path.parent)
+    return sorted(dirs)
+
+
+@mcp.tool(annotations=_CONVERT_ANNOTATIONS)
+def convert_session(
+    direction: Annotated[
+        Literal["session_to_subagent", "subagent_to_session"],
+        Field(description="Which way to convert: 'session_to_subagent' copies a session into a resumable subagent; 'subagent_to_session' copies a subagent out to a top-level session."),
+    ],
+    src_id: Annotated[
+        str,
+        Field(description="Source id or prefix — a session id (session_to_subagent) or an agent id (subagent_to_session). Must resolve uniquely; an ambiguous prefix errors with the candidates listed."),
+    ],
+    src_project: Annotated[
+        str | None,
+        Field(description="Optional single project (path or bare name) to scope source resolution. Default: search all projects."),
+    ] = None,
+    dest_parent_session: Annotated[
+        str | None,
+        Field(description="session_to_subagent only: the session to parent the new subagent under. Default: the calling session. Errors if omitted and the calling session is unknown."),
+    ] = None,
+    dest_title: Annotated[
+        str | None,
+        Field(description="subagent_to_session only: custom title for the new session. Default: 'converted-<first 8 of src_id>'. Must be unique among custom titles in the dest project; a collision errors."),
+    ] = None,
+    dest_project: Annotated[
+        str | None,
+        Field(description="subagent_to_session only: project (path or bare name) to write the new session into. Default: the source's own project."),
+    ] = None,
+) -> ConvertSessionResponse:
+    """Convert a session into a subagent, or a subagent into a session. Always a copy — the source transcript is never modified, moved, or deleted.
+
+    direction='session_to_subagent': copy a session (any project) into a new subagent parented under dest_parent_session (default: the calling session). The conversation continues as a subagent: resume it like any completed background agent — SendMessage with the returned created_id — and ask it what you need; its whole history is in its context window. Use this when grep answers aren't enough: questions of reasoning, synthesis, or meaning; summaries at any altitude; judgment calls briefed with new evidence; or using a past session as a domain expert whose context you don't want to rebuild.
+
+    direction='subagent_to_session': copy a subagent out to a top-level session a human can open — the response carries the exact `claude -r` command. Use when the user wants to read or continue an agent's run interactively.
+
+    The response includes what you need to compose the first message: suggested_handoff (a converted conversation has no way to know its interlocutor changed — message senders are not labeled on the wire), the original environment (cwd and whether it still exists, git branch, Claude Code version, age), model history, turn count, and tail state. Conversion artifacts carry lineage, are excluded from search by default, and are labeled in agent listings; remove them with delete_conversions."""
+    if direction == "session_to_subagent":
+        src = _resolve_session_for_convert(src_id, src_project)
+
+        parent_id = dest_parent_session or _current_session_id()
+        if not parent_id:
+            raise ToolError(
+                "dest_parent_session is required: the calling session is unknown "
+                "(CLAUDE_CODE_SESSION_ID is not set), so there is no default parent. "
+                "Pass the session id to parent the new subagent under."
+            )
+
+        # The parent session's on-disk directory is <projectDir>/<parentSessionId>.
+        # Resolve it from the parent session itself so worktree-pooled parents land
+        # in the right encoded dir (not assumed to be the source's project).
+        parent = _resolve_session_for_convert(parent_id, None)
+        parent_session_dir = parent.path.with_suffix("")
+
+        # Subagents the SOURCE session ran are NOT copied — their results already
+        # appear inline. Report the count so the caller knows context was folded in.
+        nested = len(discover_subagents(src.path))
+
+        result = convert_session_to_subagent(
+            src_session_id=src.session_id.full,
+            src_path=src.path,
+            src_project_path=src.project_path or "",
+            dest_parent_session_id=parent.session_id.full,
+            dest_parent_session_dir=parent_session_dir,
+            nested_agents=nested,
+        )
+        return ConvertSessionResponse.from_result(result)
+
+    # subagent_to_session
+    af, holding = _resolve_agent_for_convert(src_id, src_project)
+    agent_full = af.agent_id
+
+    dest_proj_path = (
+        resolve_project(dest_project) if dest_project else (holding.project_path or "")
+    )
+    if not dest_proj_path:
+        raise ToolError(
+            "Cannot determine destination project — the source has no project path "
+            "and dest_project was not given."
+        )
+
+    title = dest_title or f"converted-{agent_full[:8]}"
+
+    # `claude --resume "<title>"` resolves by scanning custom-title lines; a
+    # duplicate breaks resolution, so refuse a colliding title up front.
+    taken = existing_custom_titles(_project_dirs_for(dest_proj_path))
+    if title in taken:
+        raise ToolError(
+            f"Title {title!r} already exists in project {Path(dest_proj_path).name!r} — "
+            f"`claude --resume` resolves by title, so it must be unique. Pass a distinct dest_title."
+        )
+
+    # Write into the same encoded dir the source's session lives in (the project's
+    # main transcript dir), so the new session is discoverable under that project.
+    dest_proj_dir = holding.path.parent if not dest_project else _dest_project_dir(dest_proj_path)
+
+    try:
+        result = convert_subagent_to_session(
+            src_agent_id=agent_full,
+            src_path=af.path,
+            src_project_path=dest_proj_path,
+            dest_project_dir=dest_proj_dir,
+            dest_title=title,
+        )
+    except FileExistsError as e:
+        raise ToolError(str(e))
+    return ConvertSessionResponse.from_result(result)
+
+
+def _dest_project_dir(project_path: str) -> Path:
+    """The main-worktree encoded dir for a project, for writing a new session into.
+
+    Reuses load_conversations' pooling to find where the project's main-worktree
+    transcripts live (the first transcript with worktree=None). Falls back to the
+    canonical encoded dir derived from the path when the project has no sessions
+    yet.
+    """
+    refs = load_conversations(project_path)
+    for ref in refs.values():
+        if ref.worktree is None:
+            return ref.path.parent
+    # No main-worktree session on disk yet — derive the encoded dir from the path.
+    from ._claude_paths import _canonicalize_path, _get_project_dir
+
+    return _get_project_dir(_canonicalize_path(project_path))
+
+
+# Refusal reasons (kept as constants so the sweep and explicit-id paths share
+# identical wording, and tests can assert on stable substrings).
+_REFUSE_NOT_CONVERSION = (
+    "not a conversion artifact (no x-converter-provenance line) — refusing to "
+    "delete a real session or subagent"
+)
+_REFUSE_GROWTH = (
+    "conversion has been resumed or built upon since creation; someone may depend "
+    "on it — confirm with the user before removing. The user can remove the files "
+    "manually if confirmed."
+)
+_REFUSE_SESSION = (
+    "converted sessions are for humans to manage; delete_conversions only removes "
+    "subagent conversions. Remove the file manually."
+)
+
+
+@mcp.tool(annotations=_DELETE_ANNOTATIONS)
+def delete_conversions(
+    ids: Annotated[
+        Optional[list[str]],
+        Field(description="Conversion artifact ids (agent ids, prefixes accepted) to delete. Omit to delete ALL conversion-tagged SUBAGENTS under the calling session. Converted SESSIONS are never deletable by this tool (even by explicit id) — remove those files manually."),
+    ] = None,
+) -> DeleteConversionsResponse:
+    """Delete SUBAGENT conversion artifacts created by convert_session — and ONLY those.
+
+    Each subagent id is verified to carry a valid x-converter-provenance line (the sole trust surface — meta.json is rewritten on resume and isn't trusted) before anything is removed. Two guards protect a tagged artifact from deletion: if its line count has grown past `lines_at_creation`, it was resumed or built upon and is refused (someone may now depend on it); ids that resolve to a real but NON-conversion artifact (or don't resolve at all) are refused with a per-id reason. This tool can never delete a genuine session or a normally-dispatched subagent.
+
+    Converted SESSIONS are refused unconditionally — even when tagged and passed by explicit id — because a session is for a human to open and manage; remove its file manually if you mean to. There is no force flag.
+
+    Omit `ids` to sweep every conversion-tagged subagent under the calling session that passes the growth guard (a cleanup-after-yourself default); grown ones are reported in `refused`, not silently skipped."""
+    deleted: list[DeletedConversion] = []
+    refused: list[RefusedDeletion] = []
+
+    if ids is None:
+        # Sweep mode: every conversion subagent under the calling session only.
+        current = _current_session_id()
+        if not current:
+            raise ToolError(
+                "Cannot sweep: the calling session is unknown (CLAUDE_CODE_SESSION_ID "
+                "is not set). Pass explicit ids instead."
+            )
+        try:
+            holding = _resolve_session_for_convert(current, None)
+        except ToolError:
+            return DeleteConversionsResponse(deleted=[], refused=[])
+        for af in collect_agent_files(resolve_subagents_dir(holding.path)):
+            if not af.is_conversion:
+                continue
+            if growth_exceeded(af.path):
+                refused.append(RefusedDeletion(id=af.agent_id, reason=_REFUSE_GROWTH))
+                continue
+            delete_agent_conversion(af.path)
+            deleted.append(
+                DeletedConversion(id=af.agent_id, kind="subagent", path=str(af.path))
+            )
+        return DeleteConversionsResponse(deleted=deleted, refused=refused)
+
+    for raw_id in ids:
+        target = _locate_artifact(raw_id)
+        if target is None:
+            refused.append(
+                RefusedDeletion(id=raw_id, reason="no session or subagent matches this id")
+            )
+            continue
+        kind, full_id, path = target
+        if kind == "session":
+            # Sessions are never deletable here — even tagged ones.
+            refused.append(RefusedDeletion(id=raw_id, reason=_REFUSE_SESSION))
+            continue
+        # subagent
+        if not is_conversion(path):
+            refused.append(RefusedDeletion(id=raw_id, reason=_REFUSE_NOT_CONVERSION))
+            continue
+        if growth_exceeded(path):
+            refused.append(RefusedDeletion(id=raw_id, reason=_REFUSE_GROWTH))
+            continue
+        delete_agent_conversion(path)
+        deleted.append(DeletedConversion(id=full_id, kind="subagent", path=str(path)))
+
+    return DeleteConversionsResponse(deleted=deleted, refused=refused)
+
+
+def _locate_artifact(raw_id: str):
+    """Find a session or subagent by id/prefix across all projects.
+
+    Returns (kind, full_id, path) where kind is 'session' or 'subagent', or None
+    when nothing matches. Sessions are checked first (an id is a session id or an
+    agent id, never both). The path is the transcript file to act on.
+    """
+    sessions, _ = _load_all_sessions(None)
+    for s in sessions:
+        if PrefixId(s.session_id) == raw_id:
+            return ("session", s.session_id.full, s.path)
+    for s in sessions:
+        for af in collect_agent_files(resolve_subagents_dir(s.path)):
+            if af.agent_id and PrefixId(af.agent_id) == raw_id:
+                return ("subagent", af.agent_id, af.path)
+    return None
 
 
 def main():

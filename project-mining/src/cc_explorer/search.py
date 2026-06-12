@@ -293,9 +293,17 @@ def session_sources(session: "SessionInfo") -> list["TranscriptSource"]:
     NOTE: this walks every session's subagent dir, so a cross-project search
     touches the whole tree — the known cost tracked as the whole-corpus perf
     follow-up. Correctness first.
+
+    Conversion artifacts (agents whose jsonl carries an x-converter-provenance
+    line, i.e. a session/subagent copied via convert_session) are SKIPPED: their
+    text is a duplicate of a real transcript already in the corpus, so searching
+    them would double-count and surface synthetic copies. They remain visible in
+    list_session_agents (labeled), just not searched.
     """
     sources: list[TranscriptSource] = [TranscriptSource(agent_id=None, path=session.path)]
     for af in collect_agent_files(resolve_subagents_dir(session.path)):
+        if af.is_conversion:
+            continue
         sources.append(
             TranscriptSource(
                 agent_id=PrefixId(af.agent_id) if af.agent_id else None,
