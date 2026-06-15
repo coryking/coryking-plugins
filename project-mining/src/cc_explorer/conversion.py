@@ -35,6 +35,7 @@ reading; this is surgery on the wire format.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import uuid
 from collections import Counter
@@ -787,6 +788,259 @@ def convert_subagent_to_session(
         title=dest_title,
         project=src_project_path,
         written_path=out_path,
+    )
+
+
+# =============================================================================
+# Rewind — truncate a conversion artifact in place to an earlier turn
+# =============================================================================
+#
+# Rewind mutates a conversion artifact IN PLACE: it cuts the transcript at a
+# chosen turn, discards everything after the cut, and rewrites the file so the
+# artifact resumes from the earlier point. This is destructive (the discarded
+# tail is gone), which is exactly why it is gated on the x-converter-provenance
+# line: we only ever mutate files WE wrote. A real session or subagent is never
+# touched — the caller refuses anything without provenance before calling here.
+#
+# The structural prefix (session header lines + the provenance line) is preserved
+# verbatim except for the provenance line's `lines_at_creation`, which is
+# re-stamped to the new physical line count so the growth guard and deletion stay
+# coherent (current == created right after a rewind → still deletable, not "grown").
+
+
+def _assistant_has_tool_use(line: dict[str, Any]) -> bool:
+    """True when an assistant line's content carries any tool_use block.
+
+    When such a line is the tail of a truncated transcript, the tool_use has no
+    following tool_result — a dangling call the Anthropic API rejects on resume.
+    Rewind trims these off the tail so the truncated artifact stays resumable.
+    """
+    if line.get("type") != "assistant":
+        return False
+    msg = line.get("message")
+    if not isinstance(msg, dict):
+        return False
+    content = msg.get("content")
+    if not isinstance(content, list):
+        return False
+    return any(
+        isinstance(b, dict) and b.get("type") == "tool_use" for b in content
+    )
+
+
+def _trim_resumable_tail(lines: list[dict[str, Any]]) -> tuple[int, int]:
+    """Trim the tail in place until it is a resumable boundary.
+
+    Pops, in a single pass to fixpoint: (a) trailing-noise user turns
+    (empty/interrupt/command scaffolding) and (b) a trailing assistant turn whose
+    content has an unanswered tool_use (dangling after truncation). Returns
+    (trimmed_trailing, trimmed_dangling_tool_use).
+
+    A user tail (pending_user_input) and an assistant text tail (clean) are both
+    valid resume boundaries, so neither is trimmed.
+    """
+    trimmed_trailing = 0
+    trimmed_dangling = 0
+    while lines:
+        if _is_trailing_noise(lines[-1]):
+            lines.pop()
+            trimmed_trailing += 1
+            continue
+        if _assistant_has_tool_use(lines[-1]):
+            lines.pop()
+            trimmed_dangling += 1
+            continue
+        break
+    return trimmed_trailing, trimmed_dangling
+
+
+def _ancestor_chain(
+    lines: list[dict[str, Any]], target_uuid: str
+) -> list[dict[str, Any]]:
+    """The root→target lineage: the target and every ancestor, oldest first.
+
+    Walks `parentUuid` links backward from the target to the root, so the kept
+    conversation is exactly the chain leading to the chosen turn — NOT a file-order
+    slice. A conversion artifact resumed interactively can grow into a TREE (a
+    message edit forks sibling branches); file-order slicing would splice abandoned
+    branches into the result, but the ancestor walk keeps only the real lineage.
+
+    A cycle (malformed transcript) or a missing parent link terminates the walk at
+    that point, treating the last reachable node as the root.
+    """
+    by_uuid: dict[str, dict[str, Any]] = {}
+    for d in lines:
+        u = d.get("uuid")
+        if u is not None:
+            by_uuid[u] = d  # last write wins; the target is guarded as unique upstream
+
+    chain: list[dict[str, Any]] = []
+    visited: set[str] = set()
+    current: Optional[dict[str, Any]] = by_uuid.get(target_uuid)
+    while current is not None:
+        uid = current.get("uuid")
+        if uid in visited:
+            break  # cycle guard
+        if uid is not None:
+            visited.add(uid)
+        chain.append(current)
+        parent_uuid = current.get("parentUuid")
+        current = by_uuid.get(parent_uuid) if parent_uuid else None
+    chain.reverse()
+    return chain
+
+
+@dataclass
+class RewindResult:
+    """The outcome of one in-place rewind."""
+
+    kind: str  # 'subagent' | 'session'
+    artifact_id: str
+    target_turn: str
+    cut: str  # 'after' | 'before'
+    turns_before: int
+    turns_after: int
+    removed_after_cut: int
+    trimmed_trailing: int
+    trimmed_dangling_tool_use: int
+    tail_state: str
+    models: dict[str, Any]
+    environment: dict[str, Any]
+    lineage: list[dict[str, str]]
+    written_path: Path
+
+
+def rewind_transcript(
+    *,
+    transcript_path: Path,
+    artifact_id: str,
+    kind: str,
+    turn: str,
+    cut: str = "after",
+) -> RewindResult:
+    """Truncate a conversion artifact in place at `turn`, discarding the rest.
+
+    `kind` is 'subagent' or 'session' (caller-supplied, for the result). `turn`
+    is a uuid or prefix of a body (user/assistant) line in this transcript. `cut`
+    is 'after' (keep through the named turn — it becomes the new tail) or 'before'
+    (discard the named turn and everything after — the turn is the first line
+    dropped). After the cut the tail is trimmed to a resumable boundary.
+
+    The caller MUST have verified the file carries a provenance line before
+    calling — this function re-reads it only to re-stamp `lines_at_creation`.
+
+    Raises ValueError on: a turn that matches no body line, an ambiguous prefix
+    (more than one distinct uuid), a target uuid that repeats in the transcript, a
+    missing provenance line, or a cut/trim that would leave the transcript empty.
+    """
+    if cut not in ("after", "before"):
+        raise ValueError(f"cut must be 'after' or 'before', got {cut!r}")
+
+    raw = _read_raw_lines(transcript_path)
+
+    # Structural prefix = everything before the first body line (session header
+    # lines + the provenance line). Preserved verbatim except for the re-stamp.
+    first_body_idx = next(
+        (i for i, d in enumerate(raw) if d.get("type") in _CONVO_TYPES), None
+    )
+    if first_body_idx is None:
+        raise ValueError("transcript has no user/assistant turns to rewind")
+    prefix = raw[:first_body_idx]
+
+    prov_idx = next(
+        (i for i, d in enumerate(prefix) if d.get("type") == _PROVENANCE_TYPE), None
+    )
+    if prov_idx is None:
+        raise ValueError(
+            "no x-converter-provenance line found — refusing to rewind a "
+            "non-conversion transcript"
+        )
+
+    body = _keep_convo_lines(raw)
+    turns_before = len(body)
+
+    # Resolve the target turn within the body by uuid or prefix.
+    matched = [
+        d for d in body if (u := d.get("uuid")) and (u == turn or u.startswith(turn))
+    ]
+    if not matched:
+        raise ValueError(f"turn {turn!r} not found in this transcript")
+    distinct = {d["uuid"] for d in matched}
+    if len(distinct) > 1:
+        raise ValueError(
+            f"turn prefix {turn!r} is ambiguous — it matches {len(distinct)} "
+            f"distinct turns in this transcript. Pass a longer id."
+        )
+    target_full = next(iter(distinct))
+    if sum(1 for d in body if d.get("uuid") == target_full) > 1:
+        raise ValueError(
+            f"turn {target_full[:8]} appears more than once in this transcript "
+            "(a resumed transcript can repeat a uuid) — cannot unambiguously rewind "
+            "to it. Pick a turn with a unique id."
+        )
+
+    # Keep the lineage leading to the target — its ancestor chain — not a file-order
+    # slice: a resumed artifact may contain abandoned edit-branch siblings, and only
+    # the chain from root to the target is the conversation we are rewinding to.
+    # cut='after' keeps through the target; cut='before' drops the target itself.
+    chain = _ancestor_chain(body, target_full)
+    kept = chain if cut == "after" else chain[:-1]
+    removed_after_cut = turns_before - len(kept)
+
+    trimmed_trailing, trimmed_dangling = _trim_resumable_tail(kept)
+
+    if not kept:
+        raise ValueError(
+            "rewind would discard the entire conversation — nothing remains after "
+            f"the cut={cut} at turn {target_full[:8]} and the resumable-tail trim. "
+            "Pick a later turn or cut='after'."
+        )
+
+    # The kept chain is already linear; relinearize normalizes parentUuid (first
+    # null, each pointing at its predecessor) and mints any missing uuid.
+    _relinearize(kept)
+
+    lineage = _prior_lineage(raw)
+
+    # Re-stamp lines_at_creation to the new physical line count so the growth
+    # guard stays coherent, and record the rewind for forensics.
+    new_total = len(prefix) + len(kept)
+    sentinel = prefix[prov_idx].get("x_converter")
+    if isinstance(sentinel, dict):
+        sentinel["lines_at_creation"] = new_total
+        sentinel["rewound_to"] = target_full
+        sentinel["rewound_at"] = _now_iso()
+
+    # Write atomically: a destructive in-place truncation must never leave the
+    # transcript half-written. Build the new file beside the original, then
+    # os.replace() it in one atomic swap; on ANY failure the original is untouched.
+    tmp_path = transcript_path.with_name(transcript_path.name + ".rewind-tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            for d in prefix:
+                f.write(json.dumps(d) + "\n")
+            for d in kept:
+                f.write(json.dumps(d) + "\n")
+        os.replace(tmp_path, transcript_path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+    return RewindResult(
+        kind=kind,
+        artifact_id=artifact_id,
+        target_turn=target_full,
+        cut=cut,
+        turns_before=turns_before,
+        turns_after=len(kept),
+        removed_after_cut=removed_after_cut,
+        trimmed_trailing=trimmed_trailing,
+        trimmed_dangling_tool_use=trimmed_dangling,
+        tail_state=_tail_state(kept),
+        models=_model_stats(kept),
+        environment=_environment(kept),
+        lineage=lineage,
+        written_path=transcript_path,
     )
 
 

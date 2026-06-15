@@ -1024,6 +1024,63 @@ class ConvertSessionResponse(SparseModel):
 
 
 # =============================================================================
+# rewind_transcript
+# =============================================================================
+
+
+class RewindTranscriptResponse(SparseModel):
+    """Result of an in-place rewind of a conversion artifact.
+
+    Leads with what the artifact now is and the exact next step (`invocation`) to
+    resume it. The cut is IN PLACE and destructive — the discarded tail is gone.
+    Only conversion artifacts (carrying an x-converter-provenance line) are ever
+    rewound; a real session or subagent is refused untouched.
+    """
+
+    operation: str = Field(description="Always 'rewind' — the artifact was truncated in place.")
+    kind: str = Field(description="'subagent' or 'session'.")
+    artifact_id: str = Field(description="The agent id (subagent) or session uuid (session) that was rewound.")
+    invocation: str = Field(description="The exact next step to resume the rewound artifact.")
+    cut: str = Field(description="'after' (named turn kept as the new tail) or 'before' (named turn discarded).")
+    target_turn: str = Field(description="Full uuid of the turn the cut was made at.")
+    turns_before: int = Field(description="Body turns (user+assistant) before the rewind.")
+    turns_after: int = Field(description="Body turns remaining after the cut and resumable-tail trim.")
+    removed_after_cut: int = Field(description="Turns discarded by the cut itself (before tail trimming).")
+    trimmed_trailing: int = Field(description="Trailing-noise turns (empty/interrupt/command scaffolding) trimmed off the new tail.")
+    trimmed_dangling_tool_use: int = Field(description="Trailing assistant turns dropped because their tool_use had no following tool_result (would break resume).")
+    tail_state: str = Field(description="'clean' (ends on an assistant text turn) or 'pending_user_input' (ends on a user turn awaiting a reply).")
+    models: ConversionModels = Field(description="Assistant model history of the rewound transcript.")
+    environment: ConversionEnvironment = Field(description="Original cwd/branch/version/age, read off the kept turns.")
+    lineage: list[dict[str, str]] = Field(
+        description="Conversion chain carried by the artifact: each hop is {as: 'session'|'subagent', id: ...}, oldest first.",
+    )
+
+    @classmethod
+    def from_result(cls, r) -> "RewindTranscriptResponse":
+        if r.kind == "subagent":
+            invocation = f'SendMessage(to: "{r.artifact_id}")'
+        else:
+            invocation = f"claude -r {r.artifact_id}"
+        return cls(
+            operation="rewind",
+            kind=r.kind,
+            artifact_id=r.artifact_id,
+            invocation=invocation,
+            cut=r.cut,
+            target_turn=r.target_turn,
+            turns_before=r.turns_before,
+            turns_after=r.turns_after,
+            removed_after_cut=r.removed_after_cut,
+            trimmed_trailing=r.trimmed_trailing,
+            trimmed_dangling_tool_use=r.trimmed_dangling_tool_use,
+            tail_state=r.tail_state,
+            models=ConversionModels(**r.models),
+            environment=ConversionEnvironment(**r.environment),
+            lineage=r.lineage,
+        )
+
+
+# =============================================================================
 # delete_conversions
 # =============================================================================
 

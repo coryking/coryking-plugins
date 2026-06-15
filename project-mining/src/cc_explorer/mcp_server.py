@@ -1,9 +1,10 @@
 """MCP server wrapping the cc_explorer library.
 
 Exposes Claude Code chat log exploration as MCP tools via FastMCP.
-Most tools are read-only and return typed Pydantic response models; the two
-conversion tools (convert_session, delete_conversions) write/delete transcript
-copies. FastMCP auto-generates output schemas from return type annotations.
+Most tools are read-only and return typed Pydantic response models; the
+conversion tools (convert_session, rewind_transcript, delete_conversions)
+write/mutate/delete transcript copies. FastMCP auto-generates output schemas from
+return type annotations.
 """
 
 import os
@@ -24,6 +25,7 @@ from .conversion import (
     existing_custom_titles,
     growth_exceeded,
     is_conversion_artifact,
+    rewind_transcript as rewind_transcript_file,
 )
 from .formatting import matches_id
 from .models import parse_hide
@@ -44,6 +46,7 @@ from .responses import (
     ProjectListResponse,
     ReadTurnResponse,
     RefusedDeletion,
+    RewindTranscriptResponse,
     SearchProjectsResponse,
     SessionAgentsResponse,
     SessionListResponse,
@@ -123,6 +126,16 @@ _CONVERT_ANNOTATIONS = {
 _DELETE_ANNOTATIONS = {
     "readOnlyHint": False,
     "destructiveHint": True,
+    "openWorldHint": False,
+}
+
+# rewind_transcript truncates a conversion artifact IN PLACE — the discarded tail
+# is gone, so it is destructive (and idempotent: re-running the same rewind on an
+# already-rewound file is a no-op once the tail is shorter than the cut point).
+_REWIND_ANNOTATIONS = {
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "idempotentHint": True,
     "openWorldHint": False,
 }
 
@@ -1326,6 +1339,75 @@ def _dest_project_dir(project_path: str) -> Path:
     from ._claude_paths import _canonicalize_path, _get_project_dir
 
     return _get_project_dir(_canonicalize_path(project_path))
+
+
+def _resolve_artifact_for_rewind(
+    src_id: str, src_project: str | None
+) -> tuple[str, str, Path]:
+    """Resolve a session-or-agent id to (kind, full_id, path) for rewind, or raise.
+
+    Accepts EITHER a session id or an agent id (you rewind whatever a convert
+    produced), scoped to `src_project` when given. Delegates to the shared
+    artifact resolver (the same one delete_conversions uses), which enforces the
+    _MIN_ID_LEN floor — an in-place mutation must not fire on a sloppy prefix —
+    and raises on an ambiguous prefix with the candidates listed.
+    """
+    proj_sel = [src_project] if src_project else None
+    sessions, _ = _load_all_sessions(proj_sel)
+    _, kind, full_id, path = _resolve_artifacts_corpus([src_id], sessions)[0]
+    if not kind or path is None:
+        raise ToolError(f"No session or subagent matching: {src_id}")
+    return (kind, full_id, path)
+
+
+@mcp.tool(annotations=_REWIND_ANNOTATIONS)
+def rewind_transcript(
+    src_id: Annotated[
+        str,
+        Field(description="The conversion artifact to rewind — a session id or an agent id (prefixes accepted, but must resolve uniquely and be at least 6 chars). Only artifacts created by convert_session can be rewound."),
+    ],
+    turn: Annotated[
+        str,
+        Field(description="Turn UUID (or prefix) to cut at — a user/assistant line in this transcript. Read it off browse_session / read_turn / grep_session run against the artifact."),
+    ],
+    cut: Annotated[
+        Literal["after", "before"],
+        Field(description="'after' (default): keep through the named turn — it becomes the new tail. 'before': discard the named turn and everything after it — use this to rewind to just before a user prompt so you can re-drive from there."),
+    ] = "after",
+    src_project: Annotated[
+        str | None,
+        Field(description="Optional single project (path or bare name) to scope source resolution. Default: search all projects."),
+    ] = None,
+) -> RewindTranscriptResponse:
+    """Truncate a converted transcript IN PLACE at a chosen turn, discarding everything after — so the artifact resumes from that earlier point.
+
+    For rewinding a converted session or subagent back to a known turn to replay it: re-run a skill from a fixed starting state, regenerate a different user prompt, or retry from before a branch you didn't like. The cut is in place and destructive — the discarded tail is gone (this is not a copy; use convert_session if you want to preserve the original).
+
+    ONLY conversion artifacts are eligible: the file must carry an x-converter-provenance line (the same "this is ours to mutate" trust surface delete_conversions keys off). A real session or normally-dispatched subagent is refused untouched — we never truncate a transcript we didn't write. Unlike delete_conversions, a converted SESSION is eligible (it is yours to replay), and there is no growth guard: rewinding a resumed/grown artifact is the whole point.
+
+    cut='after' keeps through the named turn; cut='before' drops the named turn onward (rewind to just before a user prompt to regenerate it). After the cut the tail is trimmed to a resumable boundary — trailing noise and any dangling assistant tool_use (which would otherwise break resume) are dropped and reported. The response leads with the artifact id and the exact `invocation` to resume it (SendMessage for a subagent, `claude -r` for a session); `lines_at_creation` is re-stamped so the artifact stays deletable by delete_conversions."""
+    _validate_turn_id(turn)
+    kind, full_id, path = _resolve_artifact_for_rewind(src_id, src_project)
+
+    if not is_conversion_artifact(path):
+        raise ToolError(
+            f"{kind} {full_id[:12]} is not a conversion artifact (no "
+            f"x-converter-provenance line) — refusing to rewind a transcript we "
+            f"didn't write. Convert it first with convert_session if you want a "
+            f"mutable copy."
+        )
+
+    try:
+        result = rewind_transcript_file(
+            transcript_path=path,
+            artifact_id=full_id,
+            kind=kind,
+            turn=turn,
+            cut=cut,
+        )
+    except ValueError as e:
+        raise ToolError(str(e))
+    return RewindTranscriptResponse.from_result(result)
 
 
 # Refusal reasons (kept as constants so the sweep and explicit-id paths share
