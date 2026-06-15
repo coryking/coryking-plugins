@@ -60,16 +60,19 @@ Use when tracing what an agent did, correlating outputs with sessions, or buildi
 
 ## The conversion tools
 
-Tools that create new transcripts — the one mutating axis in the toolset. Both only ever copy; no existing session or subagent is modified.
+Tools that create, mutate, or remove transcripts — the one mutating axis in the toolset. `convert_session` only ever copies; `rewind_transcript` and `delete_conversions` mutate or delete, but **only conversion artifacts** (files carrying the `x-converter-provenance` line) — a real session or dispatched subagent is never touched.
 
 > **Prerequisite for `session_to_subagent` + `SendMessage`:** resuming a converted subagent uses the agent-teams runtime, which exists only when the calling session was started with `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `settings.json` (env block) followed by a Claude Code restart. Without it the conversion still writes a correct file, but nothing can resume it — `SendMessage` returns *"no transcript to resume"*. Quick check: if `SendMessage` is not in your toolset, agent-teams is off — don't convert; use `grep_session`/`read_turn` on the source instead. (`subagent_to_session` → `claude -r` needs no env var.)
 
 - **`convert_session`** — copy a session into a subagent under the calling session (direction `session_to_subagent`), or a subagent out to a top-level session (direction `subagent_to_session`).
+- **`rewind_transcript`** — truncate a conversion artifact (session or subagent) **in place** at a chosen turn, discarding everything after, so it resumes from that earlier point. Eligible only for conversion artifacts — a real session or dispatched subagent is refused untouched. Destructive (the cut tail is gone); use `convert_session` first if you want to keep the original.
 - **`delete_conversions`** — remove subagent artifacts the converter created. Refuses everything else, including converted sessions. Permanent — no undo.
 
 Convert a session to a subagent when the question needs the session itself, not excerpts from it: the reasoning behind a decision, a synthesis of the whole arc, a judgment call on evidence it hasn't seen, or a domain expert whose built-up context would be expensive to rebuild. Resume the new agent with `SendMessage(to: <created_id>)`; its reply is its final message; message it again to follow up. For facts, quotes, locations, and tool-call ground truth, stay on the read tools.
 
 Convert a subagent to a session when the user wants to read or continue an agent's run themselves — hand them the `claude -r` command from the response.
+
+Rewind a conversion artifact when you want to replay it from a fixed point — re-run a skill from a known starting state, or regenerate a different user prompt. Read the artifact (`browse_session`/`read_turn`) to find the turn uuid, then `rewind_transcript(src_id, turn, cut)`. `cut="after"` (default) keeps the named turn as the new tail; `cut="before"` drops the named turn onward — use it to rewind to just *before* a user prompt so you can re-drive from there. The tail is auto-trimmed to a resumable boundary (dangling `tool_use`, trailing noise), and `lines_at_creation` is re-stamped so the artifact stays deletable. Resume the rewound artifact the same way you'd resume the original (`SendMessage` for a subagent, `claude -r` for a session).
 
 ### Composing the first message to a converted conversation
 
