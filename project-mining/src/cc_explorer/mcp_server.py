@@ -434,6 +434,7 @@ class _ArtifactSession:
     session_id: PrefixId
     path: Path
     project_path: str
+    worktree: str | None = None
 
 
 def _sessions_by_filename(projects: list[str]) -> list[_ArtifactSession]:
@@ -452,7 +453,12 @@ def _sessions_by_filename(projects: list[str]) -> list[_ArtifactSession]:
                 continue
             seen.add(sid.full)
             out.append(
-                _ArtifactSession(session_id=sid, path=ref.path, project_path=proj)
+                _ArtifactSession(
+                    session_id=sid,
+                    path=ref.path,
+                    project_path=proj,
+                    worktree=ref.worktree,
+                )
             )
     return out
 
@@ -468,20 +474,22 @@ def _resolve_browsable_artifact(session: str, projects: list[str] | None) -> Ses
     `_sessions_by_filename` + `_resolve_artifacts_corpus`, NO transcript parse),
     which resolves the id to a subagent transcript path. We wrap that path in a
     minimal SessionInfo — `browse_session_turns` reads only `.path`, and the
-    response surfaces `.session_id` / `.project_path` — so the agent transcript
-    browses exactly like a session. Returns None when the id resolves to no
-    subagent (the caller keeps the original "no session matching" error).
+    response surfaces `.session_id` / `.project_path` / `.worktree` — so the agent
+    transcript browses exactly like a session. Returns None when the id resolves to
+    no subagent (the caller keeps the original "no session matching" error).
     """
     narrowed = _narrow_projects_for_artifacts([session], projects)
     sessions = _sessions_by_filename(narrowed)
     _, kind, full_id, path = _resolve_artifacts_corpus([session], sessions)[0]
     if kind != "subagent" or path is None:
         return None
-    # The artifact's holding project: the parent session whose dir is an ancestor
-    # of the agent transcript path (agents live under <session>/subagents/...).
-    project_path = next(
-        (s.project_path for s in sessions if s.path.parent in path.parents),
-        narrowed[0] if narrowed else None,
+    # The PARENT session holding this agent: its transcript dir (`<id>.jsonl`
+    # without the suffix → `<encoded>/<id>`) is an ancestor of the agent file
+    # (`<encoded>/<id>/subagents/agent-*.jsonl`). Match on that session dir, not
+    # `s.path.parent` (the encoded PROJECT dir), which every session in the project
+    # shares — so we surface the holding session's own project AND worktree.
+    holding = next(
+        (s for s in sessions if s.path.with_suffix("") in path.parents), None
     )
     return SessionInfo(
         session_id=PrefixId(full_id),
@@ -489,7 +497,8 @@ def _resolve_browsable_artifact(session: str, projects: list[str] | None) -> Ses
         title=f"subagent {full_id[:8]}",
         first_timestamp=None,
         message_count=0,
-        project_path=project_path,
+        project_path=holding.project_path if holding else (narrowed[0] if narrowed else None),
+        worktree=holding.worktree if holding else None,
     )
 
 
