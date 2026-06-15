@@ -1151,3 +1151,302 @@ def test_nested_agents_excludes_conversion_artifacts(fake_claude):
     )
     # Conversion artifact is not counted as a nested agent.
     assert resp.nested_agents is None or resp.nested_agents == 0
+
+
+# =============================================================================
+# rewind_transcript
+# =============================================================================
+#
+# Rewind truncates a conversion artifact IN PLACE at a chosen turn. Turn ids
+# passed to the tool go through _validate_turn_id, so rewind fixtures use
+# all-hex uuids (the synthesized session builders above use 'u'/'a'-prefixed
+# ids that are fine on the wire but not valid turn args).
+
+# Hex body uuids (valid as `turn` args).
+RW_T1 = "aaaa0001-0000-0000-0000-000000000001"  # user
+RW_A1 = "aaaa0001-0000-0000-0000-000000000002"  # assistant
+RW_T2 = "aaaa0001-0000-0000-0000-000000000003"  # user
+RW_A2 = "aaaa0001-0000-0000-0000-000000000004"  # assistant
+
+
+def _rw_body(agent_id: str) -> list[dict]:
+    """A 4-turn subagent body (user/assistant x2) with hex uuids."""
+    return [
+        _user(RW_T1, "ONE", agentId=agent_id, isSidechain=True),
+        _assistant(RW_A1, "TWO", parent=RW_T1, agentId=agent_id, isSidechain=True),
+        _user(RW_T2, "THREE", parent=RW_A1, agentId=agent_id, isSidechain=True),
+        _assistant(RW_A2, "FOUR", parent=RW_T2, agentId=agent_id, isSidechain=True),
+    ]
+
+
+def _assistant_tool_use(uuid: str, tool: str, *, parent=None, agent_id=None) -> dict:
+    line = _assistant(uuid, "", parent=parent)
+    line["message"]["content"] = [{"type": "tool_use", "id": "toolu_x", "name": tool, "input": {}}]
+    if agent_id:
+        line["agentId"] = agent_id
+        line["isSidechain"] = True
+    return line
+
+
+def _user_tool_result(uuid: str, *, parent=None, agent_id=None) -> dict:
+    line = _user(uuid, "", parent=parent)
+    line["message"]["content"] = [{"type": "tool_result", "tool_use_id": "toolu_x", "content": "ok"}]
+    if agent_id:
+        line["agentId"] = agent_id
+        line["isSidechain"] = True
+    return line
+
+
+RW_AGENT = "a" + "7" * 16
+
+
+def _lay_rw_subagent(fake_claude, agent_id=RW_AGENT, *, body=None, conv=True) -> Path:
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    return _lay_down_subagent(
+        fake_claude, agent_id, is_conversion_artifact=conv,
+        lines=body if body is not None else _rw_body(agent_id),
+    )
+
+
+def test_rewind_subagent_cut_after(fake_claude):
+    path = _lay_rw_subagent(fake_claude)
+
+    resp = srv.rewind_transcript(src_id=RW_AGENT, turn=RW_A1, cut="after")
+
+    assert resp.operation == "rewind"
+    assert resp.kind == "subagent"
+    assert resp.artifact_id == RW_AGENT
+    assert resp.invocation == f'SendMessage(to: "{RW_AGENT}")'
+    assert resp.cut == "after"
+    assert resp.target_turn == RW_A1
+    assert resp.turns_before == 4
+    assert resp.turns_after == 2  # ONE, TWO
+    assert resp.removed_after_cut == 2
+    assert resp.tail_state == "clean"  # ends on assistant TWO
+
+    body = _convo_only(_read_jsonl(path))
+    assert _convo_texts(body) == ["ONE", "TWO"]
+
+
+def test_rewind_subagent_cut_before(fake_claude):
+    """cut='before' a user prompt → the prompt and everything after is gone."""
+    path = _lay_rw_subagent(fake_claude)
+
+    resp = srv.rewind_transcript(src_id=RW_AGENT, turn=RW_T2, cut="before")
+
+    assert resp.cut == "before"
+    assert resp.turns_after == 2  # ONE, TWO — the THREE prompt is dropped
+    assert resp.tail_state == "clean"
+    body = _convo_only(_read_jsonl(path))
+    assert _convo_texts(body) == ["ONE", "TWO"]
+
+
+def test_rewind_restamps_lines_at_creation_and_marks_rewound(fake_claude):
+    path = _lay_rw_subagent(fake_claude)
+    srv.rewind_transcript(src_id=RW_AGENT, turn=RW_A1, cut="after")
+
+    lines = _read_jsonl(path)
+    prov = _provenance_lines(lines)[0]["x_converter"]
+    # File is provenance line + 2 kept body lines == 3.
+    assert prov["lines_at_creation"] == len(lines) == 3
+    assert prov["rewound_to"] == RW_A1
+    assert "rewound_at" in prov
+
+
+def test_rewind_keeps_artifact_deletable(fake_claude):
+    """After a rewind the re-stamp keeps the growth guard satisfied → still deletable."""
+    from cc_explorer.conversion import growth_exceeded, is_conversion_artifact as _is_conv
+
+    path = _lay_rw_subagent(fake_claude)
+    srv.rewind_transcript(src_id=RW_AGENT, turn=RW_A1, cut="after")
+    assert _is_conv(path)
+    assert not growth_exceeded(path)
+
+    resp = srv.delete_conversions(ids=[RW_AGENT])
+    assert len(resp.deleted) == 1 and not resp.refused
+    assert not path.exists()
+
+
+def test_rewind_trims_dangling_tool_use(fake_claude):
+    """Cutting at an assistant tool_use turn trims it off so resume stays valid."""
+    body = [
+        _user(RW_T1, "ONE", agentId=RW_AGENT, isSidechain=True),
+        _assistant_tool_use(RW_A1, "Bash", parent=RW_T1, agent_id=RW_AGENT),
+        _user_tool_result(RW_T2, parent=RW_A1, agent_id=RW_AGENT),
+        _assistant(RW_A2, "DONE", parent=RW_T2, agentId=RW_AGENT, isSidechain=True),
+    ]
+    path = _lay_rw_subagent(fake_claude, body=body)
+
+    resp = srv.rewind_transcript(src_id=RW_AGENT, turn=RW_A1, cut="after")
+    # The cut keeps ONE + the tool_use assistant; the dangling assistant is trimmed.
+    assert resp.trimmed_dangling_tool_use == 1
+    assert resp.turns_after == 1  # just ONE
+    assert resp.tail_state == "pending_user_input"
+    body_out = _convo_only(_read_jsonl(path))
+    assert _convo_texts(body_out) == ["ONE"]
+
+
+def test_rewind_trims_trailing_noise(fake_claude):
+    body = _rw_body(RW_AGENT) + [
+        _user("aaaa0001-0000-0000-0000-000000000099", "[Request interrupted by user]",
+              parent=RW_A2, agentId=RW_AGENT, isSidechain=True),
+    ]
+    path = _lay_rw_subagent(fake_claude, body=body)
+    # Cut after the interrupt line → it should be trimmed as trailing noise.
+    resp = srv.rewind_transcript(src_id=RW_AGENT, turn="aaaa0001-0000-0000-0000-000000000099", cut="after")
+    assert resp.trimmed_trailing == 1
+    assert resp.turns_after == 4
+    assert resp.tail_state == "clean"
+
+
+def test_rewind_refuses_non_conversion_subagent(fake_claude):
+    """An untagged subagent (no provenance line) is refused untouched."""
+    path = _lay_rw_subagent(fake_claude, conv=False)
+    before = path.read_text()
+
+    with pytest.raises(ToolError) as exc:
+        srv.rewind_transcript(src_id=RW_AGENT, turn=RW_A1, cut="after")
+    assert "not a conversion artifact" in str(exc.value)
+    assert path.read_text() == before  # untouched
+
+
+def test_rewind_refuses_real_session(fake_claude):
+    """A real, untagged session is refused — we never truncate what we didn't write."""
+    fake_claude.write_session(SID_A, _simple_session_lines())
+    sess_path = fake_claude.project_dir(PROJECT) / f"{SID_A}.jsonl"
+    before = sess_path.read_text()
+
+    with pytest.raises(ToolError) as exc:
+        srv.rewind_transcript(src_id=SID_A, turn="a1111111-0000-0000-0000-000000000002", cut="after")
+    assert "not a conversion artifact" in str(exc.value)
+    assert sess_path.read_text() == before
+
+
+def test_rewind_allows_converted_session(fake_claude):
+    """Unlike delete_conversions, a CONVERTED session is eligible for rewind."""
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    _lay_down_subagent(fake_claude, AGENT_ID, is_conversion_artifact=True, lines=_rw_body(AGENT_ID))
+    r = srv.convert_session(direction="subagent_to_session", src_id=AGENT_ID, src_project=PROJECT)
+    out_path = fake_claude.project_dir(PROJECT) / f"{r.created_id}.jsonl"
+    from cc_explorer.conversion import is_conversion_artifact as _is_conv
+    assert _is_conv(out_path)
+
+    resp = srv.rewind_transcript(src_id=r.created_id, turn=RW_A1, cut="after")
+    assert resp.kind == "session"
+    assert resp.invocation == f"claude -r {r.created_id}"
+    assert resp.turns_after == 2
+    # The session header (mode/permission-mode/custom-title) survives the rewrite.
+    lines = _read_jsonl(out_path)
+    assert lines[0]["type"] == "mode"
+    assert any(l.get("type") == "custom-title" for l in lines[:4])
+    assert _provenance_lines(lines)  # provenance preserved
+
+
+def test_rewind_turn_not_found(fake_claude):
+    _lay_rw_subagent(fake_claude)
+    with pytest.raises(ToolError) as exc:
+        srv.rewind_transcript(src_id=RW_AGENT, turn="deadbeef-0000-0000-0000-000000000000", cut="after")
+    assert "not found" in str(exc.value)
+
+
+def test_rewind_cut_before_first_turn_refused(fake_claude):
+    """cut='before' the first turn would empty the transcript → refused."""
+    path = _lay_rw_subagent(fake_claude)
+    before = path.read_text()
+    with pytest.raises(ToolError) as exc:
+        srv.rewind_transcript(src_id=RW_AGENT, turn=RW_T1, cut="before")
+    assert "discard the entire conversation" in str(exc.value)
+    assert path.read_text() == before  # untouched on refusal
+
+
+def test_rewind_short_id_rejected(fake_claude):
+    _lay_rw_subagent(fake_claude)
+    with pytest.raises(ToolError) as exc:
+        srv.rewind_transcript(src_id="ab", turn=RW_A1, cut="after")
+    assert "too short" in str(exc.value)
+
+
+def test_rewind_relinearizes_kept_body(fake_claude):
+    path = _lay_rw_subagent(fake_claude)
+    srv.rewind_transcript(src_id=RW_AGENT, turn=RW_T2, cut="after")
+    body = _convo_only(_read_jsonl(path))
+    assert body[0]["parentUuid"] is None
+    for prev, cur in zip(body, body[1:]):
+        assert cur["parentUuid"] == prev["uuid"]
+
+
+def test_rewind_follows_active_thread_not_file_order(fake_claude):
+    """A resumed artifact with an abandoned edit-branch sibling: rewind keeps the
+    target's ancestor lineage, never file-order siblings."""
+    # ONE -> TWO(assistant). Then the user 'edited' TWO's follow-up: an abandoned
+    # branch THREE-OLD and the live branch THREE-NEW, both children of TWO. We
+    # rewind to FOUR, which descends from THREE-NEW. THREE-OLD must NOT appear.
+    THREE_OLD = "aaaa0001-0000-0000-0000-0000000000a1"
+    THREE_NEW = "aaaa0001-0000-0000-0000-0000000000a2"
+    FOUR = "aaaa0001-0000-0000-0000-0000000000a3"
+    body = [
+        _user(RW_T1, "ONE", agentId=RW_AGENT, isSidechain=True),
+        _assistant(RW_A1, "TWO", parent=RW_T1, agentId=RW_AGENT, isSidechain=True),
+        _user(THREE_OLD, "THREE-OLD", parent=RW_A1, agentId=RW_AGENT, isSidechain=True),
+        _user(THREE_NEW, "THREE-NEW", parent=RW_A1, agentId=RW_AGENT, isSidechain=True),
+        _assistant(FOUR, "FOUR", parent=THREE_NEW, agentId=RW_AGENT, isSidechain=True),
+    ]
+    path = _lay_rw_subagent(fake_claude, body=body)
+
+    resp = srv.rewind_transcript(src_id=RW_AGENT, turn=FOUR, cut="after")
+    texts = _convo_texts(_convo_only(_read_jsonl(path)))
+    assert texts == ["ONE", "TWO", "THREE-NEW", "FOUR"]  # THREE-OLD dropped
+    assert "THREE-OLD" not in texts
+    assert resp.turns_after == 4
+    # The 5 body turns minus the 4 kept = 1 removed (the abandoned sibling).
+    assert resp.removed_after_cut == 1
+
+
+def test_rewind_duplicate_target_uuid_refused(fake_claude):
+    """If the target uuid repeats in the transcript, rewind refuses rather than
+    silently truncating at the first occurrence."""
+    dup = RW_A1
+    body = [
+        _user(RW_T1, "ONE", agentId=RW_AGENT, isSidechain=True),
+        _assistant(dup, "TWO", parent=RW_T1, agentId=RW_AGENT, isSidechain=True),
+        _user(RW_T2, "THREE", parent=dup, agentId=RW_AGENT, isSidechain=True),
+        _assistant(dup, "FOUR", parent=RW_T2, agentId=RW_AGENT, isSidechain=True),  # same uuid
+    ]
+    path = _lay_rw_subagent(fake_claude, body=body)
+    before = path.read_text()
+    with pytest.raises(ToolError) as exc:
+        srv.rewind_transcript(src_id=RW_AGENT, turn=dup, cut="after")
+    assert "more than once" in str(exc.value)
+    assert path.read_text() == before  # untouched
+
+
+def test_rewind_atomic_no_tempfile_left_behind(fake_claude):
+    """A successful rewind leaves no .rewind-tmp sidecar."""
+    path = _lay_rw_subagent(fake_claude)
+    srv.rewind_transcript(src_id=RW_AGENT, turn=RW_A1, cut="after")
+    tmp = path.with_name(path.name + ".rewind-tmp")
+    assert not tmp.exists()
+    assert path.exists()
+
+
+def test_rewind_atomic_write_preserves_original_on_failure(fake_claude, monkeypatch):
+    """If the write fails mid-way, the original transcript is left intact (the
+    atomic temp+replace guarantees no half-written file)."""
+    import cc_explorer.conversion as conv
+
+    path = _lay_rw_subagent(fake_claude)
+    before = path.read_text()
+
+    real_replace = conv.os.replace
+
+    def boom(src, dst):
+        raise OSError("simulated disk failure")
+
+    monkeypatch.setattr(conv.os, "replace", boom)
+    with pytest.raises(OSError):
+        srv.rewind_transcript(src_id=RW_AGENT, turn=RW_A1, cut="after")
+
+    # Original untouched, temp cleaned up.
+    assert path.read_text() == before
+    assert not path.with_name(path.name + ".rewind-tmp").exists()
+    monkeypatch.setattr(conv.os, "replace", real_replace)
