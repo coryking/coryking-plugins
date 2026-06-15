@@ -24,7 +24,9 @@ Coverage:
     list_session_agents (labeled)
 """
 
+import asyncio
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -106,15 +108,22 @@ def _convo_only(lines: list[dict]) -> list[dict]:
     return [l for l in lines if l.get("type") in ("user", "assistant")]
 
 
-def _fake_provenance_line(agent_id: str, *, lines_at_creation: int, kind: str = "session") -> dict:
-    """A shape-valid x-converter-provenance line for synthesizing tagged artifacts."""
+def _fake_provenance_line(
+    agent_id: str, *, lines_at_creation: int, kind: str = "session", converted_at: str = TS
+) -> dict:
+    """A shape-valid x-converter-provenance line for synthesizing tagged artifacts.
+
+    `converted_at` defaults to the fixed TS (well in the past relative to test-run
+    `now`, so the reaper sees these as cold); pass a fresh ISO timestamp to
+    synthesize a 'young' artifact the reaper must spare.
+    """
     return {
         "type": PROVENANCE_TYPE,
         "x_converter": {
             "tool": "convert_session",
             "v": 1,
             "from": {"kind": kind, "id": "x", "project": PROJECT},
-            "converted_at": TS,
+            "converted_at": converted_at,
             "lines_at_creation": lines_at_creation,
         },
         "sessionId": SID_PARENT,
@@ -382,6 +391,7 @@ def _lay_down_subagent(
     is_conversion_artifact=False,
     lines=None,
     extra_lines=0,
+    converted_at: str = TS,
 ) -> Path:
     """Write a subagent transcript (+meta) under SID_PARENT's subagents dir.
 
@@ -402,7 +412,7 @@ def _lay_down_subagent(
     if is_conversion_artifact:
         # lines_at_creation = provenance line + body (what we write now).
         created = 1 + len(body)
-        prov = _fake_provenance_line(agent_id, lines_at_creation=created)
+        prov = _fake_provenance_line(agent_id, lines_at_creation=created, converted_at=converted_at)
         out_lines = [prov] + body
     else:
         out_lines = list(body)
@@ -1450,3 +1460,125 @@ def test_rewind_atomic_write_preserves_original_on_failure(fake_claude, monkeypa
     assert path.read_text() == before
     assert not path.with_name(path.name + ".rewind-tmp").exists()
     monkeypatch.setattr(conv.os, "replace", real_replace)
+
+
+# =============================================================================
+# Conversion reaper — lifespan-driven GC of pristine, cold artifacts
+# =============================================================================
+#
+# The reaper deletes ONLY pristine (never-resumed) conversion subagents older
+# than the age threshold. Two invariants protect everything else: the growth
+# guard (resumed forks carry unique history) and the age gate (young forks may
+# still be resumed). Converted SESSIONS are structurally out of the glob.
+
+
+def _fresh_iso() -> str:
+    """An ISO timestamp at ~now — well within the reaper's age threshold."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def test_reaper_deletes_pristine_cold(fake_claude):
+    """A pristine conversion artifact older than the threshold is reaped (+meta)."""
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    cold = "a" + "1" * 16
+    path = _lay_down_subagent(fake_claude, cold, is_conversion_artifact=True)  # converted_at=TS, months old
+    assert path.exists()
+
+    reaped = srv._reap_stale_conversions(srv._reap_age_seconds())
+
+    assert path in reaped
+    assert not path.exists()
+    assert not path.with_suffix(".meta.json").exists()
+
+
+def test_reaper_spares_grown(fake_claude):
+    """A grown (resumed) conversion artifact is never reaped, however old."""
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    grown = "a" + "2" * 16
+    path = _lay_down_subagent(fake_claude, grown, is_conversion_artifact=True, extra_lines=3)
+    assert path.exists()
+
+    reaped = srv._reap_stale_conversions(srv._reap_age_seconds())
+
+    assert path not in reaped
+    assert path.exists()  # unique resumed history — protected by the growth guard
+
+
+def test_reaper_spares_young_pristine(fake_claude):
+    """A pristine artifact younger than the threshold may still be resumed — spared."""
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    young = "a" + "3" * 16
+    path = _lay_down_subagent(
+        fake_claude, young, is_conversion_artifact=True, converted_at=_fresh_iso()
+    )
+    assert path.exists()
+
+    reaped = srv._reap_stale_conversions(srv._reap_age_seconds())
+
+    assert path not in reaped
+    assert path.exists()
+
+
+def test_reaper_spares_non_conversion_subagent(fake_claude):
+    """A real dispatched subagent (no provenance line) is never touched."""
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    real = "a" + "4" * 16
+    path = _lay_down_subagent(fake_claude, real, is_conversion_artifact=False)
+    assert path.exists()
+
+    srv._reap_stale_conversions(srv._reap_age_seconds())
+
+    assert path.exists()
+
+
+def test_reaper_spares_converted_session(fake_claude):
+    """Session-shaped conversion artifacts are structurally outside the reaper's glob."""
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    _lay_down_subagent(fake_claude, AGENT_ID, is_conversion_artifact=True)
+    r = srv.convert_session(direction="subagent_to_session", src_id=AGENT_ID, src_project=PROJECT)
+    session_path = fake_claude.project_dir(PROJECT) / f"{r.created_id}.jsonl"
+    assert session_path.exists()
+
+    srv._reap_stale_conversions(srv._reap_age_seconds())
+
+    assert session_path.exists()  # converted sessions are for humans to manage
+
+
+def test_reaper_disabled_by_env(fake_claude, monkeypatch):
+    """CC_EXPLORER_REAP=0 disables all reaping."""
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    cold = "a" + "5" * 16
+    path = _lay_down_subagent(fake_claude, cold, is_conversion_artifact=True)
+    monkeypatch.setenv("CC_EXPLORER_REAP", "0")
+
+    srv._run_reaper("startup")  # honors the env switch
+
+    assert path.exists()
+
+
+def test_reaper_age_threshold_env_override(fake_claude, monkeypatch):
+    """A huge CC_EXPLORER_REAP_AGE_HOURS spares an otherwise-cold artifact."""
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    cold = "a" + "6" * 16
+    path = _lay_down_subagent(fake_claude, cold, is_conversion_artifact=True)
+    monkeypatch.setenv("CC_EXPLORER_REAP_AGE_HOURS", "1000000")
+
+    srv._run_reaper("startup")
+
+    assert path.exists()  # threshold not met
+
+
+def test_reaper_lifespan_runs_on_startup(fake_claude):
+    """The wired FastMCP lifespan actually reaps on entry (the startup backstop)."""
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    cold = "a" + "7" * 16
+    path = _lay_down_subagent(fake_claude, cold, is_conversion_artifact=True)
+    assert path.exists()
+
+    async def _drive():
+        async with srv._conversion_reaper_lifespan(srv.mcp):
+            # Startup swept it before the server began serving.
+            assert not path.exists()
+
+    asyncio.run(_drive())
+    assert not path.exists()
