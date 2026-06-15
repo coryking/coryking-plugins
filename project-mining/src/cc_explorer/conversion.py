@@ -929,9 +929,12 @@ def rewind_transcript(
     The caller MUST have verified the file carries a provenance line before
     calling — this function re-reads it only to re-stamp `lines_at_creation`.
 
-    Raises ValueError on: a turn that matches no body line, an ambiguous prefix
-    (more than one distinct uuid), a target uuid that repeats in the transcript, a
-    missing provenance line, or a cut/trim that would leave the transcript empty.
+    Raises ValueError on: a turn that matches no body line (with a distinct
+    "already rewound" message when the requested turn is the one a PRIOR rewind
+    already cut — recorded in the provenance `rewound_to`/`rewound_at`), an
+    ambiguous prefix (more than one distinct uuid), a target uuid that repeats in
+    the transcript, a missing provenance line, or a cut/trim that would leave the
+    transcript empty.
     """
     if cut not in ("after", "before"):
         raise ValueError(f"cut must be 'after' or 'before', got {cut!r}")
@@ -964,6 +967,29 @@ def rewind_transcript(
         d for d in body if (u := d.get("uuid")) and (u == turn or u.startswith(turn))
     ]
     if not matched:
+        # The turn matches nothing — but distinguish the common "already rewound"
+        # case from a genuinely unknown turn. A prior cut='before' rewind CONSUMES
+        # its target (the named turn is the first line dropped), so retrying the
+        # SAME rewind now finds no matching line and would otherwise read as a
+        # cryptic "not found / tool broke". The provenance sentinel records that
+        # cut: `rewound_to` is the turn a prior rewind already ate, `rewound_at`
+        # when. When the requested turn IS that already-consumed turn (equal or a
+        # prefix of it), say so plainly — the cut already happened, the artifact is
+        # ready to resume from its current tail, and there is nothing to do.
+        prov = read_provenance(transcript_path)
+        rewound_to = prov.get("rewound_to") if isinstance(prov, dict) else None
+        if isinstance(rewound_to, str) and (
+            rewound_to == turn or rewound_to.startswith(turn)
+        ):
+            rewound_at = prov.get("rewound_at") if isinstance(prov, dict) else None
+            when = f" at {rewound_at}" if isinstance(rewound_at, str) else ""
+            raise ValueError(
+                f"turn {turn!r} is gone — this artifact was already rewound to "
+                f"{rewound_to}{when}, which CUT that turn (and everything after). "
+                "The rewind already succeeded; the artifact is ready to resume from "
+                "its current tail. Nothing to do — re-running the same rewind is a "
+                "no-op."
+            )
         raise ValueError(f"turn {turn!r} not found in this transcript")
     distinct = {d["uuid"] for d in matched}
     if len(distinct) > 1:
