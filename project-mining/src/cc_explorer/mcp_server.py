@@ -7,9 +7,11 @@ write/mutate/delete transcript copies. FastMCP auto-generates output schemas fro
 return type annotations.
 """
 
+import asyncio
 import os
 import re
 import sys
+import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -160,12 +162,20 @@ def _reap_enabled() -> bool:
 
 
 def _reap_age_seconds() -> float:
-    """Reap-eligibility age in seconds (CC_EXPLORER_REAP_AGE_HOURS, default 24h)."""
+    """Reap-eligibility age in seconds (CC_EXPLORER_REAP_AGE_HOURS, default 24h).
+
+    Only a strictly positive override is honored. Zero or negative would make
+    *every* pristine fork eligible the instant it's written — a fork you convert
+    now and mean to resume next session would be reaped before you got back to
+    it — so a non-positive (or unparseable) value falls back to the default
+    rather than silently arming an immediate sweep. To disable reaping entirely,
+    set CC_EXPLORER_REAP=0; to sweep aggressively, use a small positive value.
+    """
     raw = os.environ.get("CC_EXPLORER_REAP_AGE_HOURS")
     if raw:
         try:
             hours = float(raw)
-            if hours >= 0:
+            if hours > 0:
                 return hours * 3600.0
         except ValueError:
             pass
@@ -208,7 +218,7 @@ def _reap_stale_conversions(age_seconds: float) -> list[Path]:
             sentinel = read_provenance(path)
             if sentinel is None:
                 continue  # not a conversion artifact — a real dispatched subagent
-            if growth_exceeded(path):
+            if growth_exceeded(path, sentinel):
                 continue  # resumed/built-upon — unique history, hands off
             age = conversion_age_seconds(path, sentinel)
             if age is None or age <= age_seconds:
@@ -226,8 +236,11 @@ def _run_reaper(phase: str) -> None:
         return
     try:
         reaped = _reap_stale_conversions(_reap_age_seconds())
-    except Exception as e:  # never let cleanup break the server lifecycle
-        _reaper_log(f"{phase} sweep failed: {e!r}")
+    except Exception:  # never let cleanup break the server lifecycle
+        # Log the full traceback (not just repr) so a reaper bug — which would
+        # otherwise silently turn the sweep into a no-op for the whole process —
+        # is diagnosable from the MCP server's stderr log.
+        _reaper_log(f"{phase} sweep failed:\n{traceback.format_exc()}")
         return
     if reaped:
         _reaper_log(f"{phase}: reaped {len(reaped)} stale conversion artifact(s)")
@@ -239,12 +252,14 @@ async def _conversion_reaper_lifespan(server: "FastMCP"):
 
     Startup runs the guaranteed backstop sweep; shutdown (in `finally`, so it
     survives cooperative cancellation) adds timeliness for the just-ended session.
+    The sweep is blocking filesystem I/O, so it runs in a worker thread to keep
+    the event loop free while the server comes up / winds down.
     """
-    _run_reaper("startup")
+    await asyncio.to_thread(_run_reaper, "startup")
     try:
         yield {}
     finally:
-        _run_reaper("shutdown")
+        await asyncio.to_thread(_run_reaper, "shutdown")
 
 
 mcp = FastMCP(

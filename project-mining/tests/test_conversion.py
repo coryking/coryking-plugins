@@ -1582,3 +1582,22 @@ def test_reaper_lifespan_runs_on_startup(fake_claude):
 
     asyncio.run(_drive())
     assert not path.exists()
+
+
+def test_reaper_age_zero_or_negative_falls_back_to_default(fake_claude, monkeypatch):
+    """CC_EXPLORER_REAP_AGE_HOURS<=0 must NOT arm an immediate sweep of fresh forks."""
+    monkeypatch.setenv("CC_EXPLORER_REAP_AGE_HOURS", "0")
+    assert srv._reap_age_seconds() == srv._REAP_DEFAULT_AGE_HOURS * 3600.0
+    monkeypatch.setenv("CC_EXPLORER_REAP_AGE_HOURS", "-5")
+    assert srv._reap_age_seconds() == srv._REAP_DEFAULT_AGE_HOURS * 3600.0
+
+    # Behaviorally: with the threshold pinned to the default, a freshly-written
+    # pristine fork is spared (the old `hours >= 0` bug would have reaped it).
+    monkeypatch.setenv("CC_EXPLORER_REAP_AGE_HOURS", "0")
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    young = "a" + "8" * 16
+    path = _lay_down_subagent(
+        fake_claude, young, is_conversion_artifact=True, converted_at=_fresh_iso()
+    )
+    srv._run_reaper("startup")
+    assert path.exists()
