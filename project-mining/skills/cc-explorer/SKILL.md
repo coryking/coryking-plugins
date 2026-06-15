@@ -62,6 +62,8 @@ Use when tracing what an agent did, correlating outputs with sessions, or buildi
 
 Tools that create new transcripts — the one mutating axis in the toolset. Both only ever copy; no existing session or subagent is modified.
 
+> **Prerequisite for `session_to_subagent` + `SendMessage`:** resuming a converted subagent uses the agent-teams runtime, which exists only when the calling session was started with `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `settings.json` (env block) followed by a Claude Code restart. Without it the conversion still writes a correct file, but nothing can resume it — `SendMessage` returns *"no transcript to resume"*. Quick check: if `SendMessage` is not in your toolset, agent-teams is off — don't convert; use `grep_session`/`read_turn` on the source instead. (`subagent_to_session` → `claude -r` needs no env var.)
+
 - **`convert_session`** — copy a session into a subagent under the calling session (direction `session_to_subagent`), or a subagent out to a top-level session (direction `subagent_to_session`).
 - **`delete_conversions`** — remove subagent artifacts the converter created. Refuses everything else, including converted sessions. Permanent — no undo.
 
@@ -95,7 +97,7 @@ Each session carries a `worktree` field (absent for the main worktree, set to th
 
 **"Trace agent execution"** → `list_project_sessions(min_agents=1)` → `list_session_agents` → `get_agent_detail` (or `audit_session_tools` for the whole-session tool-usage view). Top-down zoom from project to session to individual agent.
 
-**"Why did that session decide X? What did it learn?"** → `convert_session`, then `SendMessage`. Grep finds what was said; a converted session can answer for what it meant.
+**"Why did that session decide X? What did it learn?"** → `convert_session`, then `SendMessage` (needs `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` — see the conversion-tools prerequisite above). Grep finds what was said; a converted session can answer for what it meant.
 
 ## Key workflows
 

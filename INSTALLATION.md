@@ -92,6 +92,22 @@ claude plugin list
 
 If the plugin shows as installed but disabled, run `claude plugin enable project-mining@coryking-plugins`.
 
+## Optional: enable session↔subagent conversation (`convert_session` + `SendMessage`)
+
+cc-explorer's `convert_session(session_to_subagent)` copies a past session into a resumable subagent so you can *talk to it* — ask what it meant, get a synthesis, use it as a domain expert. Resuming that subagent uses Claude Code's **agent-teams** runtime, which is gated behind an experimental env var. The conversion itself works without it, but `SendMessage` (the resume path) only exists when the env var is set — otherwise resume fails with *"no transcript to resume"*.
+
+To enable it, add the env var to your `settings.json` (project `.claude/settings.json`, `.claude/settings.local.json`, or `~/.claude/settings.json`) and **restart Claude Code** (env is read at session start):
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  }
+}
+```
+
+Quick check inside a session: if `SendMessage` is in your toolset, agent-teams is active. The reverse direction (`subagent_to_session` → `claude -r`) needs no env var.
+
 ## MCP server dependencies
 
 The cc-explorer MCP server requires Python dependencies managed by `uv`. When the plugin is enabled, Claude Code starts the server via the `.mcp.json` configuration using `uv run`, which handles dependency resolution automatically. No manual `pip install` or venv setup is needed.
