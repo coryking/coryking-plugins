@@ -1439,6 +1439,55 @@ def test_rewind_atomic_no_tempfile_left_behind(fake_claude):
     assert path.exists()
 
 
+def test_rewind_resolves_without_parsing_transcripts(fake_claude, monkeypatch):
+    """Regression: rewind resolves its artifact by FILENAME alone — it must never
+    call _load_all_sessions (which parses every transcript in the project).
+
+    That parse reads every transcript in every selected project — on a real corpus
+    a multi-second-to-minute op that blew the MCP request timeout mid-call. Because
+    rewind mutates in place, the connection dropped AFTER the file was already
+    truncated, so the artifact looked destroyed (field-observed). Resolving an
+    AGENT id must still succeed via the subagent-filename glob, never by parsing."""
+    path = _lay_rw_subagent(fake_claude)
+
+    def boom(*a, **kw):  # any parse during resolution is the bug
+        raise AssertionError(
+            "rewind resolved via _load_all_sessions (full transcript parse) — it "
+            "must resolve by filename only (_sessions_by_filename)"
+        )
+
+    monkeypatch.setattr(srv, "_load_all_sessions", boom)
+    resp = srv.rewind_transcript(src_id=RW_AGENT, turn=RW_A1, cut="after")
+
+    assert resp.artifact_id == RW_AGENT  # agent id resolved by filename glob
+    assert _convo_texts(_convo_only(_read_jsonl(path))) == ["ONE", "TWO"]
+
+
+def test_narrow_finds_workflow_nested_agent(fake_claude):
+    """The agent-id narrowing glob must reach workflow-nested agents at
+    `<session>/subagents/workflows/<runId>/agent-<id>.jsonl`, not only direct
+    children of `subagents/`.
+
+    `collect_agent_files` recurses into `workflows/<runId>/`, so resolution
+    (used by subagent_to_session convert) must too — a shallow `subagents/agent-*`
+    glob would return [] and falsely report 'No subagent matching' for any
+    workflow-dispatched subagent."""
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    nested_id = "a" + "9" * 16
+    wf_dir = (
+        fake_claude.project_dir(PROJECT) / SID_PARENT / "subagents"
+        / "workflows" / "wf_testrun"
+    )
+    wf_dir.mkdir(parents=True, exist_ok=True)
+    _write_jsonl(
+        wf_dir / f"agent-{nested_id}.jsonl",
+        [_user("u-wf-0000-0000-0000-00000000wf01", "X", agentId=nested_id, isSidechain=True)],
+    )
+
+    narrowed = srv._narrow_projects_for_artifacts([nested_id], None)
+    assert narrowed, "narrowing must find the project holding a workflow-nested agent"
+
+
 def test_rewind_atomic_write_preserves_original_on_failure(fake_claude, monkeypatch):
     """If the write fails mid-way, the original transcript is left intact (the
     atomic temp+replace guarantees no half-written file)."""

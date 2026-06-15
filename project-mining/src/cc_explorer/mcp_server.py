@@ -13,6 +13,7 @@ import re
 import sys
 import traceback
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal, Optional
@@ -366,6 +367,94 @@ def _projects_for_sessions(
         if any(sid == w for sid in refs for w in wanted):
             matched.append(proj)
     return matched
+
+
+def _narrow_projects_for_artifacts(
+    ids: list[str], projects: list[str] | None
+) -> list[str]:
+    """Cheaply find the project(s) holding the given session/agent ids.
+
+    The artifact resolvers (rewind, agent-direction convert, delete-by-id) need
+    `SessionInfo` objects, but `_load_all_sessions` PARSES every transcript in
+    every selected project — on a large corpus that is a ~minute-long full-corpus
+    read which blows the MCP request timeout (the connection drops mid-call, yet
+    a destructive op like rewind has already mutated the file: it looks like the
+    tool destroyed the artifact). Resolution only needs file paths and ids, so we
+    narrow the project set FIRST, by filename discovery alone — `load_conversations`
+    never opens a transcript:
+
+      - a SESSION id matches a ``<id>.jsonl`` transcript filename;
+      - an AGENT id matches a ``<session>/subagents/**/agent-<id>.jsonl`` filename
+        (a pure filesystem glob; agent files are ``agent-a…`` so a session uuid
+        never collides with one). The ``**`` matches agents both directly under
+        ``subagents/`` AND workflow-nested under ``subagents/workflows/<runId>/``
+        — the same tree `collect_agent_files` recurses, so resolution can't miss a
+        workflow-dispatched subagent.
+
+    Returns the project paths to load, in `resolve_projects` order. When `projects`
+    is given it is used verbatim (already scoped — no narrowing needed). Empty when
+    no id matches by name anywhere: the caller raises its own "no match" error
+    rather than re-expanding to a full-corpus parse.
+    """
+    if projects:
+        return resolve_projects(projects)
+
+    wanted = [PrefixId(i) for i in ids]
+    all_projects = resolve_projects(None)
+    matched: set[str] = set()
+    for proj in all_projects:
+        refs = load_conversations(proj)
+        # Session-id hit: a transcript filename matches.
+        if any(sid == w for sid in refs for w in wanted):
+            matched.add(proj)
+            continue
+        # Agent-id hit: a subagent filename matches under any session dir. Pure
+        # filesystem glob — never opens a transcript.
+        enc_dirs = {ref.path.parent for ref in refs.values()}
+        if any(
+            next(enc.glob(f"*/subagents/**/agent-{i}*.jsonl"), None) is not None
+            for enc in enc_dirs
+            for i in ids
+        ):
+            matched.add(proj)
+    return [p for p in all_projects if p in matched]
+
+
+@dataclass(frozen=True)
+class _ArtifactSession:
+    """A session located by FILENAME only — no transcript parse.
+
+    `_resolve_artifacts_corpus` reads only `.session_id`, `.path`, and
+    `.project_path`, so resolving an id to its artifact never needs the full
+    `SessionInfo` (which costs a parse of every transcript in the project). This
+    carries exactly those three, built from `load_conversations` (filename
+    discovery), so resolution stays sub-second even in an artifact-heavy project.
+    """
+
+    session_id: PrefixId
+    path: Path
+    project_path: str
+
+
+def _sessions_by_filename(projects: list[str]) -> list[_ArtifactSession]:
+    """Every session in `projects`, discovered by filename — NO transcript parse.
+
+    The cheap corpus for artifact resolution (rewind, agent-direction convert,
+    delete-by-id): `load_conversations` lists `<id>.jsonl` files (worktrees
+    pooled) without opening any of them, where `_load_all_sessions` would parse
+    each one. De-duplicated by full session id across the given projects.
+    """
+    out: list[_ArtifactSession] = []
+    seen: set[str] = set()
+    for proj in projects:
+        for sid, ref in load_conversations(proj).items():
+            if sid.full in seen:
+                continue
+            seen.add(sid.full)
+            out.append(
+                _ArtifactSession(session_id=sid, path=ref.path, project_path=proj)
+            )
+    return out
 
 
 def _resolve_unique_session(
@@ -1324,11 +1413,18 @@ def _resolve_agent_for_convert(src_id: str, src_project: str | None):
     Walks every session's subagents dir across the selected projects. A prefix
     matching agent files in more than one distinct full id raises with the
     holding sessions listed, mirroring session-prefix ambiguity handling.
+
+    Narrows to the holding project by filename FIRST, then resolves over a
+    filename-only corpus (`_sessions_by_filename`), so an unscoped resolve never
+    parses a transcript — the same full-corpus-parse hazard rewind hit.
     """
     proj_sel = [src_project] if src_project else None
-    sessions, _ = _load_all_sessions(proj_sel)
+    narrowed = _narrow_projects_for_artifacts([src_id], proj_sel)
+    if not narrowed:
+        raise ToolError(f"No subagent matching: {src_id}")
+    sessions = _sessions_by_filename(narrowed)
 
-    matches: list[tuple] = []  # (AgentFile, SessionInfo)
+    matches: list[tuple] = []  # (AgentFile, _ArtifactSession)
     for s in sessions:
         for af in collect_agent_files(resolve_subagents_dir(s.path)):
             if af.agent_id and PrefixId(af.agent_id) == src_id:
@@ -1507,9 +1603,19 @@ def _resolve_artifact_for_rewind(
     artifact resolver (the same one delete_conversions uses), which enforces the
     _MIN_ID_LEN floor — an in-place mutation must not fire on a sloppy prefix —
     and raises on an ambiguous prefix with the candidates listed.
+
+    Narrows to the holding project by filename FIRST, then resolves over a
+    filename-only corpus (`_sessions_by_filename`): parsing every transcript just
+    to resolve one id is a full-corpus read that times out the MCP call
+    mid-mutation (and even one busy project's parse is multi-second).
     """
     proj_sel = [src_project] if src_project else None
-    sessions, _ = _load_all_sessions(proj_sel)
+    narrowed = _narrow_projects_for_artifacts([src_id], proj_sel)
+    # Resolve over a filename-only corpus — no transcript parse. Empty narrowed
+    # (id matches no filename) still flows through the corpus resolver with no
+    # sessions, so it remains the single authority for both the _MIN_ID_LEN "too
+    # short" guard and the no-match message.
+    sessions = _sessions_by_filename(narrowed)
     _, kind, full_id, path = _resolve_artifacts_corpus([src_id], sessions)[0]
     if not kind or path is None:
         raise ToolError(f"No session or subagent matching: {src_id}")
@@ -1628,8 +1734,13 @@ def delete_conversions(
             )
         return DeleteConversionsResponse(deleted=deleted, refused=refused)
 
-    # Load corpus once for all ids.
-    all_sessions, _ = _load_all_sessions(None)
+    # Resolve all ids over a filename-only corpus, narrowed to the holding
+    # project(s) by filename first, so an unscoped delete never parses a
+    # transcript (the full-corpus-parse hazard rewind hit). Ids that match
+    # nothing by name fall through to _resolve_artifacts_corpus as no-match
+    # placeholders and are refused per-id below.
+    narrowed = _narrow_projects_for_artifacts(ids, None)
+    all_sessions = _sessions_by_filename(narrowed)
     resolved = _resolve_artifacts_corpus(ids, all_sessions)
 
     for raw_id, kind, full_id, path in resolved:
