@@ -457,6 +457,66 @@ def _sessions_by_filename(projects: list[str]) -> list[_ArtifactSession]:
     return out
 
 
+def _resolve_browsable_artifact(session: str, projects: list[str] | None) -> SessionInfo | None:
+    """Resolve a session/agent id to a browsable SessionInfo, agent-aware.
+
+    `browse_session` resolves real SESSIONS via `_resolve_unique_session`, but a
+    convert_session artifact is often a SUBAGENT whose id names no session file —
+    and rewind_transcript points users at browse_session to read the cut turn off
+    the artifact. So when the id isn't a session we fall through to here: the same
+    filename-only resolver rewind/delete use (`_narrow_projects_for_artifacts` +
+    `_sessions_by_filename` + `_resolve_artifacts_corpus`, NO transcript parse),
+    which resolves the id to a subagent transcript path. We wrap that path in a
+    minimal SessionInfo — `browse_session_turns` reads only `.path`, and the
+    response surfaces `.session_id` / `.project_path` — so the agent transcript
+    browses exactly like a session. Returns None when the id resolves to no
+    subagent (the caller keeps the original "no session matching" error).
+    """
+    narrowed = _narrow_projects_for_artifacts([session], projects)
+    sessions = _sessions_by_filename(narrowed)
+    _, kind, full_id, path = _resolve_artifacts_corpus([session], sessions)[0]
+    if kind != "subagent" or path is None:
+        return None
+    # The artifact's holding project: the parent session whose dir is an ancestor
+    # of the agent transcript path (agents live under <session>/subagents/...).
+    project_path = next(
+        (s.project_path for s in sessions if s.path.parent in path.parents),
+        narrowed[0] if narrowed else None,
+    )
+    return SessionInfo(
+        session_id=PrefixId(full_id),
+        path=path,
+        title=f"subagent {full_id[:8]}",
+        first_timestamp=None,
+        message_count=0,
+        project_path=project_path,
+    )
+
+
+def _resolve_unique_session_or_none(
+    all_sessions: list[SessionInfo], session: str
+) -> SessionInfo | None:
+    """Resolve a session id/prefix to one SessionInfo, None on no match.
+
+    Like `_resolve_unique_session` but returns None instead of raising when
+    nothing matches — for callers (browse_session) that fall through to a
+    different resolution path (an agent/artifact id) when the id is no session.
+    Ambiguity is still a hard error: a colliding prefix must be disambiguated, not
+    silently re-routed to the agent resolver.
+    """
+    matches = [s for s in all_sessions if PrefixId(s.session_id) == session]
+    if not matches:
+        return None
+    distinct = {s.session_id.full for s in matches}
+    if len(distinct) > 1:
+        where = ", ".join(sorted({s.project_path or "?" for s in matches}))
+        raise ToolError(
+            f"Session prefix {session!r} is ambiguous — it matches {len(distinct)} "
+            f"distinct sessions (in: {where}). Pass a longer id or scope with `projects`."
+        )
+    return matches[0]
+
+
 def _resolve_unique_session(
     all_sessions: list[SessionInfo], session: str
 ) -> SessionInfo:
@@ -467,17 +527,10 @@ def _resolve_unique_session(
     first/newest, surface the collision so the caller can disambiguate with a
     longer id or an explicit `projects` scope.
     """
-    matches = [s for s in all_sessions if PrefixId(s.session_id) == session]
-    if not matches:
+    target = _resolve_unique_session_or_none(all_sessions, session)
+    if target is None:
         raise ToolError(f"No session matching: {session}")
-    distinct = {s.session_id.full for s in matches}
-    if len(distinct) > 1:
-        where = ", ".join(sorted({s.project_path or "?" for s in matches}))
-        raise ToolError(
-            f"Session prefix {session!r} is ambiguous — it matches {len(distinct)} "
-            f"distinct sessions (in: {where}). Pass a longer id or scope with `projects`."
-        )
-    return matches[0]
+    return target
 
 
 def _filter_by_date(
@@ -1037,7 +1090,7 @@ def browse_session(
     session: Annotated[
         str,
         Field(
-            description="Session ID or prefix. Use list_project_sessions to find session IDs."
+            description="Session ID or prefix — also accepts a convert_session artifact's agent id, so you can browse a converted subagent's transcript (e.g. to read a turn UUID off it before rewind_transcript). Use list_project_sessions / list_session_agents to find IDs."
         ),
     ],
     projects: ProjectsParam = None,
@@ -1090,11 +1143,19 @@ def browse_session(
     if position not in ("head", "tail"):
         raise ToolError(f"position must be 'head' or 'tail', got: {position!r}")
 
+    # Session-first resolution: a real session id resolves via the parse-based
+    # corpus. Only when the id names NO session do we fall through to the
+    # filename-only artifact resolver, so a converted SUBAGENT's agent id browses
+    # like a session (rewind_transcript points users here to read its cut turn).
     narrowed = _projects_for_sessions([session], projects)
-    if not narrowed:
+    target: SessionInfo | None = None
+    if narrowed:
+        sessions, _ = _load_all_sessions(narrowed)
+        target = _resolve_unique_session_or_none(sessions, session)
+    if target is None:
+        target = _resolve_browsable_artifact(session, projects)
+    if target is None:
         raise ToolError(f"No session matching: {session}")
-    sessions, _ = _load_all_sessions(narrowed)
-    target = _resolve_unique_session(sessions, session)
 
     base_types = ENTRY_TYPE_MAP[role]
     entry_types = conversation_types_for(hide_set, base_types)
@@ -1630,7 +1691,7 @@ def rewind_transcript(
     ],
     turn: Annotated[
         str,
-        Field(description="Turn UUID (or prefix) to cut at — a user/assistant line in this transcript. Read it off browse_session / read_turn / grep_session run against the artifact."),
+        Field(description="Turn UUID (or prefix) to cut at — a user/assistant line in this transcript. Discover it by running browse_session / read_turn / grep_session against the artifact id itself (browse_session accepts a converted subagent's agent id). convert_session PRESERVES source turn UUIDs, so a turn id from the ORIGINAL session is also a valid cut point on the artifact."),
     ],
     cut: Annotated[
         Literal["after", "before"],

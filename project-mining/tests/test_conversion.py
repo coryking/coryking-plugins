@@ -1511,6 +1511,71 @@ def test_rewind_atomic_write_preserves_original_on_failure(fake_claude, monkeypa
     monkeypatch.setattr(conv.os, "replace", real_replace)
 
 
+def test_rewind_same_turn_twice_reports_already_rewound(fake_claude):
+    """Re-rewinding cut='before' the SAME turn reports 'already rewound', not 'not found'.
+
+    The first cut='before' CONSUMES its target (RW_T2 is the first line dropped),
+    so retrying the same rewind finds no matching line. The provenance line records
+    the prior cut (`rewound_to`), so the second attempt must say the artifact was
+    already rewound — the field-confusing case where success read as failure.
+    """
+    path = _lay_rw_subagent(fake_claude)
+
+    # First rewind cuts RW_T2 (and everything after) — it now records rewound_to.
+    srv.rewind_transcript(src_id=RW_AGENT, turn=RW_T2, cut="before")
+
+    with pytest.raises(ToolError) as exc:
+        srv.rewind_transcript(src_id=RW_AGENT, turn=RW_T2, cut="before")
+    msg = str(exc.value)
+    assert "already rewound" in msg
+    assert "not found" not in msg
+
+
+def test_rewind_unknown_turn_still_reports_not_found(fake_claude):
+    """A turn that was NEVER in the artifact still gets the generic 'not found'.
+
+    Guards against the already-rewound branch swallowing genuinely unknown turns:
+    the provenance has no `rewound_to` matching this id, so it must fall through.
+    """
+    path = _lay_rw_subagent(fake_claude)
+    # Rewind to a real turn so provenance carries SOME rewound_to (RW_A1, not below).
+    srv.rewind_transcript(src_id=RW_AGENT, turn=RW_A1, cut="after")
+
+    with pytest.raises(ToolError) as exc:
+        srv.rewind_transcript(
+            src_id=RW_AGENT, turn="deadbeef-0000-0000-0000-000000000000", cut="after"
+        )
+    msg = str(exc.value)
+    assert "not found" in msg
+    assert "already rewound" not in msg
+
+
+def test_browse_session_accepts_converted_subagent_id(fake_claude):
+    """browse_session resolves a converted subagent's agent id and returns its turns.
+
+    Closes the loop rewind_transcript depends on: the docstring tells users to read
+    a cut turn off browse_session run against the artifact, which only works if a
+    subagent agent id resolves here (it formerly returned 'No session matching').
+    """
+    path = _lay_rw_subagent(fake_claude)
+
+    resp = srv.browse_session(session=RW_AGENT, position="head", turns=10)
+
+    assert PrefixId(resp.session) == RW_AGENT
+    assert resp.total_turns == 4
+    # The four body turns are browsable (ONE/TWO/THREE/FOUR live in the display).
+    joined = " ".join(resp.chats)
+    assert "ONE" in joined and "FOUR" in joined
+
+
+def test_browse_session_unknown_id_still_errors(fake_claude):
+    """An id matching no session AND no subagent still raises 'No session matching'."""
+    _lay_rw_subagent(fake_claude)
+    with pytest.raises(ToolError) as exc:
+        srv.browse_session(session="ffffffff-0000-0000-0000-000000000000")
+    assert "No session matching" in str(exc.value)
+
+
 # =============================================================================
 # Conversion reaper — lifespan-driven GC of pristine, cold artifacts
 # =============================================================================
