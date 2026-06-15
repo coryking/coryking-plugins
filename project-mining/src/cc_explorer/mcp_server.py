@@ -7,8 +7,12 @@ write/mutate/delete transcript copies. FastMCP auto-generates output schemas fro
 return type annotations.
 """
 
+import asyncio
 import os
 import re
+import sys
+import traceback
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal, Optional
@@ -17,14 +21,17 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
+from ._claude_paths import _get_projects_dir
 from .activity import build_activity_timeline
 from .conversion import (
+    conversion_age_seconds,
     convert_session_to_subagent,
     convert_subagent_to_session,
     delete_agent_conversion,
     existing_custom_titles,
     growth_exceeded,
     is_conversion_artifact,
+    read_provenance,
     rewind_transcript as rewind_transcript_file,
 )
 from .formatting import matches_id
@@ -110,7 +117,156 @@ the main transcript, so an agent's own tool calls / thinking are searchable too
    returns pass straight back to the tools above.
 """
 
-mcp = FastMCP("cc-explorer", instructions=_INSTRUCTIONS)
+# =============================================================================
+# Conversion-artifact reaper (lifespan-driven garbage collection)
+# =============================================================================
+#
+# convert_session writes resumable transcript COPIES (see conversion.py). The LLM
+# can't be trusted to clean them up — a session never knows it's ending, so it
+# never reaches "now I'll delete that fork." The reliable lifecycle signal lives
+# one layer down: Claude Code spawns a dedicated stdio MCP server PER SESSION
+# (see _current_session_id), so this server's process lifetime ≈ the session's.
+# We hook FastMCP's lifespan and sweep stale artifacts on both ends:
+#
+#   startup  — GUARANTEED to run (the server can't serve a tool without starting).
+#              This is the backstop: it reaps whatever a previous session's
+#              crash/SIGKILL left behind.
+#   shutdown — best-effort (a try/finally runs on cooperative cancel — SIGTERM/
+#              SIGINT — but a hard SIGKILL skips it). This is just timeliness.
+#
+# Two guards make the sweep safe, both already in conversion.py:
+#   - growth guard: a fork that was RESUMED has more lines than at creation
+#     (growth_exceeded) and carries unique conversation that exists nowhere else
+#     — NEVER reaped here. Reaping grown-but-cold forks is a separate, weightier
+#     retention decision (it destroys history, not a copy) tracked as its own
+#     issue.
+#   - age gate: a PRISTINE fork younger than the threshold may still be resumed
+#     (you can convert now and `--resume` next session), so only pristine forks
+#     older than the threshold are reaped. Pristine forks are pure duplicates of
+#     an untouched source, so reaping one loses nothing — it's regenerable.
+#
+# Converted SESSIONS (subagent_to_session output) are never touched, matching
+# delete_conversions: a session is for a human to open and manage.
+
+_REAP_DEFAULT_AGE_HOURS = 24.0
+
+
+def _reap_enabled() -> bool:
+    """Reaper runs unless CC_EXPLORER_REAP is an explicit off value."""
+    return os.environ.get("CC_EXPLORER_REAP", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def _reap_age_seconds() -> float:
+    """Reap-eligibility age in seconds (CC_EXPLORER_REAP_AGE_HOURS, default 24h).
+
+    Only a strictly positive override is honored. Zero or negative would make
+    *every* pristine fork eligible the instant it's written — a fork you convert
+    now and mean to resume next session would be reaped before you got back to
+    it — so a non-positive (or unparseable) value falls back to the default
+    rather than silently arming an immediate sweep. To disable reaping entirely,
+    set CC_EXPLORER_REAP=0; to sweep aggressively, use a small positive value.
+    """
+    raw = os.environ.get("CC_EXPLORER_REAP_AGE_HOURS")
+    if raw:
+        try:
+            hours = float(raw)
+            if hours > 0:
+                return hours * 3600.0
+        except ValueError:
+            pass
+    return _REAP_DEFAULT_AGE_HOURS * 3600.0
+
+
+def _reaper_log(message: str) -> None:
+    """Emit a reaper diagnostic to STDERR.
+
+    stdout is the stdio MCP protocol channel — writing there corrupts framing.
+    The lifespan runs outside any request, so there's no `ctx` to log through;
+    stderr is the only safe sink (Claude Code captures it to its MCP server log).
+    """
+    print(f"[cc-explorer reaper] {message}", file=sys.stderr, flush=True)
+
+
+def _reap_stale_conversions(age_seconds: float) -> list[Path]:
+    """Delete pristine, cold subagent conversion artifacts. Returns reaped paths.
+
+    Walks the projects root directly (8-line head-reads per candidate — no full
+    session parse, so it's cheap enough for a startup hook). Only ever deletes
+    files under `<project>/<session>/subagents/agent-*.jsonl` that (a) carry a
+    valid x-converter-provenance line, (b) have NOT grown past lines_at_creation,
+    and (c) are older than `age_seconds`. Session-shaped conversions are never
+    matched by this glob, so converted sessions are structurally safe.
+
+    Defensive throughout: any per-file error is skipped, never raised — cleanup
+    must never take down the server.
+    """
+    reaped: list[Path] = []
+    try:
+        projects_root = _get_projects_dir()
+    except OSError:
+        return reaped
+    if not projects_root.is_dir():
+        return reaped
+
+    for path in projects_root.glob("*/*/subagents/agent-*.jsonl"):
+        try:
+            sentinel = read_provenance(path)
+            if sentinel is None:
+                continue  # not a conversion artifact — a real dispatched subagent
+            if growth_exceeded(path, sentinel):
+                continue  # resumed/built-upon — unique history, hands off
+            age = conversion_age_seconds(path, sentinel)
+            if age is None or age <= age_seconds:
+                continue  # too young — may still be resumed
+            delete_agent_conversion(path)
+            reaped.append(path)
+        except OSError:
+            continue
+    return reaped
+
+
+def _run_reaper(phase: str) -> None:
+    """Run one reaper sweep, fully guarded. `phase` is 'startup' or 'shutdown'."""
+    if not _reap_enabled():
+        return
+    try:
+        reaped = _reap_stale_conversions(_reap_age_seconds())
+    except Exception:  # never let cleanup break the server lifecycle
+        # Log the full traceback (not just repr) so a reaper bug — which would
+        # otherwise silently turn the sweep into a no-op for the whole process —
+        # is diagnosable from the MCP server's stderr log.
+        _reaper_log(f"{phase} sweep failed:\n{traceback.format_exc()}")
+        return
+    if reaped:
+        _reaper_log(f"{phase}: reaped {len(reaped)} stale conversion artifact(s)")
+
+
+@asynccontextmanager
+async def _conversion_reaper_lifespan(server: "FastMCP"):
+    """FastMCP lifespan: reap stale conversion artifacts on startup and shutdown.
+
+    Startup runs the guaranteed backstop sweep; shutdown (in `finally`, so it
+    survives cooperative cancellation) adds timeliness for the just-ended session.
+    The sweep is blocking filesystem I/O, so it runs in a worker thread to keep
+    the event loop free while the server comes up / winds down.
+    """
+    await asyncio.to_thread(_run_reaper, "startup")
+    try:
+        yield {}
+    finally:
+        await asyncio.to_thread(_run_reaper, "shutdown")
+
+
+mcp = FastMCP(
+    "cc-explorer",
+    instructions=_INSTRUCTIONS,
+    lifespan=_conversion_reaper_lifespan,
+)
 
 _TOOL_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": False}
 

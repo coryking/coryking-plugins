@@ -1060,21 +1060,67 @@ def is_conversion_artifact(transcript_path: Path) -> bool:
     return read_provenance(transcript_path) is not None
 
 
-def growth_exceeded(transcript_path: Path) -> bool:
+def growth_exceeded(
+    transcript_path: Path, sentinel: Optional[dict[str, Any]] = None
+) -> bool:
     """True when a tagged transcript has grown past its lines_at_creation.
 
     A resumed-or-built-upon conversion has more lines than it was written with;
     someone may now depend on it. Callers refuse to delete such files. Returns
     False (no growth) when there is no valid provenance line — that case is a
     separate refusal (`not a conversion artifact`), handled by the caller.
+
+    Pass `sentinel` to reuse an already-read provenance dict (parallel to
+    `conversion_age_seconds`) — a caller that just read it avoids a second
+    head-scan of the same file.
     """
-    sentinel = read_provenance(transcript_path)
+    if sentinel is None:
+        sentinel = read_provenance(transcript_path)
     if sentinel is None:
         return False
     created = sentinel.get("lines_at_creation")
     if not isinstance(created, int):
         return False
     return current_line_count(transcript_path) > created
+
+
+def conversion_age_seconds(
+    transcript_path: Path, sentinel: Optional[dict[str, Any]] = None
+) -> Optional[float]:
+    """Seconds since this conversion artifact was written, per provenance `converted_at`.
+
+    `converted_at` is stamped into the provenance sentinel at creation and never
+    rewritten (the body is append-only on resume), so it is a truthful birth time
+    — preferred over file mtime, which fs operations can perturb. Falls back to
+    mtime only when `converted_at` is absent or unparseable. Returns None when the
+    path carries no valid conversion provenance (not a conversion artifact).
+
+    Pass `sentinel` to reuse an already-read provenance dict and avoid a second
+    head-scan. This is age-since-CREATION, not age-since-last-activity: pristine
+    artifacts never grow, so for them the two coincide; grown ones are protected
+    by the growth guard and are never reaped on age alone (see the reaper).
+    """
+    if sentinel is None:
+        sentinel = read_provenance(transcript_path)
+    if sentinel is None:
+        return None
+    ts: Optional[datetime] = None
+    converted_at = sentinel.get("converted_at")
+    if isinstance(converted_at, str):
+        try:
+            ts = datetime.fromisoformat(converted_at.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+        except ValueError:
+            ts = None
+    if ts is None:
+        try:
+            ts = datetime.fromtimestamp(
+                transcript_path.stat().st_mtime, tz=timezone.utc
+            )
+        except OSError:
+            return None
+    return (datetime.now(timezone.utc) - ts).total_seconds()
 
 
 def delete_agent_conversion(transcript_path: Path) -> None:
