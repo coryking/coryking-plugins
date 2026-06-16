@@ -120,7 +120,7 @@ Routing rules:
 
 ## Reviewers
 
-17 reviewer personas across three layers, plus one CE conditional agent. See the persona catalog included below for the full catalog.
+Reviewer personas across three layers, plus one CE conditional agent. See the persona catalog included below for the full catalog.
 
 **Always-on (every review):**
 
@@ -131,6 +131,7 @@ Routing rules:
 | `maintainability-reviewer` | Coupling, complexity, naming, dead code, abstraction debt |
 | `code-simplicity-reviewer` | YAGNI violations, unnecessary abstractions, over-engineering |
 | `project-standards-reviewer` | CLAUDE.md and AGENTS.md compliance -- frontmatter, references, naming, portability |
+| `design-intent-reviewer` | Does what was produced (code, plan, or doc) satisfy the human's intent? Recovers it from docs/tickets/commits/chat (or by interrogating the originating session); flags drift, missed steering, and missing human provenance |
 
 **Cross-cutting conditional (selected per diff):**
 
@@ -161,7 +162,7 @@ Routing rules:
 
 ## Review Scope
 
-Every review spawns all 5 always-on personas, then adds whichever cross-cutting, stack-specific, and CE conditionals fit the diff. The model naturally right-sizes: a small config change triggers 0 conditionals = 5 reviewers. A TypeScript auth feature with concurrent UI work might trigger security + reliability + kieran-typescript + julik-frontend-races + adversarial = 10 reviewers.
+Every review spawns all always-on personas, then adds whichever cross-cutting, stack-specific, and CE conditionals fit the diff. The model naturally right-sizes: a small config change triggers no conditionals (always-on only); a TypeScript auth feature with concurrent UI work might add security + reliability + kieran-typescript + julik-frontend-races + adversarial on top.
 
 ## Protected Artifacts
 
@@ -359,7 +360,7 @@ If a plan is found, read its **Requirements** section — `## Requirements` in c
 
 ### Stage 3: Select reviewers
 
-Read the diff and file list from Stage 1. The 5 always-on personas are automatic. For each conditional persona in the persona catalog included below, decide whether the diff warrants it. This is agent judgment, not keyword matching.
+Read the diff and file list from Stage 1. The always-on personas are automatic. For each conditional persona in the persona catalog included below, decide whether the diff warrants it. This is agent judgment, not keyword matching.
 
 **File-type awareness for conditional selection:** Instruction-prose files (Markdown skill definitions, JSON schemas, config files) are product code but do not benefit from runtime-focused reviewers. The adversarial reviewer's techniques (race conditions, cascade failures, abuse cases) target executable code behavior. For diffs that only change instruction-prose files, skip adversarial unless the prose describes auth, payment, or data-mutation behavior. Count only executable code lines toward line-count thresholds.
 
@@ -412,6 +413,8 @@ Pass the resulting path list to the `project-standards` persona inside a `<stand
 
 Three reviewers inherit the session model with no override: `correctness-reviewer`, `security-reviewer`, and `adversarial-reviewer`. These perform the highest-stakes analysis — logic bugs, security vulnerabilities, adversarial failure scenarios — and should run at whatever capability level the user has configured. If the user is on Opus, these get Opus.
 
+`design-intent-reviewer` is pinned higher still: always dispatch it on the strongest reasoning model available (in Claude Code, `model: opus`) regardless of session model. Recovering and reconciling human intent scattered across docs, tickets, and chat — and judging the work against it — degrades badly below the top tier, and this reviewer can pull the cord on a merge, so it runs at full capability every time.
+
 All other persona sub-agents use the platform's mid-tier model to reduce cost and latency. See the Spawning subsection below for the exact dispatch-time override — the imperative lives there so it lands at the point of action when spawning many agents in parallel.
 
 The orchestrator (this skill) also inherits the session model; it handles intent discovery, reviewer selection, finding merge/dedup, and synthesis -- tasks that benefit from the same reasoning capability the user configured.
@@ -433,7 +436,9 @@ Pass `{run_id}` to every persona sub-agent so they can write their full analysis
 
 Omit the `mode` parameter when dispatching sub-agents so the user's configured permission settings apply. Do not pass `mode: "auto"`.
 
-**Model override at dispatch time.** Pass the platform's mid-tier model on every dispatch except `correctness-reviewer`, `security-reviewer`, and `adversarial-reviewer`, which inherit the session model (per the Model tiering subsection above). In Claude Code, add `model: "sonnet"` to the `Agent` tool call. In Codex, pass the equivalent mid-tier on `spawn_agent` (e.g., `gpt-5.4-mini` as of April 2026). In Pi, pass the equivalent on `subagent` via the `pi-subagents` extension. On platforms where the dispatch primitive has no model-override parameter or the available model names are unknown, omit the override — a working review on the parent model beats a broken dispatch on an unrecognized name. Check this on every Agent / `spawn_agent` / `subagent` call in the parallel dispatch; omitting it on Opus sessions silently 3-4x's the cost of a review.
+**Model override at dispatch time.** Pass the platform's mid-tier model on every dispatch except: `correctness-reviewer`, `security-reviewer`, and `adversarial-reviewer` (which inherit the session model), and `design-intent-reviewer` (which is pinned to Opus — `model: opus` in Claude Code, or the strongest available reasoning model elsewhere). See the Model tiering subsection above. In Claude Code, add `model: "sonnet"` to the `Agent` tool call. In Codex, pass the equivalent mid-tier on `spawn_agent` (e.g., `gpt-5.4-mini` as of April 2026). In Pi, pass the equivalent on `subagent` via the `pi-subagents` extension. On platforms where the dispatch primitive has no model-override parameter or the available model names are unknown, omit the override — a working review on the parent model beats a broken dispatch on an unrecognized name. Check this on every Agent / `spawn_agent` / `subagent` call in the parallel dispatch; omitting it on Opus sessions silently 3-4x's the cost of a review.
+
+**`design-intent-reviewer` — interrogation path and tools.** Its deepest intent source is attaching to the originating session and interrogating it (cc-explorer `convert_session` → `SendMessage`), which only works in an agent-teams context. When agent-teams is live, dispatch `design-intent-reviewer` so it can do this — as a **teammate, not a plain subagent**, since a plain dispatched subagent has no `SendMessage`. When agent-teams is off, it runs as an ordinary read-only reviewer over docs, tickets, commit messages, and chat-history reads — degraded, not broken. Unlike the other personas it declares **no `tools:` allowlist** (it inherits the available toolset — cc-explorer read tools, tracker access via `Bash`, and `SendMessage` when present — and stays read-only on the repo per the subagent template's read-only contract). The exact inherit-vs-allowlist and teammate-dispatch mechanics are harness-specific and worth validating per platform.
 
 **Bounded parallel dispatch.** Respect the current harness's active-subagent limit. Queue selected reviewers, dispatch only as many as the harness accepts, and fill freed slots as reviewers complete. Treat active-agent/thread/concurrency-limit spawn errors as backpressure, not reviewer failure: leave the reviewer queued and retry after a slot frees. Record a reviewer as failed only after a successful dispatch times out/fails, or when dispatch fails for a non-capacity reason.
 

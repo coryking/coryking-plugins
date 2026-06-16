@@ -9,6 +9,11 @@ Original additions (not derived from upstream):
 - skills/claude-md-doctor/ — Variant D of an instruction-surface diagnostic
   skill. Diagnose-only by design: produces a decomposition map and checklist,
   does not rewrite CLAUDE.md or rules files. Exposed as `/el:claude-md-doctor`.
+- agents/design-intent-reviewer.md — original always-on reviewer persona.
+  Judges whether the change reflects the human's design intent (recovered from
+  design docs, issues/tickets, commit messages, and chat history via cc-explorer
+  when present), rather than against engineering standards. Has no upstream
+  ancestor.
 
 Specifically derived from upstream at tag compound-engineering-v3.8.1:
 
