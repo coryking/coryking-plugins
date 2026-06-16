@@ -21,7 +21,7 @@ See [NOTICE](NOTICE) for the upstream provenance and the slimming ledger (which 
 
 ## Status
 
-**v0.4.0** — research agents + parallel-review skill (`/el:review`) + 17 reviewer personas + `/el:claude-md-doctor` (Variant D — diagnose-only instruction-surface auditor).
+**v0.5.0** — research agents + parallel-review skill (`/el:review`) + a reviewer-persona roster (including an original `design-intent` reviewer that judges changes against the human's intent, not just engineering quality) + `/el:claude-md-doctor` (Variant D — diagnose-only instruction-surface auditor).
 
 ### `/el:claude-md-doctor`
 
@@ -31,18 +31,20 @@ Roadmap:
 - [x] `web-researcher` agent (forked, tool-restriction removed)
 - [x] `best-practices-researcher` agent (forked, skill-mapping de-namespaced)
 - [x] `/engineering-loop:review` skill — parallel-review pipeline
-- [x] 17 forked reviewer-persona agents backing the slim review skill
+- [x] forked reviewer-persona agents backing the slim review skill, plus an original `design-intent` reviewer (not ported from upstream)
 - [ ] Optional: `/engineering-loop:plan`, `/engineering-loop:brainstorm`, `/engineering-loop:ideate` if they earn their token weight after `/review` has been used in real work
 
 ### Personas shipped with `/engineering-loop:review`
 
-**Always-on (5):** `correctness`, `testing`, `maintainability`, `code-simplicity`, `project-standards`
+**Always-on:** `correctness`, `testing`, `maintainability`, `code-simplicity`, `project-standards`, `design-intent`
 
-**Cross-cutting conditional (8):** `security`, `performance`, `reliability`, `adversarial`, `api-contract`, `data-migrations`, `agent-native`, `previous-comments`
+**Cross-cutting conditional:** `security`, `performance`, `reliability`, `adversarial`, `api-contract`, `data-migrations`, `agent-native`, `previous-comments`
 
-**Stack-specific conditional (3):** `kieran-python`, `kieran-typescript`, `julik-frontend-races`
+**Stack-specific conditional:** `kieran-python`, `kieran-typescript`, `julik-frontend-races`
 
-**CE conditional (1):** `deployment-verification-agent` — emits a Go/No-Go runbook (markdown, not JSON findings) when the diff has risky data changes.
+**CE conditional:** `deployment-verification-agent` — emits a Go/No-Go runbook (markdown, not JSON findings) when the diff has risky data changes.
+
+`design-intent` is original to this fork (not ported from upstream): it recovers the human's intent from design docs, issues/tickets, commit messages, and chat history (via cc-explorer when present), then judges whether the change honors it. It degrades to the read-only sources when cc-explorer / agent-teams aren't available.
 
 Upstream ships 18 personas plus 4 CE always-on agents and 2 CE conditional agents. We dropped: `learnings-researcher` (audit-validated dead for solo use), `dhh-rails-reviewer`, `kieran-rails-reviewer`, `swift-ios-reviewer` (stack-mismatch for our projects), and `schema-drift-detector` (Rails-specific `db/schema.rb` cross-reference). Re-add any of them later by porting from `compound-engineering-v3.8.1` and adding to `plugin.json` + `persona-catalog.md` + `SKILL.md`.
 
@@ -57,7 +59,7 @@ Ported from `compound-engineering-v3.8.1`. We start as a straight-laced port of 
 | Agent namespace | `ce-X` prefix | bare slug (`X`) |
 | Tool restriction on research agents | `tools: WebSearch, WebFetch` (or restricted list) | unrestricted — research subagents can also write their findings |
 | Skill cross-references in prompts | references `ce-X` skills | hardcoded name lookups replaced with semantic-matching prose; dead integration-point sections removed |
-| Review persona roster | 18 personas + 4 CE always-on agents + 2 CE conditional agents | 17 personas (5 always-on + 8 cross-cutting conditional + 3 stack-specific conditional) + 1 CE conditional agent. Dropped Rails/Swift personas and `learnings-researcher`/`schema-drift-detector`. |
+| Review persona roster | 18 personas + 4 CE always-on agents + 2 CE conditional agents | 17 personas (6 always-on + 8 cross-cutting conditional + 3 stack-specific conditional) + 1 CE conditional agent. Added an original `design-intent` reviewer; dropped Rails/Swift personas and `learnings-researcher`/`schema-drift-detector`. |
 | Compound deposit loop | always-on `learnings-researcher` in every review | removed (audit-validated dead for solo use) |
 
 ## Attribution

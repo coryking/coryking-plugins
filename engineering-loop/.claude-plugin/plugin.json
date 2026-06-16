@@ -1,6 +1,6 @@
 {
   "name": "engineering-loop",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Slim parallel-review and curated research agents for solo development, plus claude-md-doctor for diagnosing instruction-surface bloat. The parts of compound-engineering's workflow that actually compound for a single operator, without the team-scale scaffolding.",
   "author": {
     "name": "Cory King",
@@ -19,6 +19,7 @@
     "./agents/maintainability-reviewer.md",
     "./agents/code-simplicity-reviewer.md",
     "./agents/project-standards-reviewer.md",
+    "./agents/design-intent-reviewer.md",
     "./agents/security-reviewer.md",
     "./agents/performance-reviewer.md",
     "./agents/reliability-reviewer.md",
