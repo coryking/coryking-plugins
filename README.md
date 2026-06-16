@@ -2,7 +2,15 @@
 
 **A Claude Code marketplace for people who drive a fleet of agents and want to know what the hell those agents actually did.**
 
-Three plugins, one install command — but let's be honest about which one I actually live in: **cc-explorer**. I run a lot of Claude Code sessions, those sessions spawn a lot of subagents, and the interesting stuff — the decision, the realization, the moment an agent quietly went sideways — gets buried in JSONL transcripts I'll never grep by hand. cc-explorer is how I read it back. The rest of the toolbox grew out of the same itch: tools to mine a project's history for evidence, to review the code these agents write, and to write better MCP servers. But cc-explorer is the one I get the most mileage out of, by a mile.
+Three plugins, one install command. The one I get the most mileage out of, by a mile, is **cc-explorer** — my window into the pile of Claude Code transcripts I'd otherwise never read back. I use it to:
+
+- **Carry session context across conversations** — pull what one session knew into wherever I'm working now.
+- **Run design and code reviews with a session that lived the work** — clone a past session into a subagent and put it on the review.
+- **Mine my chat history for insights and data** — find the decision, the realization, the moment things turned, even when I've forgotten which project it happened in.
+- **Watch how agents actually use the tools I write** — see which MCP tools land, which fail, and where a subagent went sideways.
+- **Interrogate old sessions instead of grepping their transcripts** — ask a past conversation what it meant, not just what it said.
+
+The rest of the toolbox grew out of the same itch: tools to mine a project's history for evidence, to review the code these agents write, and to write better MCP servers.
 
 ```
 /plugin marketplace add coryking/coryking-plugins
