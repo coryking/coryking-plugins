@@ -160,9 +160,13 @@ Reviewer personas across three layers, plus one CE conditional agent. See the pe
 |-------|--------------------|
 | `deployment-verification-agent` | Includes risky data changes (migrations, backfills, irreversible DDL) that warrant a Go/No-Go runbook with verification queries and rollback procedures |
 
+**Project-custom (per-project, opt-in):**
+
+The consuming repo can contribute its own domain reviewers. Any agent in the target repo's `.claude/agents/*.md` that opts in with `el-review: true` in its frontmatter is discovered and selected per-diff like a conditional persona, keyed on its own `description`. See the persona catalog's "Project-custom conditional" layer for the discovery and author contract.
+
 ## Review Scope
 
-Every review spawns all always-on personas, then adds whichever cross-cutting, stack-specific, and CE conditionals fit the diff. The model naturally right-sizes: a small config change triggers no conditionals (always-on only); a TypeScript auth feature with concurrent UI work might add security + reliability + kieran-typescript + julik-frontend-races + adversarial on top.
+Every review spawns all always-on personas, then adds whichever cross-cutting, stack-specific, CE, and opted-in project-custom conditionals fit the diff. The model naturally right-sizes: a small config change triggers no conditionals (always-on only); a TypeScript auth feature with concurrent UI work might add security + reliability + kieran-typescript + julik-frontend-races + adversarial on top.
 
 ## Protected Artifacts
 
@@ -377,6 +381,12 @@ For stack-specific personas, use file extensions and changed patterns as a start
 
 For the CE conditional `deployment-verification-agent`, spawn it when the diff includes destructive or risky data-layer changes — `NOT NULL` additions on populated tables, type changes that can lose precision, bulk backfills, irreversible DDL — and the operator wants an executable Go/No-Go runbook (SQL invariant queries, deploy steps with rollback per step, post-deploy monitoring plan). Not every migration warrants it; reserve it for changes where guessing at launch time is unacceptable.
 
+**Project-custom reviewers.** The repo under review may ship its own domain reviewers (a project's `financial-modeling-reviewer`, `schema-conventions-reviewer`, etc.) that are too specific to live in the built-in roster but are exactly the lens that should run for *that* project. Discover and select them as a fourth conditional layer:
+
+1. **Discover.** Using the native file-search/glob tool, find `.claude/agents/*.md` at the root of the repo under review (the same target checkout Stage 3b globs for standards files). Read each one's frontmatter and keep only agents with `el-review: true`. Agents without the flag are ordinary project agents, not reviewers — ignore them. If the directory is absent or no agent opts in, this layer is empty; proceed normally.
+2. **Select.** For each opted-in agent, treat its frontmatter `description` (its "invoke when…" clause) as the conditional selection criterion and apply the same judgment you apply to a built-in cross-cutting conditional: does this diff fall in the agent's stated domain? Select it when it does. These are additive to the built-in layers, never replacements.
+3. **Dispatch.** Spawn selected project-custom reviewers through the same Stage 4 path as built-in personas — see Stage 4 for the dispatch mechanics and the model-tiering exemption. Their structured findings merge through Stage 5 keyed by the `reviewer` name they emit; no special handling.
+
 Announce the team before spawning:
 
 ```
@@ -394,6 +404,7 @@ Review team:
 - adversarial -- diff is 80+ lines and touches auth boundary
 - previous-comments -- PR has 4 prior review threads
 - deployment-verification-agent -- migration adds NOT NULL on populated 170k-row table
+- financial-modeling (project-custom) -- diff touches the lifetime cash-flow model
 ```
 
 This is progress reporting, not a blocking confirmation.
@@ -438,7 +449,11 @@ Omit the `mode` parameter when dispatching sub-agents so the user's configured p
 
 **Model override at dispatch time.** Pass the platform's mid-tier model on every dispatch except: `correctness-reviewer`, `security-reviewer`, and `adversarial-reviewer` (which inherit the session model), and `design-intent-reviewer` (which is pinned to Opus — `model: opus` in Claude Code, or the strongest available reasoning model elsewhere). See the Model tiering subsection above. In Claude Code, add `model: "sonnet"` to the `Agent` tool call. In Codex, pass the equivalent mid-tier on `spawn_agent` (e.g., `gpt-5.4-mini` as of April 2026). In Pi, pass the equivalent on `subagent` via the `pi-subagents` extension. On platforms where the dispatch primitive has no model-override parameter or the available model names are unknown, omit the override — a working review on the parent model beats a broken dispatch on an unrecognized name. Check this on every Agent / `spawn_agent` / `subagent` call in the parallel dispatch; omitting it on Opus sessions silently 3-4x's the cost of a review.
 
+**Project-custom reviewers are exempt from the mid-tier override.** Do not pass a model override when dispatching a project-custom reviewer — honor whatever its own frontmatter `model:` declares (`inherit` runs it at the session model; an explicit tier runs it there). The built-in mid-tier default exists because each built-in persona's stakes were calibrated when this fork was authored; an unknown project reviewer's stakes cannot be, so the author who wrote it owns the cost/quality call. (Finance's `financial-modeling-reviewer` declares `model: inherit` precisely because a wrong retirement number is expensive.)
+
 **`design-intent-reviewer` — interrogation path and tools.** Its deepest intent source is attaching to the originating session and interrogating it (cc-explorer `convert_session` → `SendMessage`), which only works in an agent-teams context. When agent-teams is live, dispatch `design-intent-reviewer` so it can do this — as a **teammate, not a plain subagent**, since a plain dispatched subagent has no `SendMessage`. When agent-teams is off, it runs as an ordinary read-only reviewer over docs, tickets, commit messages, and chat-history reads — degraded, not broken. Unlike the other personas it declares **no `tools:` allowlist** (it inherits the available toolset — cc-explorer read tools, tracker access via `Bash`, and `SendMessage` when present — and stays read-only on the repo per the subagent template's read-only contract). The exact inherit-vs-allowlist and teammate-dispatch mechanics are harness-specific and worth validating per platform.
+
+**Project-custom reviewers — dispatch path.** Dispatch them the same way as a built-in persona, with one wrinkle: they live in the repo under review, not in this plugin. Where the harness auto-registers a project's `.claude/agents/` as subagent types (Claude Code does), dispatch by the agent's **bare** registered name — `financial-modeling-reviewer`, with no `engineering-loop:` plugin prefix — and pass the subagent template as the task prompt; the agent file is already the subagent's system prompt, so the persona need not be injected again. Where the harness has no project-agent registry, fall back to the portable path used for built-ins: read the agent file's body and inject it into the template's `{persona_file}` slot on a generic reviewer subagent. Either way the reviewer receives the same review-context bundle (items 2-6 above) and is bound by the same read-only contract.
 
 **Bounded parallel dispatch.** Respect the current harness's active-subagent limit. Queue selected reviewers, dispatch only as many as the harness accepts, and fill freed slots as reviewers complete. Treat active-agent/thread/concurrency-limit spawn errors as backpressure, not reviewer failure: leave the reviewer queued and retry after a slot frees. Record a reviewer as failed only after a successful dispatch times out/fails, or when dispatch fails for a non-capacity reason.
 
