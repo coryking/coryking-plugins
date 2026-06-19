@@ -21,7 +21,7 @@ See [NOTICE](NOTICE) for the upstream provenance and the slimming ledger (which 
 
 ## Status
 
-**v0.5.0** — research agents + parallel-review skill (`/el:review`) + a reviewer-persona roster (including an original `design-intent` reviewer that judges changes against the human's intent, not just engineering quality) + `/el:claude-md-doctor` (Variant D — diagnose-only instruction-surface auditor).
+**v0.6.0** — research agents + parallel-review skill (`/el:review`) + a reviewer-persona roster (including an original `design-intent` reviewer that judges changes against the human's intent, not just engineering quality) + per-project reviewer extensibility (a repo's own `.claude/agents/` reviewers opt in via `el-review: true`) + `/el:claude-md-doctor` (Variant D — diagnose-only instruction-surface auditor).
 
 ### `/el:claude-md-doctor`
 
@@ -43,6 +43,8 @@ Roadmap:
 **Stack-specific conditional:** `kieran-python`, `kieran-typescript`, `julik-frontend-races`
 
 **CE conditional:** `deployment-verification-agent` — emits a Go/No-Go runbook (markdown, not JSON findings) when the diff has risky data changes.
+
+**Project-custom:** the repo under review can contribute its own domain reviewers. Any agent in the project's `.claude/agents/*.md` that opts in with `el-review: true` in its frontmatter is discovered and selected per-diff by its `description`, then runs through the same merge pipeline as the built-ins — a domain lens too specific to ship here (a finance project's cash-flow-modeling reviewer, say) without forking this plugin. See `persona-catalog.md` for the author contract.
 
 `design-intent` is original to this fork (not ported from upstream): it recovers the human's intent from design docs, issues/tickets, commit messages, and chat history (via cc-explorer when present), then judges whether the change honors it. It degrades to the read-only sources when cc-explorer / agent-teams aren't available.
 

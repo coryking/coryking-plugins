@@ -50,10 +50,30 @@ Specialized analysis beyond what the persona agents cover. Spawn when the diff i
 |-------|-------|
 | `deployment-verification-agent` | Produces Go/No-Go deployment checklist with SQL verification queries, rollback procedures, and monitoring plans. **Unstructured output** (markdown runbook) — surfaced in Stage 6 Deployment Notes section, not the findings table. |
 
+## Project-custom conditional
+
+A fourth layer that lives **in the consuming project, not in engineering-loop**. A project with a domain reviewer too specific to ship in the general roster (a finance project's cash-flow-modeling lens, a game's determinism reviewer, a data team's schema-conventions reviewer) contributes it to its own review runs without modifying this plugin. The roster is extensible per-project; the reviewers stay where they belong.
+
+**Discovery.** The orchestrator globs the repo under review for `.claude/agents/*.md` and keeps only agents whose frontmatter sets `el-review: true`. The flag is the opt-in — most `.claude/agents/` entries are not review personas, so discovery is explicit, never automatic. Unmarked agents are ignored.
+
+**Selection.** Each opted-in agent's frontmatter `description` carries its own "invoke when…" criterion. The orchestrator treats it exactly like a built-in cross-cutting conditional's selection line: read the diff, decide whether the agent's stated domain is touched, select it when it is. Additive to the built-in layers, never a replacement.
+
+**Model.** Project-custom reviewers run at whatever their own frontmatter `model:` declares — they are exempt from the mid-tier dispatch override the built-ins receive. The built-in tiering was hand-calibrated per persona; an unknown project reviewer's stakes cannot be, so the author owns the call (`model: inherit` runs it at the session model).
+
+**Author contract.** A project-custom reviewer must conform to the same output contract as a built-in persona (see `subagent-template.md`):
+
+- Emit `findings-schema.json` JSON with a stable `reviewer` name (e.g. `financial-modeling`). Findings merge into the normal Stage 5 pipeline keyed by that name — no special surfacing.
+- Honor the anchored confidence rubric (anchors `0/25/50/75/100`; actionable floor `75`, P0 may surface at `50`).
+- Respect the `run_id` artifact convention: write full analysis to `/tmp/engineering-loop/review/{run_id}/{reviewer}.json`, return compact merge-tier JSON.
+- An agent that emits **unstructured** markdown instead can use the existing agent-native / deployment surfaces (Stage 6 dedicated sections); structured JSON is the path that flows through merge/dedup/confidence.
+
+**Reference implementation.** The King-family finance project's `financial-modeling-reviewer` (`~/projects/finance/.claude/agents/financial-modeling-reviewer.md`) is built to this contract — schema- and rubric-compatible, with an explicit "Invoke when…" description — and serves as the worked example for authors.
+
 ## Selection rules
 
 1. **Always spawn all always-on personas.**
 2. **For each cross-cutting conditional persona**, the orchestrator reads the diff and decides whether the persona's domain is relevant. This is a judgment call, not a keyword match.
 3. **For each stack-specific conditional persona**, use file extensions and changed patterns as a starting point, then decide whether the diff actually introduces meaningful work for that reviewer. Do not spawn language-specific reviewers just because one config or generated file happens to match the extension.
 4. **For the CE conditional agent**, spawn when the diff has destructive or risky data-layer changes (NOT NULL additions on populated tables, type changes that can lose precision, bulk backfills, irreversible DDL) and the operator wants an executable Go/No-Go runbook.
-5. **Announce the team** before spawning with a one-line justification per conditional reviewer selected.
+5. **For each project-custom reviewer** discovered via the `el-review: true` flag in the repo under review, judge its frontmatter `description` against the diff the same way as a cross-cutting conditional, and select it when its domain is touched.
+6. **Announce the team** before spawning with a one-line justification per conditional reviewer selected.
