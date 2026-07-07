@@ -9,13 +9,13 @@ Core functions:
 - extract_text — re-exported from models.py
 """
 
-import json
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union, cast
 
+import orjson
 from cachetools import LRUCache
 from pydantic import BaseModel
 
@@ -311,8 +311,8 @@ def load_transcript(path: Path) -> list[TranscriptEntry]:
             if not line:
                 continue
             try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
+                data = orjson.loads(line)
+            except orjson.JSONDecodeError:
                 skipped += 1
                 continue
             if not isinstance(data, dict) or data.get("type") in _STRUCTURAL_LINE_TYPES:
@@ -453,7 +453,7 @@ def _orphan_worktree_dirs(
         _get_projects_dir,
         _sanitize_path,
     )
-    from cc_explorer.search import _cwd_from_transcripts, _repo_root_from_worktree_path
+    from cc_explorer.corpus import _cwd_from_transcripts, _repo_root_from_worktree_path
 
     prefix = _sanitize_path(repo_root)
     projects_dir = _get_projects_dir()

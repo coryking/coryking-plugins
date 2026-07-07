@@ -305,8 +305,8 @@ def test_load_sessions_counts_workflow_orphans_as_present(tmp_path):
     no longer gates it out. user_turns counts the single human prompt."""
     session = _setup_workflow_only_session(tmp_path, n=3)
     conversations = {SID: ConversationRef(path=session, worktree=None)}
-    with patch("cc_explorer.search.load_conversations", return_value=conversations):
-        sessions = load_sessions(str(tmp_path), with_agents_present=True)
+    with patch("cc_explorer.corpus.load_conversations", return_value=conversations):
+        sessions = load_sessions(str(tmp_path))
 
     assert len(sessions) == 1
     s = sessions[0]
@@ -320,25 +320,30 @@ def test_load_sessions_present_matches_discover(tmp_path):
     and list_session_agents can never disagree on the count."""
     session = _setup_session(tmp_path)  # 1 dispatched + 1 dispatch_only + 1 orphan
     conversations = {SID: ConversationRef(path=session, worktree=None)}
-    with patch("cc_explorer.search.load_conversations", return_value=conversations):
-        sessions = load_sessions(str(tmp_path), with_agents_present=True)
+    with patch("cc_explorer.corpus.load_conversations", return_value=conversations):
+        sessions = load_sessions(str(tmp_path))
 
     assert sessions[0].agents_present == len(discover_subagents(session))
     assert sessions[0].agents_present == 3
 
 
-def test_load_sessions_skips_subagent_walk_by_default(tmp_path):
-    """agents_present is opt-in: tools that only need transcripts (read_turn,
-    grep_session, search_projects, ...) must not pay the per-session subagents
-    walk. Default leaves the count at 0 without touching the filesystem tree."""
+def test_load_sessions_agents_present_is_lazy(tmp_path):
+    """agents_present is a lazy property: tools that only need transcripts
+    (read_turn, grep_session, search_projects, ...) must not pay the
+    per-session subagents walk. The walk fires only on first attribute access,
+    and the result is cached on the instance."""
     session = _setup_workflow_only_session(tmp_path, n=3)
     conversations = {SID: ConversationRef(path=session, worktree=None)}
-    with patch("cc_explorer.search.load_conversations", return_value=conversations):
+    with patch("cc_explorer.corpus.load_conversations", return_value=conversations):
         with patch("cc_explorer.search.discover_subagents") as walk:
             sessions = load_sessions(str(tmp_path))
+            walk.assert_not_called()  # promotion alone never walks subagents
 
-    walk.assert_not_called()
-    assert sessions[0].agents_present == 0
+    # First access performs the real walk and caches.
+    assert sessions[0].agents_present == 3
+    with patch("cc_explorer.search.discover_subagents") as walk:
+        assert sessions[0].agents_present == 3  # cached — no second walk
+        walk.assert_not_called()
 
 
 # =============================================================================

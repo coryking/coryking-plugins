@@ -777,3 +777,87 @@ class TestTeammateInjection:
         assert sess["team_role"] == "reviewer-3"
         assert out["summary"]["interactive"]["human_turns"] == 1
         assert out["summary"]["interactive"]["team_sessions"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# mtime pruning — stale files are skipped without changing the payload
+# --------------------------------------------------------------------------- #
+
+
+def _backdate(path: Path, dt: datetime) -> None:
+    """Set a file's mtime to a moment before the window start."""
+    import os
+
+    ts = dt.timestamp()
+    os.utime(path, (ts, ts))
+
+
+# A moment well before the AFTER bound, for backdating "cold" files.
+STALE = datetime(2026, 5, 1, tzinfo=timezone.utc)
+# Entries for a session that predates the window entirely.
+OLD_TS = utc(2026, 5, 1, 12, 0)
+
+
+class TestMtimePruning:
+    def test_stale_file_is_not_parsed(self, corpus, tmp_path, monkeypatch):
+        """A transcript whose mtime predates the window start is never scanned
+        — append-only files can't contain in-window entries."""
+        corpus("proj", SESSION_A, [human(utc(2026, 6, 3, 18, 0), "fresh work")])
+        corpus("proj", SESSION_B, [human(OLD_TS, "ancient work", session=SESSION_B)])
+        old_path = tmp_path / "proj" / f"{SESSION_B}.jsonl"
+        _backdate(old_path, STALE)
+
+        scanned: list[Path] = []
+        real_scan = activity._scan
+
+        def spy(path, *a, **k):
+            scanned.append(path)
+            return real_scan(path, *a, **k)
+
+        monkeypatch.setattr(activity, "_scan", spy)
+        out = run()
+
+        assert old_path not in scanned  # pruned before parse
+        assert [s["id"] for s in out["sessions"]] == [SESSION_A[:8]]
+
+    def test_pruning_preserves_payload(self, corpus, tmp_path):
+        """Parity: the same window produces an identical payload whether the
+        cold file is parsed (fresh mtime) or pruned (stale mtime) — pruning
+        only removes parses that could not have contributed."""
+        corpus("proj", SESSION_A, [
+            human(utc(2026, 6, 3, 18, 0), "fresh work"),
+            assistant(utc(2026, 6, 3, 18, 1), "req-1"),
+        ])
+        corpus("proj", SESSION_B, [human(OLD_TS, "ancient work", session=SESSION_B)])
+        old_path = tmp_path / "proj" / f"{SESSION_B}.jsonl"
+
+        unpruned = run()  # written-now mtime >= window start: file is parsed
+        _backdate(old_path, STALE)
+        pruned = run()  # stale mtime: file is skipped
+
+        assert pruned == unpruned
+
+    def test_stale_parent_with_fresh_subagent_still_counted(self, corpus, tmp_path):
+        """A background agent can outlive its parent's last write: the parent
+        transcript alone must not decide the prune. The session survives with
+        the subagent's in-window activity folded in."""
+        sub_entries = [
+            assistant(utc(2026, 6, 3, 18, 0), "sub-req-1"),
+            assistant(utc(2026, 6, 3, 18, 6), "sub-req-2"),
+        ]
+        corpus(
+            "proj",
+            SESSION_A,
+            [human(OLD_TS, "kicked off long agent run")],
+            subagents={SUB_ID: sub_entries},
+        )
+        parent_path = tmp_path / "proj" / f"{SESSION_A}.jsonl"
+        _backdate(parent_path, STALE)
+
+        out = run()
+
+        assert [s["id"] for s in out["sessions"]] == [SESSION_A[:8]]
+        sess = out["sessions"][0]
+        assert sess["n_sub"] == 1
+        assert sess["agent_turns"] == 2
+        assert sess["human_turns"] == 0  # parent's turns predate the window

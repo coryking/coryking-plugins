@@ -1,7 +1,9 @@
 """Shared test fixtures."""
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -41,3 +43,35 @@ def session_info():
         message_count=10,
         stats=TranscriptStats(),
     )
+
+
+@contextmanager
+def patch_session_corpus(sessions):
+    """Stub the corpus discovery + promotion seam with pre-built SessionInfos.
+
+    Tool-layer tests hand this the SessionInfos they want the corpus to
+    contain; Corpus.discover serves matching filename refs and
+    SessionInfo.load promotes a ref back to its pre-built SessionInfo — no
+    filesystem, no parse. Patched on the shared classes, so it covers every
+    import site (mcp_server, search).
+    """
+    from cc_explorer.corpus import Corpus, SessionRef
+    from cc_explorer.utils import PrefixId
+
+    refs = [
+        SessionRef(
+            session_id=PrefixId(str(s.session_id.full if isinstance(s.session_id, PrefixId) else s.session_id)),
+            path=s.path,
+            project_path=s.project_path or "/fake",
+            worktree=s.worktree,
+        )
+        for s in sessions
+    ]
+    by_path = {s.path: s for s in sessions}
+
+    with patch.object(
+        Corpus, "discover", classmethod(lambda cls, projects=None: Corpus(list(refs)))
+    ), patch.object(
+        SessionInfo, "load", classmethod(lambda cls, ref: by_path.get(ref.path))
+    ):
+        yield

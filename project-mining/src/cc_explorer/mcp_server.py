@@ -13,7 +13,6 @@ import re
 import sys
 import traceback
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Literal, Optional
@@ -35,9 +34,21 @@ from .conversion import (
     read_provenance,
     rewind_transcript as rewind_transcript_file,
 )
+from .corpus import (
+    Corpus,
+    SessionRef,
+    discover_projects,
+    resolve_project,
+    resolve_projects,
+)
 from .formatting import matches_id
 from .models import parse_hide
 from .parser import load_conversations
+from .resolve import (
+    resolve_artifacts,
+    resolve_unique_ref,
+    resolve_unique_ref_or_none,
+)
 from .utils import PrefixId
 from .responses import (
     ActivityTimelineResponse,
@@ -66,11 +77,7 @@ from .search import (
     SessionInfo,
     browse_session_turns,
     conversation_types_for,
-    discover_projects,
     get_turn_context,
-    load_sessions,
-    resolve_project,
-    resolve_projects,
     search_multi,
     sort_sessions_newest_first,
     triage_multi,
@@ -315,181 +322,66 @@ ProjectsParam = Annotated[
 
 def _load_all_sessions(
     projects: list[str] | None,
-    *,
-    with_agents_present: bool = False,
 ) -> tuple[list[SessionInfo], list[str]]:
     """Load sessions across the selected projects (omit/empty ⇒ all projects).
 
-    Returns (sessions, resolved_project_paths), sessions pooled across every
-    resolved project, de-duplicated by session_id, and re-sorted newest-first.
-    Worktrees are already flattened within each project by
-    load_sessions/load_conversations; the dedup additionally guards the case
-    where an explicit `projects` list names two worktrees of the same repo (each
-    would otherwise re-pool the repo's whole session set) or the same session
-    UUID appears under two project dirs. Each SessionInfo carries its
-    project_path, so downstream responses can name where a hit lives.
+    Returns (sessions, resolved_project_paths). Discovery pools across git
+    worktrees and de-duplicates by session id (Corpus.discover); every ref is
+    then promoted, so this PARSES the whole selection. Only the inventory tool
+    (list_project_sessions, CWD-scoped by default) should use it — scoped tools
+    narrow to refs first and promote only what they need.
     """
     proj_paths = resolve_projects(projects)
-    sessions: list[SessionInfo] = []
-    seen: set[str] = set()
-    for p in proj_paths:
-        for s in load_sessions(p, with_agents_present=with_agents_present):
-            key = s.session_id.full
-            if key in seen:
-                continue
-            seen.add(key)
-            sessions.append(s)
+    sessions = [
+        info
+        for ref in Corpus.discover(proj_paths).refs
+        if (info := SessionInfo.load(ref)) is not None
+    ]
     sort_sessions_newest_first(sessions)
     return sessions, proj_paths
 
 
-def _projects_for_sessions(
-    session_prefixes: list[str], projects: list[str] | None
-) -> list[str]:
-    """Narrow to the project(s) that actually contain the given session id(s).
+def _resolve_session(session: str, projects: list[str] | None) -> SessionInfo:
+    """Resolve a session id/prefix and promote exactly that one session.
 
-    For session-keyed tools: when `projects` is given, use it verbatim. When it's
-    omitted (the cross-project default), locate the holding project(s) cheaply via
-    `load_conversations` — which discovers transcript *files* by name only, with
-    NO transcript parsing — instead of parsing every transcript in every project
-    just to filter down to one session afterward.
-
-    Returns the project paths to load. Empty when nothing matches (the caller
-    raises a "no session" error rather than re-expanding to all projects).
+    The common path for session-keyed tools: discovery is filename-only
+    (Corpus.discover + narrow_to_ids — no transcript parse), ambiguity raises
+    with the candidate projects listed, and only the resolved ref is parsed.
     """
-    if projects:
-        return resolve_projects(projects)
-
-    wanted = [PrefixId(s) for s in session_prefixes]
-    matched: list[str] = []
-    for proj in resolve_projects(None):
-        refs = load_conversations(proj)
-        if any(sid == w for sid in refs for w in wanted):
-            matched.append(proj)
-    return matched
-
-
-def _narrow_projects_for_artifacts(
-    ids: list[str], projects: list[str] | None
-) -> list[str]:
-    """Cheaply find the project(s) holding the given session/agent ids.
-
-    The artifact resolvers (rewind, agent-direction convert, delete-by-id) need
-    `SessionInfo` objects, but `_load_all_sessions` PARSES every transcript in
-    every selected project — on a large corpus that is a ~minute-long full-corpus
-    read which blows the MCP request timeout (the connection drops mid-call, yet
-    a destructive op like rewind has already mutated the file: it looks like the
-    tool destroyed the artifact). Resolution only needs file paths and ids, so we
-    narrow the project set FIRST, by filename discovery alone — `load_conversations`
-    never opens a transcript:
-
-      - a SESSION id matches a ``<id>.jsonl`` transcript filename;
-      - an AGENT id matches a ``<session>/subagents/**/agent-<id>.jsonl`` filename
-        (a pure filesystem glob; agent files are ``agent-a…`` so a session uuid
-        never collides with one). The ``**`` matches agents both directly under
-        ``subagents/`` AND workflow-nested under ``subagents/workflows/<runId>/``
-        — the same tree `collect_agent_files` recurses, so resolution can't miss a
-        workflow-dispatched subagent.
-
-    Returns the project paths to load, in `resolve_projects` order. When `projects`
-    is given it is used verbatim (already scoped — no narrowing needed). Empty when
-    no id matches by name anywhere: the caller raises its own "no match" error
-    rather than re-expanding to a full-corpus parse.
-    """
-    if projects:
-        return resolve_projects(projects)
-
-    wanted = [PrefixId(i) for i in ids]
-    all_projects = resolve_projects(None)
-    matched: set[str] = set()
-    for proj in all_projects:
-        refs = load_conversations(proj)
-        # Session-id hit: a transcript filename matches.
-        if any(sid == w for sid in refs for w in wanted):
-            matched.add(proj)
-            continue
-        # Agent-id hit: a subagent filename matches under any session dir. Pure
-        # filesystem glob — never opens a transcript.
-        enc_dirs = {ref.path.parent for ref in refs.values()}
-        if any(
-            next(enc.glob(f"*/subagents/**/agent-{i}*.jsonl"), None) is not None
-            for enc in enc_dirs
-            for i in ids
-        ):
-            matched.add(proj)
-    return [p for p in all_projects if p in matched]
-
-
-@dataclass(frozen=True)
-class _ArtifactSession:
-    """A session located by FILENAME only — no transcript parse.
-
-    `_resolve_artifacts_corpus` reads only `.session_id`, `.path`, and
-    `.project_path`, so resolving an id to its artifact never needs the full
-    `SessionInfo` (which costs a parse of every transcript in the project). This
-    carries exactly those three, built from `load_conversations` (filename
-    discovery), so resolution stays sub-second even in an artifact-heavy project.
-    """
-
-    session_id: PrefixId
-    path: Path
-    project_path: str
-    worktree: str | None = None
-
-
-def _sessions_by_filename(projects: list[str]) -> list[_ArtifactSession]:
-    """Every session in `projects`, discovered by filename — NO transcript parse.
-
-    The cheap corpus for artifact resolution (rewind, agent-direction convert,
-    delete-by-id): `load_conversations` lists `<id>.jsonl` files (worktrees
-    pooled) without opening any of them, where `_load_all_sessions` would parse
-    each one. De-duplicated by full session id across the given projects.
-    """
-    out: list[_ArtifactSession] = []
-    seen: set[str] = set()
-    for proj in projects:
-        for sid, ref in load_conversations(proj).items():
-            if sid.full in seen:
-                continue
-            seen.add(sid.full)
-            out.append(
-                _ArtifactSession(
-                    session_id=sid,
-                    path=ref.path,
-                    project_path=proj,
-                    worktree=ref.worktree,
-                )
-            )
-    return out
+    corpus = Corpus.discover(projects).narrow_to_ids([session])
+    ref = resolve_unique_ref(corpus.refs, session)
+    info = SessionInfo.load(ref)
+    if info is None:
+        raise ToolError(f"No session matching: {session}")
+    return info
 
 
 def _resolve_browsable_artifact(session: str, projects: list[str] | None) -> SessionInfo | None:
     """Resolve a session/agent id to a browsable SessionInfo, agent-aware.
 
-    `browse_session` resolves real SESSIONS via `_resolve_unique_session`, but a
+    `browse_session` resolves real SESSIONS via `_resolve_session`, but a
     convert_session artifact is often a SUBAGENT whose id names no session file —
     and rewind_transcript points users at browse_session to read the cut turn off
     the artifact. So when the id isn't a session we fall through to here: the same
-    filename-only resolver rewind/delete use (`_narrow_projects_for_artifacts` +
-    `_sessions_by_filename` + `_resolve_artifacts_corpus`, NO transcript parse),
-    which resolves the id to a subagent transcript path. We wrap that path in a
-    minimal SessionInfo — `browse_session_turns` reads only `.path`, and the
-    response surfaces `.session_id` / `.project_path` / `.worktree` — so the agent
-    transcript browses exactly like a session. Returns None when the id resolves to
-    no subagent (the caller keeps the original "no session matching" error).
+    filename-only resolver rewind/delete use (`Corpus.narrow_to_artifact_ids` +
+    `resolve_artifacts`, NO transcript parse), which resolves the id to a subagent
+    transcript path. We wrap that path in a minimal SessionInfo —
+    `browse_session_turns` reads only `.path`, and the response surfaces
+    `.session_id` / `.project_path` / `.worktree` — so the agent transcript
+    browses exactly like a session. Returns None when the id resolves to no
+    subagent (the caller keeps the original "no session matching" error).
     """
-    narrowed = _narrow_projects_for_artifacts([session], projects)
-    sessions = _sessions_by_filename(narrowed)
-    _, kind, full_id, path = _resolve_artifacts_corpus([session], sessions)[0]
+    corpus = Corpus.discover(projects).narrow_to_artifact_ids([session])
+    _, kind, full_id, path = resolve_artifacts([session], corpus.refs)[0]
     if kind != "subagent" or path is None:
         return None
     # The PARENT session holding this agent: its transcript dir (`<id>.jsonl`
     # without the suffix → `<encoded>/<id>`) is an ancestor of the agent file
     # (`<encoded>/<id>/subagents/agent-*.jsonl`). Match on that session dir, not
-    # `s.path.parent` (the encoded PROJECT dir), which every session in the project
+    # `r.path.parent` (the encoded PROJECT dir), which every session in the project
     # shares — so we surface the holding session's own project AND worktree.
     holding = next(
-        (s for s in sessions if s.path.with_suffix("") in path.parents), None
+        (r for r in corpus.refs if r.path.with_suffix("") in path.parents), None
     )
     return SessionInfo(
         session_id=PrefixId(full_id),
@@ -497,49 +389,9 @@ def _resolve_browsable_artifact(session: str, projects: list[str] | None) -> Ses
         title=f"subagent {full_id[:8]}",
         first_timestamp=None,
         message_count=0,
-        project_path=holding.project_path if holding else (narrowed[0] if narrowed else None),
+        project_path=holding.project_path if holding else None,
         worktree=holding.worktree if holding else None,
     )
-
-
-def _resolve_unique_session_or_none(
-    all_sessions: list[SessionInfo], session: str
-) -> SessionInfo | None:
-    """Resolve a session id/prefix to one SessionInfo, None on no match.
-
-    Like `_resolve_unique_session` but returns None instead of raising when
-    nothing matches — for callers (browse_session) that fall through to a
-    different resolution path (an agent/artifact id) when the id is no session.
-    Ambiguity is still a hard error: a colliding prefix must be disambiguated, not
-    silently re-routed to the agent resolver.
-    """
-    matches = [s for s in all_sessions if PrefixId(s.session_id) == session]
-    if not matches:
-        return None
-    distinct = {s.session_id.full for s in matches}
-    if len(distinct) > 1:
-        where = ", ".join(sorted({s.project_path or "?" for s in matches}))
-        raise ToolError(
-            f"Session prefix {session!r} is ambiguous — it matches {len(distinct)} "
-            f"distinct sessions (in: {where}). Pass a longer id or scope with `projects`."
-        )
-    return matches[0]
-
-
-def _resolve_unique_session(
-    all_sessions: list[SessionInfo], session: str
-) -> SessionInfo:
-    """Resolve a session id/prefix to exactly one SessionInfo, or raise.
-
-    Prefix matching across the whole corpus can be ambiguous (an 8-char prefix
-    may match more than one full session id). Rather than silently picking the
-    first/newest, surface the collision so the caller can disambiguate with a
-    longer id or an explicit `projects` scope.
-    """
-    target = _resolve_unique_session_or_none(all_sessions, session)
-    if target is None:
-        raise ToolError(f"No session matching: {session}")
-    return target
 
 
 def _filter_by_date(
@@ -695,7 +547,7 @@ def list_project_sessions(
     Defaults to the CURRENT project (CWD). Pass `projects` to list one or more named projects instead; to enumerate the projects themselves use list_projects, and to find a conversation when you don't know its project use search_projects.
     """
     proj_sel = projects if projects else [resolve_project(None)]
-    sessions, _ = _load_all_sessions(proj_sel, with_agents_present=True)
+    sessions, _ = _load_all_sessions(proj_sel)
     if not sessions:
         raise ToolError(f"No conversations found for {', '.join(proj_sel)}")
 
@@ -752,9 +604,29 @@ def search_projects(
 
     Pass all your candidate search terms at once — each gets its own hit count and breakdown so you can see which terms are useful. Use separate patterns rather than regex OR pipes (e.g. ["facebook.*scrape", "fb_capture"] not "facebook.*scrape|fb_capture"). Results are sorted by hit count (hottest first). Follow up with grep_session (scoped to the returned project) or get_agent_detail (for an `agent` hit).
     """
-    sessions, proj_paths = _load_all_sessions(projects)
-    if not sessions:
+    proj_paths = resolve_projects(projects)
+    corpus = Corpus.discover(proj_paths)
+    if not corpus.refs:
         raise ToolError(f"No conversations found for: {', '.join(proj_paths) or '(no projects)'}")
+
+    no_match_error = ToolError(
+        f"No matches for: {', '.join(patterns)} across {len(proj_paths)} project(s). "
+        f"Patterns are case-insensitive regex — try shorter or broader terms, set "
+        f"role='all' to search both sides, or widen the date range."
+    )
+
+    # Raw-byte prefilter: cost scales with the answer, not the corpus. The
+    # candidate set is a SUPERSET of true hits (rg-unsafe patterns or scanner
+    # failure fall back to scan-all); only candidates are parsed, and the typed
+    # matcher below (triage_multi -> _entry_matches) remains matcher of record.
+    candidates = corpus.candidate_refs(patterns)
+    if not candidates:
+        raise no_match_error
+
+    sessions = [
+        info for ref in candidates if (info := SessionInfo.load(ref)) is not None
+    ]
+    sort_sessions_newest_first(sessions)
 
     sessions = _filter_by_date(sessions, after, before)
     sessions, excluded = _exclude_current_session(sessions, include_current_session)
@@ -774,11 +646,7 @@ def search_projects(
 
     # Check if anything matched
     if not any(r for _, results in all_results for r in results):
-        raise ToolError(
-            f"No matches for: {', '.join(patterns)} across {len(proj_paths)} project(s). "
-            f"Patterns are case-insensitive regex — try shorter or broader terms, set "
-            f"role='all' to search both sides, or widen the date range."
-        )
+        raise no_match_error
 
     return SearchProjectsResponse.from_triage(
         all_results,
@@ -847,11 +715,7 @@ def grep_session(
         raise ToolError("patterns must contain at least one pattern")
 
     hide_set = _parse_hide_or_raise(hide)
-    narrowed = _projects_for_sessions([session], projects)
-    if not narrowed:
-        raise ToolError(f"No session matching: {session}")
-    all_sessions, _ = _load_all_sessions(narrowed)
-    target = _resolve_unique_session(all_sessions, session)
+    target = _resolve_session(session, projects)
 
     base_types = ENTRY_TYPE_MAP[role]
 
@@ -944,27 +808,21 @@ def grep_sessions(
         raise ToolError("patterns must contain at least one pattern")
 
     hide_set = _parse_hide_or_raise(hide)
-    narrowed = _projects_for_sessions(sessions, projects)
-    all_sessions, _ = _load_all_sessions(narrowed) if narrowed else ([], [])
+    corpus = Corpus.discover(projects).narrow_to_ids(sessions)
 
-    # Resolve each session prefix to a SessionInfo, preserving input order.
-    # Ambiguous prefixes (matching >1 distinct session across the corpus) raise
-    # rather than silently picking one; clean misses go to not_found.
-    resolved: list = []
+    # Resolve each session prefix to a ref, preserving input order, and promote
+    # only the resolved refs. Ambiguous prefixes (matching >1 distinct session
+    # across the corpus) raise rather than silently picking one; clean misses
+    # (and empty sessions) go to not_found.
+    resolved: list[SessionInfo] = []
     not_found: list[str] = []
     for sid in sessions:
-        matches = [s for s in all_sessions if PrefixId(s.session_id) == sid]
-        distinct = {s.session_id.full for s in matches}
-        if not matches:
+        ref = resolve_unique_ref_or_none(corpus.refs, sid)
+        info = SessionInfo.load(ref) if ref is not None else None
+        if info is None:
             not_found.append(sid)
-        elif len(distinct) > 1:
-            where = ", ".join(sorted({s.project_path or "?" for s in matches}))
-            raise ToolError(
-                f"Session prefix {sid!r} is ambiguous — it matches {len(distinct)} "
-                f"distinct sessions (in: {where}). Pass a longer id or scope with `projects`."
-            )
         else:
-            resolved.append(matches[0])
+            resolved.append(info)
 
     # All-prefix-failure is handled together with all-pattern-failure below,
     # so the caller gets one consistent error path.
@@ -1069,18 +927,26 @@ def read_turn(
 
     target_session_id: str | None = None
     if session:
-        # Session known → narrow to the holding project(s) and resolve uniquely.
-        narrowed = _projects_for_sessions([session], projects)
-        if not narrowed:
-            raise ToolError(f"No session matching: {session}")
-        sessions, _ = _load_all_sessions(narrowed)
-        target = _resolve_unique_session(sessions, session)
+        # Session known → resolve and promote just that session.
+        target = _resolve_session(session, projects)
+        sessions = [target]
         target_session_id = target.session_id
     else:
-        # Only a turn id (globally unique) → scan the selected projects' corpus.
-        sessions, _ = _load_all_sessions(projects)
-        if not sessions:
+        # Only a turn id → it appears as a literal in exactly the raw JSONL
+        # file(s) that contain the turn, so the prefilter finds the holding
+        # session(s) without parsing the corpus. Turn ids are hex+hyphens; the
+        # escaped literal is always prefilter-safe.
+        corpus = Corpus.discover(projects)
+        if not corpus.refs:
             raise ToolError("No conversations found")
+        candidates = corpus.candidate_refs([re.escape(turn)])
+        sessions = [
+            info
+            for ref in candidates
+            if (info := SessionInfo.load(ref)) is not None
+        ]
+        if not sessions:
+            raise ToolError(f"Turn {turn} not found")
 
     session_info, entries, agent_id = get_turn_context(
         sessions, turn, context, hide=hide_set, session_id=target_session_id
@@ -1152,15 +1018,13 @@ def browse_session(
     if position not in ("head", "tail"):
         raise ToolError(f"position must be 'head' or 'tail', got: {position!r}")
 
-    # Session-first resolution: a real session id resolves via the parse-based
-    # corpus. Only when the id names NO session do we fall through to the
-    # filename-only artifact resolver, so a converted SUBAGENT's agent id browses
-    # like a session (rewind_transcript points users here to read its cut turn).
-    narrowed = _projects_for_sessions([session], projects)
-    target: SessionInfo | None = None
-    if narrowed:
-        sessions, _ = _load_all_sessions(narrowed)
-        target = _resolve_unique_session_or_none(sessions, session)
+    # Session-first resolution: a real session id resolves by filename and is
+    # promoted alone. Only when the id names NO session do we fall through to
+    # the artifact resolver, so a converted SUBAGENT's agent id browses like a
+    # session (rewind_transcript points users here to read its cut turn).
+    corpus = Corpus.discover(projects).narrow_to_ids([session])
+    ref = resolve_unique_ref_or_none(corpus.refs, session)
+    target: SessionInfo | None = SessionInfo.load(ref) if ref is not None else None
     if target is None:
         target = _resolve_browsable_artifact(session, projects)
     if target is None:
@@ -1211,11 +1075,7 @@ def list_session_agents(
 
     Use when you want to see a session's fan-out before drilling in: which agents ran, which errored, which burned the most tokens. Step two of agent forensics — get a session id from list_project_sessions(min_agents=1), then from here pass an agent_id to get_agent_detail for the full prompt/result/trace, or audit the whole session's tool usage with audit_session_tools.
     """
-    narrowed = _projects_for_sessions([session], projects)
-    if not narrowed:
-        raise ToolError(f"Session {session} not found")
-    sessions, _ = _load_all_sessions(narrowed)
-    target = _resolve_unique_session(sessions, session)
+    target = _resolve_session(session, projects)
 
     agents = discover_subagents(target.path)
 
@@ -1263,18 +1123,26 @@ def get_agent_detail(
     Use when you need what an agent was actually told and how it reached its answer — debugging why an agent went off the rails, recovering a result that scrolled out of context, or comparing what several parallel agents concluded. For a session-wide view of whether agents used their tools correctly (rather than one agent's full transcript), use audit_session_tools instead.
     """
     if session:
-        # Session known → narrow to its project(s) and resolve uniquely, so we
-        # don't parse the whole corpus to find one agent.
-        narrowed = _projects_for_sessions([session], projects)
-        if not narrowed:
-            raise ToolError(f"Session {session} not found")
-        loaded, _ = _load_all_sessions(narrowed)
-        sessions = [_resolve_unique_session(loaded, session)]
+        # Session known → resolve and promote just that session.
+        sessions = [_resolve_session(session, projects)]
     else:
-        # Agent id only → scan the selected projects for the matching agent.
-        sessions, _ = _load_all_sessions(projects)
+        # Agent ids only → find the holding session(s) by filename (an agent id
+        # matches its transcript's filename under some session's subagents dir)
+        # and promote only those, instead of parsing every selected project.
+        short = [a for a in agent_ids if len(a) < 6]
+        if short:
+            raise ToolError(
+                f"Agent id(s) too short (<6 chars): {', '.join(short)} — pass at "
+                f"least 6 chars, or scope with `session` to search within one session."
+            )
+        corpus = Corpus.discover(projects).narrow_to_artifact_ids(agent_ids)
+        sessions = [
+            info
+            for ref in corpus.refs
+            if (info := SessionInfo.load(ref)) is not None
+        ]
         if not sessions:
-            raise ToolError("No conversations found")
+            raise ToolError(f"Agent(s) not found: {', '.join(agent_ids)}")
 
     output_dir = Path(task_output_dir).expanduser() if task_output_dir else None
 
@@ -1349,11 +1217,7 @@ def audit_session_tools(
 
     Use this to answer 'are my agents using my tools right?' — which tools land vs fail, where retries happened, which agents over-call, and (with tool_name_filter='your-server') whether agents even reached for a specific MCP tool you shipped or ignored it. Get the session id from list_project_sessions(min_agents=1).
     """
-    narrowed = _projects_for_sessions([session], projects)
-    if not narrowed:
-        raise ToolError(f"Session {session} not found")
-    sessions, _ = _load_all_sessions(narrowed)
-    target = _resolve_unique_session(sessions, session)
+    target = _resolve_session(session, projects)
 
     agents = discover_subagents(target.path)
     if not agents:
@@ -1460,51 +1324,44 @@ def get_activity_timeline(
 # =============================================================================
 
 
-def _resolve_session_for_convert(
+def _resolve_session_ref_for_convert(
     src_id: str, src_project: str | None
-) -> SessionInfo:
-    """Resolve a session id/prefix to one SessionInfo for conversion, or raise.
+) -> SessionRef:
+    """Resolve a session id/prefix to one SessionRef for conversion, or raise.
 
-    Scopes to `src_project` when given; otherwise searches all projects (locating
-    the holding project cheaply via load_conversations). Ambiguous prefixes raise
-    with the candidate projects listed.
+    Conversion reads the raw file itself, so resolution needs only filename
+    identity (id, path, project) — no transcript parse at all. Scopes to
+    `src_project` when given; otherwise searches all projects. Ambiguous
+    prefixes raise with the candidate projects listed.
     """
     projects = [src_project] if src_project else None
-    narrowed = _projects_for_sessions([src_id], projects)
-    if not narrowed:
-        raise ToolError(f"No session matching: {src_id}")
-    sessions, _ = _load_all_sessions(narrowed)
-    return _resolve_unique_session(sessions, src_id)
+    corpus = Corpus.discover(projects).narrow_to_ids([src_id])
+    return resolve_unique_ref(corpus.refs, src_id)
 
 
 def _resolve_agent_for_convert(src_id: str, src_project: str | None):
-    """Resolve an agent id/prefix to (AgentFile, holding SessionInfo), or raise.
+    """Resolve an agent id/prefix to (AgentFile, holding SessionRef), or raise.
 
-    Walks every session's subagents dir across the selected projects. A prefix
+    Narrows to the holding session(s) by filename FIRST (`narrow_to_artifact_ids`
+    — a pure glob), then walks only those sessions' subagents dirs. A prefix
     matching agent files in more than one distinct full id raises with the
-    holding sessions listed, mirroring session-prefix ambiguity handling.
-
-    Narrows to the holding project by filename FIRST, then resolves over a
-    filename-only corpus (`_sessions_by_filename`), so an unscoped resolve never
-    parses a transcript — the same full-corpus-parse hazard rewind hit.
+    holding projects listed, mirroring session-prefix ambiguity handling. No
+    transcript is ever parsed.
     """
     proj_sel = [src_project] if src_project else None
-    narrowed = _narrow_projects_for_artifacts([src_id], proj_sel)
-    if not narrowed:
-        raise ToolError(f"No subagent matching: {src_id}")
-    sessions = _sessions_by_filename(narrowed)
+    corpus = Corpus.discover(proj_sel).narrow_to_artifact_ids([src_id])
 
-    matches: list[tuple] = []  # (AgentFile, _ArtifactSession)
-    for s in sessions:
-        for af in collect_agent_files(resolve_subagents_dir(s.path)):
+    matches: list[tuple] = []  # (AgentFile, SessionRef)
+    for r in corpus.refs:
+        for af in collect_agent_files(resolve_subagents_dir(r.path)):
             if af.agent_id and PrefixId(af.agent_id) == src_id:
-                matches.append((af, s))
+                matches.append((af, r))
 
     if not matches:
         raise ToolError(f"No subagent matching: {src_id}")
     distinct = {af.agent_id for af, _ in matches}
     if len(distinct) > 1:
-        where = ", ".join(sorted({s.project_path or "?" for _, s in matches}))
+        where = ", ".join(sorted({r.project_path or "?" for _, r in matches}))
         raise ToolError(
             f"Agent prefix {src_id!r} is ambiguous — it matches {len(distinct)} "
             f"distinct agents (in: {where}). Pass a longer id or scope with src_project."
@@ -1561,7 +1418,7 @@ def convert_session(
 
     The response includes what you need to compose the first message: suggested_handoff (a converted conversation has no way to know its interlocutor changed — message senders are not labeled on the wire), the original environment (cwd and whether it still exists, git branch, Claude Code version, age), model history, turn count, and tail state. Conversion artifacts carry lineage, are excluded from search, and are labeled in agent listings; remove them with delete_conversions."""
     if direction == "session_to_subagent":
-        src = _resolve_session_for_convert(src_id, src_project)
+        src = _resolve_session_ref_for_convert(src_id, src_project)
 
         parent_id = dest_parent_session or _current_session_id()
         if not parent_id:
@@ -1574,7 +1431,7 @@ def convert_session(
         # The parent session's on-disk directory is <projectDir>/<parentSessionId>.
         # Resolve it from the parent session itself so worktree-pooled parents land
         # in the right encoded dir (not assumed to be the source's project).
-        parent = _resolve_session_for_convert(parent_id, None)
+        parent = _resolve_session_ref_for_convert(parent_id, None)
         parent_session_dir = parent.path.with_suffix("")
 
         # Subagents the SOURCE session ran are NOT copied — their results already
@@ -1671,22 +1528,19 @@ def _resolve_artifact_for_rewind(
     Accepts EITHER a session id or an agent id (you rewind whatever a convert
     produced), scoped to `src_project` when given. Delegates to the shared
     artifact resolver (the same one delete_conversions uses), which enforces the
-    _MIN_ID_LEN floor — an in-place mutation must not fire on a sloppy prefix —
-    and raises on an ambiguous prefix with the candidates listed.
+    minimum-id-length floor — an in-place mutation must not fire on a sloppy
+    prefix — and raises on an ambiguous prefix with the candidates listed.
 
-    Narrows to the holding project by filename FIRST, then resolves over a
-    filename-only corpus (`_sessions_by_filename`): parsing every transcript just
-    to resolve one id is a full-corpus read that times out the MCP call
-    mid-mutation (and even one busy project's parse is multi-second).
+    Resolution is filename-only end to end (`narrow_to_artifact_ids` +
+    `resolve_artifacts`): parsing every transcript just to resolve one id is a
+    full-corpus read that times out the MCP call mid-mutation (and even one
+    busy project's parse is multi-second). An id that matches no filename still
+    flows through the resolver with an empty corpus, so it remains the single
+    authority for both the too-short guard and the no-match message.
     """
     proj_sel = [src_project] if src_project else None
-    narrowed = _narrow_projects_for_artifacts([src_id], proj_sel)
-    # Resolve over a filename-only corpus — no transcript parse. Empty narrowed
-    # (id matches no filename) still flows through the corpus resolver with no
-    # sessions, so it remains the single authority for both the _MIN_ID_LEN "too
-    # short" guard and the no-match message.
-    sessions = _sessions_by_filename(narrowed)
-    _, kind, full_id, path = _resolve_artifacts_corpus([src_id], sessions)[0]
+    corpus = Corpus.discover(proj_sel).narrow_to_artifact_ids([src_id])
+    _, kind, full_id, path = resolve_artifacts([src_id], corpus.refs)[0]
     if not kind or path is None:
         raise ToolError(f"No session or subagent matching: {src_id}")
     return (kind, full_id, path)
@@ -1785,7 +1639,7 @@ def delete_conversions(
                 "is not set). Pass explicit ids instead."
             )
         try:
-            holding = _resolve_session_for_convert(current, None)
+            holding = _resolve_session_ref_for_convert(current, None)
         except ToolError as e:
             raise ToolError(
                 f"delete_conversions sweep failed: could not resolve the calling "
@@ -1805,13 +1659,12 @@ def delete_conversions(
         return DeleteConversionsResponse(deleted=deleted, refused=refused)
 
     # Resolve all ids over a filename-only corpus, narrowed to the holding
-    # project(s) by filename first, so an unscoped delete never parses a
+    # session(s) by filename first, so an unscoped delete never parses a
     # transcript (the full-corpus-parse hazard rewind hit). Ids that match
-    # nothing by name fall through to _resolve_artifacts_corpus as no-match
+    # nothing by name fall through to resolve_artifacts as no-match
     # placeholders and are refused per-id below.
-    narrowed = _narrow_projects_for_artifacts(ids, None)
-    all_sessions = _sessions_by_filename(narrowed)
-    resolved = _resolve_artifacts_corpus(ids, all_sessions)
+    corpus = Corpus.discover(None).narrow_to_artifact_ids(ids)
+    resolved = resolve_artifacts(ids, corpus.refs)
 
     for raw_id, kind, full_id, path in resolved:
         if not kind:
@@ -1834,68 +1687,6 @@ def delete_conversions(
         deleted.append(DeletedConversion(id=full_id, kind="subagent", path=str(path)))
 
     return DeleteConversionsResponse(deleted=deleted, refused=refused)
-
-
-_MIN_ID_LEN = 6  # IDs shorter than this are refused to avoid accidental prefix sweeps.
-
-
-def _resolve_artifacts_corpus(
-    raw_ids: list[str],
-    sessions: list,
-) -> list[tuple[str, str, str, Path]]:
-    """Resolve a list of ids to (raw_id, kind, full_id, path) tuples, raising on any problem.
-
-    Loads the corpus ONCE (caller passes `sessions`). For each id:
-      - Rejects ids shorter than _MIN_ID_LEN with a clear error.
-      - Finds ALL matching sessions and agent files for the id.
-      - Raises ToolError on ambiguity (listing candidates + their projects).
-      - Returns a 4-tuple on unique match, or None-placeholder for no match.
-
-    Returns list of resolved tuples; no-match entries are represented as
-    (raw_id, "", "", None) so the caller can format its own refused reason.
-    """
-    # Build agent index once: (agent_id, session_path, project_path, af_path)
-    agent_index: list[tuple[str, str, Path]] = []
-    for s in sessions:
-        for af in collect_agent_files(resolve_subagents_dir(s.path)):
-            if af.agent_id:
-                agent_index.append((af.agent_id, s.project_path or "?", af.path))
-
-    resolved: list[tuple[str, str, str, Path | None]] = []
-    for raw_id in raw_ids:
-        if len(raw_id) < _MIN_ID_LEN:
-            raise ToolError(
-                f"Id {raw_id!r} is too short ({len(raw_id)} chars) — pass at least "
-                f"{_MIN_ID_LEN} chars to avoid accidental prefix matches. "
-                f"Use list_project_sessions or list_session_agents to find full ids."
-            )
-        # Session matches
-        session_matches = [s for s in sessions if PrefixId(s.session_id) == raw_id]
-        distinct_sess = {s.session_id.full for s in session_matches}
-        # Agent matches
-        agent_matches = [(fid, proj, p) for fid, proj, p in agent_index if PrefixId(fid) == raw_id]
-        distinct_agents = {fid for fid, _, _ in agent_matches}
-
-        total_kinds = len(distinct_sess) + len(distinct_agents)
-        if total_kinds > 1:
-            candidates: list[str] = []
-            for s in session_matches:
-                candidates.append(f"session {s.session_id.full[:12]} in {s.project_path or '?'}")
-            for fid, proj, _ in agent_matches:
-                candidates.append(f"agent {fid[:12]} in {proj}")
-            raise ToolError(
-                f"Id prefix {raw_id!r} is ambiguous — it matches {total_kinds} distinct "
-                f"artifacts: {'; '.join(candidates)}. Pass a longer id to disambiguate."
-            )
-        if len(distinct_sess) == 1:
-            s = session_matches[0]
-            resolved.append((raw_id, "session", s.session_id.full, s.path))
-        elif len(distinct_agents) == 1:
-            fid, _, p = agent_matches[0]
-            resolved.append((raw_id, "subagent", fid, p))
-        else:
-            resolved.append((raw_id, "", "", None))
-    return resolved
 
 
 def main():

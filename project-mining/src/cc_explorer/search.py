@@ -5,13 +5,13 @@ interface uses session IDs (UUID from filename) and turn UUIDs (the uuid
 field on each entry).
 """
 
-import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
+from functools import cached_property
 from pathlib import Path
-from typing import Any, Optional, TypeGuard
+from typing import Optional, TypeGuard
 
 from .models import (
     AssistantTranscriptEntry,
@@ -27,9 +27,10 @@ from .models import (
     extract_thinking_text,
     substantive_human_text,
 )
+from .corpus import EPOCH as _EPOCH, Corpus, SessionRef, TranscriptSource
 from .formatting import _match_example
 from .conversion import read_provenance
-from .parser import load_conversations, load_transcript
+from .parser import load_transcript
 from .subagents import collect_agent_files, discover_subagents, resolve_subagents_dir
 from .utils import PrefixId, smart_truncate
 
@@ -45,239 +46,15 @@ class ConversationRole(str, Enum):
     all = "all"
 
 
-# Sentinel for sessions/projects with no timestamp: sorts last under newest-first.
-# tz-aware so it never collides with aware first_timestamps (mixing aware + naive
-# in a sort key raises TypeError).
-_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
-
-
 def sort_sessions_newest_first(sessions: list["SessionInfo"]) -> None:
     """Sort sessions in place, newest first; None timestamps sort last."""
     sessions.sort(key=lambda s: s.first_timestamp or _EPOCH, reverse=True)
 
 
 # =============================================================================
-# Project resolution
-# =============================================================================
-
-
-def resolve_project(project: Optional[str] = None) -> str:
-    """Resolve project path: explicit value or CWD.
-
-    Accepts:
-    - None → CWD
-    - Full/relative path → resolved as-is
-    - Bare name (no slashes) → expanded to ~/projects/<name> if that directory exists
-    """
-    if not project:
-        return str(Path.cwd())
-
-    if "/" not in project and "\\" not in project:
-        expanded = Path.home() / "projects" / project
-        if expanded.exists():
-            return str(expanded)
-
-    return project
-
-
-def resolve_projects(projects: Optional[list[str]] = None) -> list[str]:
-    """Resolve a projects selector to concrete project paths.
-
-    Empty / None ⇒ every project on disk (cross-project search), discovered and
-    flattened across git worktrees by `discover_projects`. A non-empty list ⇒
-    those projects, each run through `resolve_project` (bare name → ~/projects/<name>,
-    path as-is). De-duplicates while preserving order.
-    """
-    if not projects:
-        return [p.path for p in discover_projects()]
-
-    seen: set[str] = set()
-    resolved: list[str] = []
-    for p in projects:
-        path = resolve_project(p)
-        if path not in seen:
-            seen.add(path)
-            resolved.append(path)
-    return resolved
-
-
-# =============================================================================
-# Project discovery (cross-project) — enumerate ~/.claude/projects, flatten
-# worktrees back into their repo so one logical project is one entry.
-# =============================================================================
-
-
-# Claude Code dispatch creates linked worktrees under a fixed in-repo location.
-# Two conventions have shipped: the current `<repo>/.claude/worktrees/<name>` and
-# the older `<repo>/.claude-worktrees/<name>`. The path *structure* alone names
-# the repo — everything before the marker segment is the main worktree root.
-_WORKTREE_MARKERS = ("/.claude/worktrees/", "/.claude-worktrees/")
-
-
-def _repo_root_from_worktree_path(cwd: str) -> Optional[str]:
-    """Recover a repo root from a Claude-dispatch worktree cwd by path structure.
-
-    `git worktree list` is the authoritative pooling source, but it only knows
-    about worktrees that still exist on disk: a pruned/deleted worktree leaves its
-    transcripts behind under `~/.claude/projects/` with no live git entry, so the
-    shell-out returns nothing and the orphaned sessions float as their own
-    fragment "project" (labeled with the worktree basename). The dispatch path
-    convention is stable, so we can fold those orphans back by string structure
-    alone — no git, no disk access. Returns None when cwd is not a dispatch
-    worktree (the caller then falls back to git / cwd-as-repo).
-    """
-    for marker in _WORKTREE_MARKERS:
-        idx = cwd.find(marker)
-        if idx > 0:
-            return cwd[:idx]
-    return None
-
-
-@dataclass
-class ProjectInfo:
-    """A logical project discovered on disk, pooled across its git worktrees.
-
-    `path` is the canonical main-worktree path (the git repo root); `encoded_dirs`
-    are every `~/.claude/projects/<encoded>/` directory that pools into it (main
-    plus linked worktrees). `session_count` and `last_active` are cheap aggregates
-    over those dirs (file count and max mtime — no transcript parse).
-    """
-
-    path: str
-    name: str
-    encoded_dirs: list[Path] = field(default_factory=list)
-    session_count: int = 0
-    last_active: Optional[datetime] = None
-
-
-def _cwd_from_transcripts(jsonls: list[Path], scan_lines: int = 20) -> Optional[str]:
-    """Recover a project's real cwd from its transcripts.
-
-    The encoded dir name is a one-way sanitization (non-alphanumeric → '-'), so
-    the real path can't be un-mangled — it has to be read back out of a
-    transcript. Entries carry `cwd` (BaseTranscriptEntry); leading lines are
-    sometimes summaries without one, so scan the first `scan_lines` of each file
-    in deterministic (sorted) order until a 'cwd' key turns up. Cheap by design:
-    first parsable cwd wins, no full parse.
-    """
-    for jsonl in jsonls:
-        try:
-            with open(jsonl, "r", encoding="utf-8", errors="replace") as f:
-                for _ in range(scan_lines):
-                    line = f.readline()
-                    if not line:
-                        break
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    cwd = data.get("cwd")
-                    if isinstance(cwd, str) and cwd:
-                        return cwd
-        except OSError:
-            continue
-    return None
-
-
-def discover_projects() -> list[ProjectInfo]:
-    """Enumerate every project under ~/.claude/projects, flattening worktrees.
-
-    Each encoded dir is mapped to its real cwd (read from a transcript), then
-    pooled into its git repo's main worktree via the same `_get_worktree_paths`
-    machinery `load_conversations` uses for single-project pooling. Git calls are
-    cached per repo (siblings prepopulated from one `git worktree list`). cwds
-    not inside a git repo pool under themselves.
-
-    Returns ProjectInfo list sorted by `last_active` (newest first). Dirs with no
-    parsable cwd are skipped.
-    """
-    from ._claude_paths import (
-        _canonicalize_path,
-        _get_projects_dir,
-        _get_worktree_paths,
-    )
-
-    projects_dir = _get_projects_dir()
-    try:
-        encoded_dirs = [d for d in projects_dir.iterdir() if d.is_dir()]
-    except OSError:
-        return []
-
-    # cwd → main-worktree path, cached. Siblings from one `git worktree list`
-    # are prepopulated so each repo shells out at most once.
-    main_cache: dict[str, str] = {}
-
-    def main_worktree(cwd: str) -> str:
-        canonical = _canonicalize_path(cwd)
-        if canonical in main_cache:
-            return main_cache[canonical]
-        worktrees = _get_worktree_paths(canonical)
-        if not worktrees:
-            # git knows nothing (no repo, or a pruned worktree whose transcripts
-            # outlived it). Fold a dispatch worktree back into its repo by path
-            # structure; otherwise the cwd pools under itself. Canonicalize the
-            # recovered root so it pools under the SAME key the main worktree uses
-            # (which also goes through _canonicalize_path) — an uncanonicalized
-            # root would float as its own fragment project.
-            recovered = _repo_root_from_worktree_path(canonical)
-            root = _canonicalize_path(recovered) if recovered else canonical
-            main_cache[canonical] = root
-            return root
-        main = worktrees[0]
-        for wt in worktrees:
-            main_cache.setdefault(wt, main)
-        main_cache[canonical] = main
-        return main
-
-    pooled: dict[str, ProjectInfo] = {}
-    for enc in encoded_dirs:
-        # One sorted enumeration of the dir, reused for cwd recovery + counts.
-        jsonls = sorted(enc.glob("*.jsonl"))
-        if not jsonls:
-            continue
-        cwd = _cwd_from_transcripts(jsonls)
-        if not cwd:
-            continue
-        repo = main_worktree(cwd)
-
-        proj = pooled.get(repo)
-        if proj is None:
-            proj = ProjectInfo(path=repo, name=Path(repo).name)
-            pooled[repo] = proj
-        proj.encoded_dirs.append(enc)
-
-        for jsonl in jsonls:
-            proj.session_count += 1
-            try:
-                mtime = datetime.fromtimestamp(jsonl.stat().st_mtime, tz=timezone.utc)
-            except OSError:
-                continue
-            if proj.last_active is None or mtime > proj.last_active:
-                proj.last_active = mtime
-
-    result = list(pooled.values())
-    result.sort(key=lambda p: p.last_active or _EPOCH, reverse=True)
-    return result
-
-
-# =============================================================================
 # Search corpus — a session's main transcript plus its subagent transcripts.
+# (TranscriptSource itself lives in corpus.py, the identity layer.)
 # =============================================================================
-
-
-@dataclass
-class TranscriptSource:
-    """One searchable transcript file within a session's corpus.
-
-    `agent_id` is None for the main session transcript and the subagent's id for
-    a `subagents/agent-*.jsonl` body (including workflow-orchestrated orphans).
-    """
-
-    agent_id: Optional[PrefixId]
-    path: Path
 
 
 def session_sources(session: "SessionInfo") -> list["TranscriptSource"]:
@@ -290,10 +67,6 @@ def session_sources(session: "SessionInfo") -> list["TranscriptSource"]:
     avoids re-reading the parent transcript. This is what makes a subagent's
     internal activity searchable (#22), not just the result text the parent
     recorded.
-
-    NOTE: this walks every session's subagent dir, so a cross-project search
-    touches the whole tree — the known cost tracked as the whole-corpus perf
-    follow-up. Correctness first.
 
     Conversion artifacts (agents whose jsonl carries an x-converter-provenance
     line, i.e. a session/subagent copied via convert_session) are SKIPPED: their
@@ -394,15 +167,107 @@ class SessionInfo:
     # team-worker session. None outside agent-team sessions.
     team: Optional[str] = None
     team_role: Optional[str] = None
-    # Full discovered subagent population — parent dispatches plus on-disk
-    # orphans (notably workflow-orchestrated agents). Equals list_session_agents'
-    # total_agents, unlike stats.agent_count which is top-down dispatches only.
-    agents_present: int = 0
     # True when this session is a conversion artifact (x-converter-provenance line
     # present). Populated at load time via a cheap head-scan; used to skip
     # artifacts from search/triage (same rationale as agent-shaped skip) while
     # still listing them in session list responses (labeled).
     is_conversion_artifact: bool = False
+
+    @cached_property
+    def agents_present(self) -> int:
+        """Full discovered subagent population — parent dispatches plus on-disk
+        orphans (notably workflow-orchestrated agents). Equals list_session_agents'
+        total_agents, unlike stats.agent_count which is top-down dispatches only.
+
+        Lazy: costs a subagents-dir walk (plus a cached transcript read) the
+        first time it's touched, so only tools that display or filter on it
+        (list_project_sessions) ever pay for it. Conversion artifacts are
+        excluded — they are copies, not dispatched runs.
+        """
+        try:
+            return sum(
+                1
+                for sa in discover_subagents(self.path)
+                if not sa.is_conversion_artifact
+            )
+        except OSError:
+            return 0
+
+    @classmethod
+    def load(cls, ref: SessionRef) -> Optional["SessionInfo"]:
+        """Promote a SessionRef to a fully-derived SessionInfo — THE promotion path.
+
+        Parses exactly one session's transcript (through the bounded cache).
+        Returns None for an empty or unreadable session — the sessions
+        load_sessions has always skipped. The memory-bounding invariant lives
+        at the call sites: nothing holds list[SessionInfo] for an unbounded
+        scope; hold SessionRefs and promote only the refs a prefilter or an
+        explicit id selected.
+        """
+        try:
+            entries = load_transcript(ref.path)
+        except OSError:
+            return None
+        if not entries:
+            return None
+
+        # Count meaningful messages — entries with actual content
+        message_count = sum(
+            1
+            for e in entries
+            if isinstance(e, (HumanEntry, AssistantTranscriptEntry))
+            and len(e.display(truncate=0)) > 0
+        )
+        if message_count == 0:
+            return None
+
+        # Human prompts only — how many times the user actually spoke. Teammate
+        # DMs (orchestration) and interrupt sentinels (mid-turn esc, not a
+        # prompt) are user-role turns but not human attention, so both are
+        # excluded — consistent with the activity timeline's human_turns.
+        user_turns = sum(
+            1
+            for e in entries
+            if isinstance(e, HumanEntry)
+            and len(e.display(truncate=0)) > 0
+            and e.origin not in (UserOrigin.teammate, UserOrigin.interrupt)
+        )
+
+        # Find first timestamp and agent-team membership. first_ts is the first
+        # timestamped entry. Team identity is stamped on every entry of a worker
+        # session, but the leading entries (summaries, early system records) can
+        # lack it, so scan until the first non-null teamName/agentName rather
+        # than trusting entry zero (mirrors activity.py's _scan).
+        first_ts: Optional[datetime] = None
+        team: Optional[str] = None
+        team_role: Optional[str] = None
+        for e in entries:
+            if not isinstance(e, BaseTranscriptEntry):
+                continue
+            if first_ts is None:
+                first_ts = e.timestamp
+            if team is None and e.teamName:
+                team = e.teamName
+            if team_role is None and e.agentName:
+                team_role = e.agentName
+            if first_ts is not None and team is not None and team_role is not None:
+                break
+
+        return cls(
+            session_id=ref.session_id,
+            path=ref.path,
+            title=session_title(entries),
+            first_timestamp=first_ts,
+            message_count=message_count,
+            stats=TranscriptStats.from_entries(entries),
+            worktree=ref.worktree,
+            user_turns=user_turns,
+            team=team,
+            team_role=team_role,
+            project_path=ref.project_path,
+            # Cheap head-scan: is this session a conversion artifact?
+            is_conversion_artifact=read_provenance(ref.path) is not None,
+        )
 
 
 @dataclass
@@ -522,105 +387,21 @@ def session_title(entries: list[TranscriptEntry]) -> str:
     return "(empty session)"
 
 
-def load_sessions(
-    project_path: str, *, with_agents_present: bool = False
-) -> list[SessionInfo]:
+def load_sessions(project_path: str) -> list[SessionInfo]:
     """Find and load all conversation sessions for a project.
 
-    Returns SessionInfo list sorted by first_timestamp (newest first).
-
-    `with_agents_present` populates SessionInfo.agents_present by walking each
-    session's on-disk subagents dir (reconciled against parent dispatches). That
-    walk is per-session filesystem I/O, so it's opt-in — only list_project_sessions,
-    which displays and filters on the count, needs it. Every other tool loads
-    sessions purely for their transcripts and leaves agents_present at 0.
+    A thin wrapper over discovery + promotion: `Corpus.discover` lists the
+    project's sessions by filename (worktrees pooled), `SessionInfo.load`
+    promotes each one. Returns SessionInfo list sorted by first_timestamp
+    (newest first). This parses the whole project — right for
+    list_project_sessions (whose job is the project inventory); scoped tools
+    should narrow to refs first and promote only what they need.
     """
-    conversations = load_conversations(project_path)
-    sessions: list[SessionInfo] = []
-
-    for session_id, ref in conversations.items():
-        entries = load_transcript(ref.path)
-        if not entries:
-            continue
-
-        # Count meaningful messages — entries with actual content
-        message_count = sum(
-            1
-            for e in entries
-            if isinstance(e, (HumanEntry, AssistantTranscriptEntry))
-            and len(e.display(truncate=0)) > 0
-        )
-        if message_count == 0:
-            continue
-
-        # Human prompts only — how many times the user actually spoke. Teammate
-        # DMs (orchestration) and interrupt sentinels (mid-turn esc, not a prompt)
-        # are user-role turns but not human attention, so both are excluded —
-        # consistent with the activity timeline's human_turns.
-        user_turns = sum(
-            1
-            for e in entries
-            if isinstance(e, HumanEntry)
-            and len(e.display(truncate=0)) > 0
-            and e.origin not in (UserOrigin.teammate, UserOrigin.interrupt)
-        )
-
-        # Find first timestamp and agent-team membership. first_ts is the first
-        # timestamped entry. Team identity is stamped on every entry of a worker
-        # session, but the leading entries (summaries, early system records) can
-        # lack it, so scan until the first non-null teamName/agentName rather than
-        # trusting entry zero (mirrors activity.py's _scan).
-        first_ts: Optional[datetime] = None
-        team: Optional[str] = None
-        team_role: Optional[str] = None
-        for e in entries:
-            if not isinstance(e, BaseTranscriptEntry):
-                continue
-            if first_ts is None:
-                first_ts = e.timestamp
-            if team is None and e.teamName:
-                team = e.teamName
-            if team_role is None and e.agentName:
-                team_role = e.agentName
-            if first_ts is not None and team is not None and team_role is not None:
-                break
-
-        title = session_title(entries)
-        stats = TranscriptStats.from_entries(entries)
-        # Reconcile parent dispatches with the on-disk subagent walk so the
-        # count matches list_session_agents and catches workflow orphans. Reuses
-        # the already-parsed entries — only the tiny subagents/ dir is walked.
-        # Gated: most tools don't need it and shouldn't pay the per-session walk.
-        # Conversion artifacts are excluded — they are copies, not dispatched runs.
-        agents_present = (
-            sum(
-                1 for sa in discover_subagents(ref.path, entries=entries)
-                if not sa.is_conversion_artifact
-            )
-            if with_agents_present
-            else 0
-        )
-        # Cheap head-scan: is this session a conversion artifact?
-        is_conv = read_provenance(ref.path) is not None
-        sessions.append(
-            SessionInfo(
-                session_id=session_id,
-                path=ref.path,
-                title=title,
-                first_timestamp=first_ts,
-                message_count=message_count,
-                stats=stats,
-                worktree=ref.worktree,
-                user_turns=user_turns,
-                team=team,
-                team_role=team_role,
-                agents_present=agents_present,
-                project_path=project_path,
-                is_conversion_artifact=is_conv,
-            )
-        )
-
-    # Sort newest first (None timestamps sort last)
+    sessions = [
+        info
+        for ref in Corpus.discover([project_path]).refs
+        if (info := SessionInfo.load(ref)) is not None
+    ]
     sort_sessions_newest_first(sessions)
     return sessions
 

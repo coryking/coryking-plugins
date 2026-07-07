@@ -1113,7 +1113,7 @@ def test_agents_present_excludes_conversion_artifacts(fake_claude):
     conv_agent = "a" + "c" * 16
     _lay_down_subagent(fake_claude, conv_agent, is_conversion_artifact=True)
 
-    sessions, _ = srv._load_all_sessions([PROJECT], with_agents_present=True)
+    sessions, _ = srv._load_all_sessions([PROJECT])
     parent_session = next(s for s in sessions if str(s.session_id) == SID_PARENT[:8] or s.session_id.full == SID_PARENT)
     assert parent_session.agents_present == 0
 
@@ -1484,8 +1484,10 @@ def test_narrow_finds_workflow_nested_agent(fake_claude):
         [_user("u-wf-0000-0000-0000-00000000wf01", "X", agentId=nested_id, isSidechain=True)],
     )
 
-    narrowed = srv._narrow_projects_for_artifacts([nested_id], None)
-    assert narrowed, "narrowing must find the project holding a workflow-nested agent"
+    from cc_explorer.corpus import Corpus
+
+    narrowed = Corpus.discover(None).narrow_to_artifact_ids([nested_id])
+    assert narrowed.refs, "narrowing must find the session holding a workflow-nested agent"
 
 
 def test_rewind_atomic_write_preserves_original_on_failure(fake_claude, monkeypatch):

@@ -56,8 +56,9 @@ from .models import (
     UserOrigin,
     substantive_human_text,
 )
+from .corpus import resolve_projects
 from .parser import load_conversations, load_transcript
-from .search import resolve_projects, session_title
+from .search import session_title
 from .subagents import collect_agent_files, resolve_subagents_dir
 
 
@@ -276,24 +277,52 @@ def build_activity_timeline(
     grid: dict[str, dict[int, list[int]]] = {}  # sid -> {bucket: [human, agent]}
     seen: set[str] = set()
 
+    # mtime pruning: transcripts are append-only, so a file whose mtime is
+    # before the window start cannot contain an in-window entry — skip its
+    # parse entirely. A compaction rewrite bumps mtime, so pruning errs safe
+    # (a rewritten file is re-scanned, never wrongly skipped). On a real
+    # corpus this cuts a default 7-day window from thousands of parses to the
+    # handful of recently-touched files.
+    lo_ts = lo.timestamp()
+
+    def _stale(path: Path) -> bool:
+        try:
+            return path.stat().st_mtime < lo_ts
+        except OSError:
+            return True
+
     for proj_path in proj_paths:
         proj_name = Path(proj_path).name
         for full_uuid, ref in load_conversations(proj_path).items():
             uuid = full_uuid.full
             if uuid in seen:
                 continue
+
+            # Conversion artifacts are skipped from the fold — they preserve
+            # original timestamps and would double-count the source's history
+            # as the parent's agent activity.
+            agent_files = [
+                af
+                for af in collect_agent_files(resolve_subagents_dir(ref.path))
+                if not af.is_conversion_artifact
+            ]
+
+            # Skip the session only when the main transcript AND every agent
+            # body predate the window — a background agent can outlive its
+            # parent's last write, so the parent alone doesn't decide.
+            if _stale(ref.path) and all(_stale(af.path) for af in agent_files):
+                continue
+
             scan = _scan(ref.path, lo, hi, bucket_s)
             if scan is None:
                 continue
 
             # Fold subagents: their agent activity unions into the parent, their
             # internal human turns become parent agent work, their turn_min adds.
-            # Conversion artifacts are skipped — they preserve original timestamps
-            # and would double-count the source's history as the parent's agent activity.
             n_sub = 0
-            for af in collect_agent_files(resolve_subagents_dir(ref.path)):
-                if af.is_conversion_artifact:
-                    continue
+            for af in agent_files:
+                if _stale(af.path):
+                    continue  # append-only: no in-window entries possible
                 cs = _scan(af.path, lo, hi, bucket_s)
                 if cs is None or not _has_activity(cs):
                     continue
