@@ -33,12 +33,19 @@ from typing import Optional, Protocol, Sequence
 import orjson
 
 from .parser import load_conversations
+from .subagents import resolve_subagents_dir
 from .utils import PrefixId
 
 
 # Sentinel for sessions/projects with no timestamp: sorts last under newest-first.
 # tz-aware so it never collides with aware timestamps in a sort key.
 EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+
+# Ids shorter than this never match as prefixes — the floor that keeps a stray
+# short id from sweeping the corpus, especially via the destructive tools
+# (rewind, delete). `resolve.py` raises the user-facing too-short error;
+# narrowing here just skips them.
+MIN_ID_LEN = 6
 
 
 # =============================================================================
@@ -294,7 +301,7 @@ class SessionRef:
         excluded later by the matcher of record, not here).
         """
         files = [self.path]
-        subdir = self.path.with_suffix("") / "subagents"
+        subdir = resolve_subagents_dir(self.path)
         if subdir.is_dir():
             files.extend(sorted(subdir.rglob("agent-*.jsonl")))
         return files
@@ -341,39 +348,38 @@ class Corpus:
         """Refs matching an id as a SESSION id or HOLDING an agent file for it.
 
         An agent id matches `<session>/subagents/**/agent-<id>*.jsonl` by pure
-        filesystem glob (agent files are `agent-a…` so a session uuid never
-        collides). Globs run per encoded project dir, not per session, so a
-        cross-corpus narrow stays cheap. Ids shorter than the resolver's floor
-        are skipped here (the resolver raises its own too-short error).
+        filesystem walk (agent files are `agent-a…` so a session uuid never
+        collides). One recursive glob per encoded project dir covers every id
+        at once — the agent files it yields carry their session dir as the
+        first path component, so ids prefix-match in Python with no per-session
+        globbing. Ids shorter than MIN_ID_LEN are skipped here (the resolver
+        raises its own too-short error).
         """
-        by_session = set(self.narrow_to_ids(ids).refs)
-        out = list(self.narrow_to_ids(ids).refs)
+        session_matches = self.narrow_to_ids(ids).refs
+        out = list(session_matches)
+        by_session = set(session_matches)
 
-        # Group refs by encoded dir; one glob per (dir, id).
+        wanted = [i for i in ids if len(i) >= MIN_ID_LEN]
+        if not wanted:
+            return Corpus(out)
+
         by_dir: dict[Path, list[SessionRef]] = {}
         for r in self.refs:
             by_dir.setdefault(r.path.parent, []).append(r)
 
-        matched_dirs: dict[Path, set[str]] = {}
         for enc, dir_refs in by_dir.items():
-            for i in ids:
-                if len(i) < 6:  # resolver floor; see resolve._MIN_ID_LEN
-                    continue
-                hit = next(enc.glob(f"*/subagents/**/agent-{i}*.jsonl"), None)
-                if hit is not None:
-                    matched_dirs.setdefault(enc, set()).add(i)
-
-        for enc, hit_ids in matched_dirs.items():
-            for r in by_dir[enc]:
-                if r in by_session:
-                    continue
-                session_dir = r.path.with_suffix("")
-                if any(
-                    next(session_dir.glob(f"subagents/**/agent-{i}*.jsonl"), None)
-                    is not None
-                    for i in hit_ids
-                ):
-                    out.append(r)
+            hit_stems: set[str] = set()
+            for f in enc.glob("*/subagents/**/agent-*.jsonl"):
+                agent_id = f.name[len("agent-") : -len(".jsonl")]
+                if any(agent_id.startswith(i) for i in wanted):
+                    hit_stems.add(f.relative_to(enc).parts[0])
+            if not hit_stems:
+                continue
+            out.extend(
+                r
+                for r in dir_refs
+                if r not in by_session and r.path.stem in hit_stems
+            )
         return Corpus(out)
 
     def candidate_refs(self, patterns: Sequence[str]) -> list[SessionRef]:

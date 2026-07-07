@@ -18,14 +18,9 @@ from typing import Optional
 
 from fastmcp.exceptions import ToolError
 
-from .corpus import SessionRef
+from .corpus import MIN_ID_LEN, SessionRef
 from .subagents import collect_agent_files, resolve_subagents_dir
 from .utils import PrefixId
-
-
-# Ids shorter than this are refused to avoid accidental prefix sweeps —
-# especially for the destructive tools (rewind, delete) that resolve here.
-_MIN_ID_LEN = 6
 
 
 def resolve_unique_ref_or_none(
@@ -71,7 +66,7 @@ def resolve_artifacts(
 
     Works over SessionRefs (caller narrows the corpus first — typically via
     `Corpus.narrow_to_artifact_ids`). For each id:
-      - Rejects ids shorter than _MIN_ID_LEN with a clear error.
+      - Rejects ids shorter than MIN_ID_LEN with a clear error.
       - Finds ALL matching sessions and agent files for the id.
       - Raises ToolError on ambiguity (listing candidates + their projects).
       - Returns a 4-tuple on unique match, or a no-match placeholder
@@ -86,10 +81,10 @@ def resolve_artifacts(
 
     resolved: list[tuple[str, str, str, Optional[Path]]] = []
     for raw_id in raw_ids:
-        if len(raw_id) < _MIN_ID_LEN:
+        if len(raw_id) < MIN_ID_LEN:
             raise ToolError(
                 f"Id {raw_id!r} is too short ({len(raw_id)} chars) — pass at least "
-                f"{_MIN_ID_LEN} chars to avoid accidental prefix matches. "
+                f"{MIN_ID_LEN} chars to avoid accidental prefix matches. "
                 f"Use list_project_sessions or list_session_agents to find full ids."
             )
         # Session matches

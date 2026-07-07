@@ -35,6 +35,7 @@ from .conversion import (
     rewind_transcript as rewind_transcript_file,
 )
 from .corpus import (
+    MIN_ID_LEN,
     Corpus,
     SessionRef,
     discover_projects,
@@ -78,6 +79,7 @@ from .search import (
     browse_session_turns,
     conversation_types_for,
     get_turn_context,
+    promote_refs,
     search_multi,
     sort_sessions_newest_first,
     triage_multi,
@@ -332,11 +334,7 @@ def _load_all_sessions(
     narrow to refs first and promote only what they need.
     """
     proj_paths = resolve_projects(projects)
-    sessions = [
-        info
-        for ref in Corpus.discover(proj_paths).refs
-        if (info := SessionInfo.load(ref)) is not None
-    ]
+    sessions = promote_refs(Corpus.discover(proj_paths).refs)
     sort_sessions_newest_first(sessions)
     return sessions, proj_paths
 
@@ -356,23 +354,24 @@ def _resolve_session(session: str, projects: list[str] | None) -> SessionInfo:
     return info
 
 
-def _resolve_browsable_artifact(session: str, projects: list[str] | None) -> SessionInfo | None:
-    """Resolve a session/agent id to a browsable SessionInfo, agent-aware.
+def _resolve_browsable_artifact(
+    session: str, corpus: Corpus
+) -> tuple[PrefixId, Path, str | None, str | None] | None:
+    """Resolve an agent id to (id, transcript path, project, worktree).
 
-    `browse_session` resolves real SESSIONS via `_resolve_session`, but a
-    convert_session artifact is often a SUBAGENT whose id names no session file —
-    and rewind_transcript points users at browse_session to read the cut turn off
-    the artifact. So when the id isn't a session we fall through to here: the same
-    filename-only resolver rewind/delete use (`Corpus.narrow_to_artifact_ids` +
-    `resolve_artifacts`, NO transcript parse), which resolves the id to a subagent
-    transcript path. We wrap that path in a minimal SessionInfo —
-    `browse_session_turns` reads only `.path`, and the response surfaces
-    `.session_id` / `.project_path` / `.worktree` — so the agent transcript
-    browses exactly like a session. Returns None when the id resolves to no
-    subagent (the caller keeps the original "no session matching" error).
+    `browse_session` resolves real SESSIONS by ref, but a convert_session
+    artifact is often a SUBAGENT whose id names no session file — and
+    rewind_transcript points users at browse_session to read the cut turn off
+    the artifact. So when the id isn't a session we fall through to here: the
+    same filename-only resolver rewind/delete use (`Corpus.narrow_to_artifact_ids`
+    + `resolve_artifacts`, NO transcript parse), which resolves the id to a
+    subagent transcript path — the identity fields browse_session needs, so the
+    agent transcript browses exactly like a session. Returns None when the id
+    resolves to no subagent (the caller keeps the original "no session
+    matching" error).
     """
-    corpus = Corpus.discover(projects).narrow_to_artifact_ids([session])
-    _, kind, full_id, path = resolve_artifacts([session], corpus.refs)[0]
+    narrowed = corpus.narrow_to_artifact_ids([session])
+    _, kind, full_id, path = resolve_artifacts([session], narrowed.refs)[0]
     if kind != "subagent" or path is None:
         return None
     # The PARENT session holding this agent: its transcript dir (`<id>.jsonl`
@@ -381,16 +380,13 @@ def _resolve_browsable_artifact(session: str, projects: list[str] | None) -> Ses
     # `r.path.parent` (the encoded PROJECT dir), which every session in the project
     # shares — so we surface the holding session's own project AND worktree.
     holding = next(
-        (r for r in corpus.refs if r.path.with_suffix("") in path.parents), None
+        (r for r in narrowed.refs if r.path.with_suffix("") in path.parents), None
     )
-    return SessionInfo(
-        session_id=PrefixId(full_id),
-        path=path,
-        title=f"subagent {full_id[:8]}",
-        first_timestamp=None,
-        message_count=0,
-        project_path=holding.project_path if holding else None,
-        worktree=holding.worktree if holding else None,
+    return (
+        PrefixId(full_id),
+        path,
+        holding.project_path if holding else None,
+        holding.worktree if holding else None,
     )
 
 
@@ -623,9 +619,7 @@ def search_projects(
     if not candidates:
         raise no_match_error
 
-    sessions = [
-        info for ref in candidates if (info := SessionInfo.load(ref)) is not None
-    ]
+    sessions = promote_refs(candidates)
     sort_sessions_newest_first(sessions)
 
     sessions = _filter_by_date(sessions, after, before)
@@ -940,11 +934,7 @@ def read_turn(
         if not corpus.refs:
             raise ToolError("No conversations found")
         candidates = corpus.candidate_refs([re.escape(turn)])
-        sessions = [
-            info
-            for ref in candidates
-            if (info := SessionInfo.load(ref)) is not None
-        ]
+        sessions = promote_refs(candidates)
         if not sessions:
             raise ToolError(f"Turn {turn} not found")
 
@@ -1018,23 +1008,28 @@ def browse_session(
     if position not in ("head", "tail"):
         raise ToolError(f"position must be 'head' or 'tail', got: {position!r}")
 
-    # Session-first resolution: a real session id resolves by filename and is
-    # promoted alone. Only when the id names NO session do we fall through to
-    # the artifact resolver, so a converted SUBAGENT's agent id browses like a
-    # session (rewind_transcript points users here to read its cut turn).
-    corpus = Corpus.discover(projects).narrow_to_ids([session])
-    ref = resolve_unique_ref_or_none(corpus.refs, session)
-    target: SessionInfo | None = SessionInfo.load(ref) if ref is not None else None
-    if target is None:
-        target = _resolve_browsable_artifact(session, projects)
-    if target is None:
-        raise ToolError(f"No session matching: {session}")
+    # Session-first resolution: a real session id resolves by filename. Only
+    # when the id names NO session do we fall through to the artifact resolver,
+    # so a converted SUBAGENT's agent id browses like a session
+    # (rewind_transcript points users here to read its cut turn). Both paths
+    # are filename-only — browsing needs the transcript path and identity
+    # fields, never a promoted SessionInfo.
+    corpus = Corpus.discover(projects)
+    ref = resolve_unique_ref_or_none(corpus.narrow_to_ids([session]).refs, session)
+    if ref is not None:
+        browse_id, browse_path = ref.session_id, ref.path
+        project_path, worktree = ref.project_path, ref.worktree
+    else:
+        artifact = _resolve_browsable_artifact(session, corpus)
+        if artifact is None:
+            raise ToolError(f"No session matching: {session}")
+        browse_id, browse_path, project_path, worktree = artifact
 
     base_types = ENTRY_TYPE_MAP[role]
     entry_types = conversation_types_for(hide_set, base_types)
 
     entries, total = browse_session_turns(
-        target, position, turns, anchor_turn=turn, entry_types=entry_types
+        browse_path, position, turns, anchor_turn=turn, entry_types=entry_types
     )
 
     if not entries:
@@ -1043,15 +1038,15 @@ def browse_session(
         raise ToolError(f"Session {session} has no conversation turns")
 
     return BrowseSessionResponse.from_entries(
-        session_id=target.session_id,
+        session_id=browse_id,
         position=position,
         entries=entries,
         total=total,
         truncate=truncate,
         anchor=turn,
         hide=hide_set,
-        worktree=target.worktree,
-        project=target.project_path,
+        worktree=worktree,
+        project=project_path,
     )
 
 
@@ -1129,18 +1124,15 @@ def get_agent_detail(
         # Agent ids only → find the holding session(s) by filename (an agent id
         # matches its transcript's filename under some session's subagents dir)
         # and promote only those, instead of parsing every selected project.
-        short = [a for a in agent_ids if len(a) < 6]
+        short = [a for a in agent_ids if len(a) < MIN_ID_LEN]
         if short:
             raise ToolError(
-                f"Agent id(s) too short (<6 chars): {', '.join(short)} — pass at "
-                f"least 6 chars, or scope with `session` to search within one session."
+                f"Agent id(s) too short (<{MIN_ID_LEN} chars): {', '.join(short)} — "
+                f"pass at least {MIN_ID_LEN} chars, or scope with `session` to "
+                f"search within one session."
             )
         corpus = Corpus.discover(projects).narrow_to_artifact_ids(agent_ids)
-        sessions = [
-            info
-            for ref in corpus.refs
-            if (info := SessionInfo.load(ref)) is not None
-        ]
+        sessions = promote_refs(corpus.refs)
         if not sessions:
             raise ToolError(f"Agent(s) not found: {', '.join(agent_ids)}")
 

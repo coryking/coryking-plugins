@@ -275,12 +275,24 @@ _cache = TranscriptCache(_cache_max_bytes())
 
 
 # Structural header line types that are part of the wire format but are not
-# conversation data: session mode/permission/title headers and our own
-# conversion-provenance sentinel. Skipped silently (they are expected in
-# well-formed files); everything else that fails to parse is counted and
-# reported so tolerant parsing is no longer silent.
+# conversation data: session mode/permission/title/prompt headers, worktree and
+# PR bookkeeping, and our own conversion-provenance sentinel. Skipped silently
+# (they are expected in well-formed files); everything else that fails to parse
+# is counted and reported so tolerant parsing is no longer silent.
 _STRUCTURAL_LINE_TYPES = frozenset(
-    {"mode", "permission-mode", "custom-title", "x-converter-provenance"}
+    {
+        "mode",
+        "permission-mode",
+        "custom-title",
+        "ai-title",
+        "last-prompt",
+        "attachment",
+        "agent-name",
+        "relocated",
+        "worktree-state",
+        "pr-link",
+        "x-converter-provenance",
+    }
 )
 
 

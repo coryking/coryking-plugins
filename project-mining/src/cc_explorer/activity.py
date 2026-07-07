@@ -298,20 +298,28 @@ def build_activity_timeline(
             if uuid in seen:
                 continue
 
+            # Skip the session only when the main transcript AND every agent
+            # body predate the window — a background agent can outlive its
+            # parent's last write, so the parent alone doesn't decide. This is
+            # a stat-only walk: collect_agent_files reads each agent's
+            # meta.json/provenance, so only survivors pay for it. The raw walk
+            # includes conversion artifacts, so a fresh one keeps its (stale)
+            # session alive here — the scan below then finds no in-window
+            # activity and drops it, so pruning still errs safe.
+            subagents_dir = resolve_subagents_dir(ref.path)
+            if _stale(ref.path) and all(
+                _stale(p) for p in subagents_dir.rglob("agent-*.jsonl")
+            ):
+                continue
+
             # Conversion artifacts are skipped from the fold — they preserve
             # original timestamps and would double-count the source's history
             # as the parent's agent activity.
             agent_files = [
                 af
-                for af in collect_agent_files(resolve_subagents_dir(ref.path))
+                for af in collect_agent_files(subagents_dir)
                 if not af.is_conversion_artifact
             ]
-
-            # Skip the session only when the main transcript AND every agent
-            # body predate the window — a background agent can outlive its
-            # parent's last write, so the parent alone doesn't decide.
-            if _stale(ref.path) and all(_stale(af.path) for af in agent_files):
-                continue
 
             scan = _scan(ref.path, lo, hi, bucket_s)
             if scan is None:

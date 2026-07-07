@@ -11,7 +11,7 @@ from datetime import datetime
 from enum import Enum
 from functools import cached_property
 from pathlib import Path
-from typing import Optional, TypeGuard
+from typing import Iterable, Optional, TypeGuard
 
 from .models import (
     AssistantTranscriptEntry,
@@ -387,21 +387,27 @@ def session_title(entries: list[TranscriptEntry]) -> str:
     return "(empty session)"
 
 
+def promote_refs(refs: Iterable[SessionRef]) -> list[SessionInfo]:
+    """Promote refs to parsed sessions, dropping empty/unreadable ones.
+
+    The bulk form of `SessionInfo.load` — every promotion of more than one ref
+    goes through here, so the "load returned None means skip it" convention
+    lives in one place.
+    """
+    return [info for ref in refs if (info := SessionInfo.load(ref)) is not None]
+
+
 def load_sessions(project_path: str) -> list[SessionInfo]:
     """Find and load all conversation sessions for a project.
 
     A thin wrapper over discovery + promotion: `Corpus.discover` lists the
-    project's sessions by filename (worktrees pooled), `SessionInfo.load`
-    promotes each one. Returns SessionInfo list sorted by first_timestamp
+    project's sessions by filename (worktrees pooled), `promote_refs` parses
+    each one. Returns SessionInfo list sorted by first_timestamp
     (newest first). This parses the whole project — right for
     list_project_sessions (whose job is the project inventory); scoped tools
     should narrow to refs first and promote only what they need.
     """
-    sessions = [
-        info
-        for ref in Corpus.discover([project_path]).refs
-        if (info := SessionInfo.load(ref)) is not None
-    ]
+    sessions = promote_refs(Corpus.discover([project_path]).refs)
     sort_sessions_newest_first(sessions)
     return sessions
 
@@ -818,19 +824,21 @@ def get_turn_context(
 
 
 def browse_session_turns(
-    session: SessionInfo,
+    transcript_path: Path,
     position: str,
     turns: int = 10,
     anchor_turn: str | None = None,
     entry_types: tuple[type, ...] = (HumanEntry, AssistantTranscriptEntry),
 ) -> tuple[list[TranscriptEntry], int]:
-    """Return first or last N conversation turns from a session.
+    """Return first or last N conversation turns from a transcript file.
 
+    Takes a bare path so any transcript browses — a session's main file or a
+    subagent body — without promoting a SessionInfo first.
     Filters to entry_types (default: HumanEntry + AssistantTranscriptEntry).
     If anchor_turn is set, tail reads forward from anchor, head reads up to anchor.
     Returns (sliced_entries, total_conversation_turns).
     """
-    entries = load_transcript(session.path)
+    entries = load_transcript(transcript_path)
     conversation = [e for e in entries if isinstance(e, entry_types)]
     total = len(conversation)
 
