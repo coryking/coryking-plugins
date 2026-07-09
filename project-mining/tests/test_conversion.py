@@ -1453,7 +1453,7 @@ def test_rewind_resolves_without_parsing_transcripts(fake_claude, monkeypatch):
     def boom(*a, **kw):  # any parse during resolution is the bug
         raise AssertionError(
             "rewind resolved via _load_all_sessions (full transcript parse) — it "
-            "must resolve by filename only (_sessions_by_filename)"
+            "must resolve by filename only (Corpus.narrow_to_artifact_ids + resolve_artifacts)"
         )
 
     monkeypatch.setattr(srv, "_load_all_sessions", boom)

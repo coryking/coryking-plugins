@@ -861,3 +861,43 @@ class TestMtimePruning:
         assert sess["n_sub"] == 1
         assert sess["agent_turns"] == 2
         assert sess["human_turns"] == 0  # parent's turns predate the window
+
+    def test_stale_parent_with_fresh_conversion_artifact_not_folded(
+        self, corpus, tmp_path, monkeypatch
+    ):
+        """The stat-only prune walks raw `agent-*.jsonl` files without checking
+        provenance, so a fresh CONVERSION-ARTIFACT subagent keeps a stale parent
+        from being skipped early — but the fold excludes conversion artifacts
+        (they'd double-count the source's history), so the scan below finds no
+        in-window activity and the session is dropped just like a genuinely
+        inactive one. Pruning still errs safe: nothing real is ever missed."""
+        corpus(
+            "proj",
+            SESSION_A,
+            [human(OLD_TS, "kicked off long agent run")],
+            subagents={SUB_ID: [assistant(utc(2026, 6, 3, 18, 0), "sub-req-1")]},
+        )
+        parent_path = tmp_path / "proj" / f"{SESSION_A}.jsonl"
+        _backdate(parent_path, STALE)
+        sub_path = parent_path.with_suffix("") / "subagents" / f"agent-{SUB_ID}.jsonl"
+
+        def fake_collect_agent_files(subdir):
+            return [
+                AgentFile(agent_id=SUB_ID, path=sub_path, is_conversion_artifact=True)
+            ]
+
+        monkeypatch.setattr(activity, "collect_agent_files", fake_collect_agent_files)
+
+        scanned: list[Path] = []
+        real_scan = activity._scan
+
+        def spy(path, *a, **k):
+            scanned.append(path)
+            return real_scan(path, *a, **k)
+
+        monkeypatch.setattr(activity, "_scan", spy)
+
+        out = run()
+
+        assert parent_path in scanned  # kept alive past the stat-only prune...
+        assert out["sessions"] == []  # ...but folds in no activity, so it's dropped

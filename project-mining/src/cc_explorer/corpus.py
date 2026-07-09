@@ -17,6 +17,11 @@ characters (newline/tab/quote/backslash become \\n \\t \\" \\\\) — a pattern
 that needs to match one of those can miss in raw bytes what the matcher finds
 in extracted text. `rg_safe` gates exactly those patterns to the scan-all
 path, so the prefilter can only ever over-select, never drop a true hit.
+
+The superset guarantee holds for ASCII case folding. rg's `--ignore-case` and
+Python's `re.IGNORECASE` (used by the typed matcher and `PyScanner`) diverge
+on Unicode special-folding pairs (e.g. U+0130 İ / U+0131 ı), so a non-ASCII-
+cased literal can, in principle, be missed by the RgScanner prefilter.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -287,12 +293,6 @@ class SessionRef:
     project_path: str
     worktree: Optional[str] = None
 
-    def mtime(self) -> float:
-        try:
-            return self.path.stat().st_mtime
-        except OSError:
-            return 0.0
-
     def transcript_files(self) -> list[Path]:
         """The main transcript plus every on-disk subagent transcript.
 
@@ -405,7 +405,12 @@ class Corpus:
 
         try:
             hits = make_scanner().files_with_match(patterns, files)
-        except ScannerError:
+        except ScannerError as e:
+            # stderr, never stdout — stdout is the stdio MCP protocol channel.
+            print(
+                f"[cc-explorer corpus] prefilter failed ({e}); falling back to full scan",
+                file=sys.stderr,
+            )
             return list(self.refs)
 
         return [ref for ref, tf in ref_files if any(f in hits for f in tf)]
@@ -443,6 +448,11 @@ class Scanner(Protocol):
 #   [^           negated character class (matches newline)
 #   ^ $          line anchors
 #   (?           groups with flags/lookaround (also rust-regex limits)
+#   bare .       a bare `.` (including `.?`/`.{n}`) matches exactly one char,
+#                so it can require matching one byte where raw bytes hold a
+#                two-char JSON escape. `.*`/`.+` are fine — they can absorb the
+#                extra byte — and an escaped `\.` is fine too, since a literal
+#                dot byte is never rewritten by JSON string escaping.
 _RG_UNSAFE = re.compile(
     r'"'
     r"|\\[snrtSWDAZux0-9]"
@@ -450,11 +460,18 @@ _RG_UNSAFE = re.compile(
     r"|\[\^"
     r"|[\^$]"
     r"|\(\?"
+    r"|(?<!\\)\.(?![*+])"
 )
 
 
 def rg_safe(pattern: str) -> bool:
-    """True when a raw-byte prefilter cannot drop a true hit for this pattern."""
+    """True when a raw-byte prefilter cannot drop a true hit for this pattern.
+
+    Scoped to ASCII case folding: rg's `--ignore-case` doesn't Unicode-fold
+    the way Python's `re.IGNORECASE` does (e.g. U+0130 İ / U+0131 ı), so a
+    non-ASCII-cased literal can still be missed by RgScanner even when this
+    returns True. That gap isn't gated here — see the module docstring.
+    """
     return not _RG_UNSAFE.search(pattern)
 
 
@@ -504,7 +521,11 @@ class RgScanner:
                 return
             try:
                 proc = subprocess.run(
-                    base + batch, capture_output=True, text=True, timeout=300
+                    base + batch,
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=300,
                 )
             except (OSError, subprocess.SubprocessError) as e:
                 raise ScannerError(str(e))
@@ -533,7 +554,11 @@ class PyScanner:
     """Streaming line-regex fallback when rg is unavailable.
 
     Same raw-byte semantics as RgScanner (superset for rg-safe patterns).
-    Parses nothing, retains nothing — one line in memory at a time.
+    Parses nothing, retains nothing — one line in memory at a time. A file
+    that vanished between listing and opening is skipped (a gone file can't
+    be parsed later either, so "no match" is consistent); any other open/read
+    failure raises ScannerError so the caller falls back to scan-all instead
+    of silently under-selecting.
     """
 
     def files_with_match(
@@ -551,8 +576,10 @@ class PyScanner:
                         if any(rx.search(line) for rx in compiled):
                             hits.add(f)
                             break
-            except OSError:
+            except FileNotFoundError:
                 continue
+            except OSError as e:
+                raise ScannerError(str(e))
         return hits
 
 

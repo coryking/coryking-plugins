@@ -10,6 +10,7 @@ guarantees this exercises, now at the corpus/resolve layer:
 """
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from fastmcp.exceptions import ToolError
@@ -18,6 +19,7 @@ import cc_explorer.corpus as corpus_mod
 from cc_explorer.corpus import Corpus, SessionRef
 from cc_explorer.parser import ConversationRef
 from cc_explorer.resolve import resolve_unique_ref, resolve_unique_ref_or_none
+from cc_explorer.search import SessionInfo
 from cc_explorer.utils import PrefixId
 
 ID_A = "aaaaaaaa-1111-2222-3333-444444444444"
@@ -43,10 +45,12 @@ def test_resolve_unique_returns_single_match():
 
 
 def test_resolve_unique_raises_on_ambiguous_prefix():
-    # Two distinct full ids sharing the same 8-char prefix.
+    # Two distinct full ids sharing the same 8-char prefix, both real sessions
+    # (SessionInfo.load succeeds for both) — a genuine collision.
     refs = [_ref(ID_A, "/repoA"), _ref(ID_A2, "/repoB")]
-    with pytest.raises(ToolError) as exc:
-        resolve_unique_ref(refs, "aaaaaaaa")
+    with patch.object(SessionInfo, "load", classmethod(lambda cls, ref: object())):
+        with pytest.raises(ToolError) as exc:
+            resolve_unique_ref(refs, "aaaaaaaa")
     msg = str(exc.value)
     assert "ambiguous" in msg.lower()
     assert "/repoA" in msg and "/repoB" in msg  # names where the collision lives
@@ -63,8 +67,53 @@ def test_resolve_unique_or_none_returns_none_on_no_match():
 
 def test_resolve_unique_or_none_still_raises_on_ambiguity():
     refs = [_ref(ID_A, "/repoA"), _ref(ID_A2, "/repoB")]
-    with pytest.raises(ToolError):
-        resolve_unique_ref_or_none(refs, "aaaaaaaa")
+    with patch.object(SessionInfo, "load", classmethod(lambda cls, ref: object())):
+        with pytest.raises(ToolError):
+            resolve_unique_ref_or_none(refs, "aaaaaaaa")
+
+
+# --- ambiguity over empty/unparseable sessions (#9) -----------------------------
+#
+# Filename-level SessionRefs can't tell an empty/unreadable session file from a
+# real one, so a prefix colliding with an empty file looked "ambiguous" until
+# resolve_unique_ref_or_none promotes just the colliding refs and drops the
+# ones that load empty — restoring the pre-redesign behavior of deciding
+# ambiguity over sessions that actually parse non-empty.
+
+
+def test_ambiguous_prefix_resolves_when_one_collision_is_empty():
+    refs = [_ref(ID_A, "/repoA"), _ref(ID_A2, "/repoB")]
+    real = object()  # stands in for a promoted SessionInfo — only None-ness matters
+    loaded = {ID_A: real, ID_A2: None}
+
+    with patch.object(
+        SessionInfo,
+        "load",
+        classmethod(lambda cls, ref: loaded[ref.session_id.full]),
+    ):
+        got = resolve_unique_ref_or_none(refs, "aaaaaaaa")
+    assert got is not None
+    assert got.session_id == PrefixId(ID_A)
+
+
+def test_ambiguous_prefix_still_raises_when_both_collisions_are_real():
+    refs = [_ref(ID_A, "/repoA"), _ref(ID_A2, "/repoB")]
+
+    with patch.object(
+        SessionInfo, "load", classmethod(lambda cls, ref: object())
+    ):
+        with pytest.raises(ToolError) as exc:
+            resolve_unique_ref_or_none(refs, "aaaaaaaa")
+    msg = str(exc.value)
+    assert "ambiguous" in msg.lower()
+    assert "/repoA" in msg and "/repoB" in msg
+
+
+def test_ambiguous_prefix_returns_none_when_both_collisions_are_empty():
+    refs = [_ref(ID_A, "/repoA"), _ref(ID_A2, "/repoB")]
+
+    with patch.object(SessionInfo, "load", classmethod(lambda cls, ref: None)):
+        assert resolve_unique_ref_or_none(refs, "aaaaaaaa") is None
 
 
 # --- Corpus.discover dedup -----------------------------------------------------

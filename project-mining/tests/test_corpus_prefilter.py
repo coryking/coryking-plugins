@@ -23,7 +23,7 @@ from cc_explorer.corpus import (
     SessionRef,
     rg_safe,
 )
-from cc_explorer.search import SessionInfo, triage
+from cc_explorer.search import SessionInfo, promote_refs, triage
 from cc_explorer.utils import PrefixId
 
 SID_A = "aaaaaaaa-1111-2222-3333-444444444444"
@@ -78,6 +78,9 @@ def _write_agent(ref: SessionRef, agent_id: str, entries: list[dict]) -> Path:
         "alpha|beta",
         r"\bword\b",
         "case INSENSITIVE",
+        "a.*b",             # `.*` absorbs a multi-char escape
+        "a.+b",             # `.+` absorbs a multi-char escape
+        r"a\.b",            # escaped literal dot — never rewritten by JSON escaping
     ],
 )
 def test_rg_safe_accepts_plain_patterns(pattern):
@@ -101,6 +104,8 @@ def test_rg_safe_accepts_plain_patterns(pattern):
         r"\Wfoo",           # \W can be required to match a newline
         r"\Dbar",
         r"\Astart",
+        "a.b",              # bare `.` matches one char, raw may hold a 2-char escape
+        "a.?b",             # `.?` still hits the single-char hazard
     ],
 )
 def test_rg_safe_rejects_escaping_hazards(pattern):
@@ -168,6 +173,56 @@ def test_rg_scanner_batches_argv(tmp_path, monkeypatch):
     assert hits == set(files)
 
 
+def test_py_scanner_skips_vanished_file(tmp_path):
+    """A file that disappears between listing and opening is skipped, not
+    fatal — it can't be parsed later either, so treating it as no-match is
+    consistent (unlike an unreadable-but-present file, which must raise)."""
+    a = tmp_path / "a.jsonl"
+    a.write_text(json.dumps(_entry("alpha content")) + "\n")
+    missing = tmp_path / "gone.jsonl"
+
+    hits = PyScanner().files_with_match(["alpha"], [a, missing])
+    assert hits == {a}
+
+
+def test_py_scanner_raises_scanner_error_on_permission_denied(tmp_path, monkeypatch):
+    """An unreadable-but-present file must NOT silently read as no-match — that
+    would under-select against the candidate-superset contract. It raises
+    ScannerError so candidate_refs falls back to scan-all instead."""
+    a = tmp_path / "a.jsonl"
+    a.write_text(json.dumps(_entry("alpha content")) + "\n")
+
+    real_open = open
+
+    def boom_open(path, *a_, **kw):
+        if str(path) == str(a):
+            raise PermissionError("simulated permission denied")
+        return real_open(path, *a_, **kw)
+
+    monkeypatch.setattr("builtins.open", boom_open)
+
+    with pytest.raises(ScannerError):
+        PyScanner().files_with_match(["alpha"], [a])
+
+
+@pytest.mark.skipif(shutil.which("rg") is None, reason="rg not on PATH")
+@pytest.mark.xfail(
+    strict=False,
+    reason="rg --ignore-case does not Unicode-case-fold like Python re.IGNORECASE (documented gap)",
+)
+def test_rg_scanner_unicode_case_folding_gap(tmp_path):
+    """Pins the documented gap: Python's re.IGNORECASE folds U+0130 İ to 'i',
+    so `din` matches `dİn` in the typed matcher — but rg's --ignore-case
+    doesn't fold the same way, so the RgScanner prefilter can miss it. xfail
+    with strict=False since rg's exact Unicode behavior may vary by version."""
+    rg = shutil.which("rg")
+    a = tmp_path / "a.jsonl"
+    a.write_text(json.dumps(_entry("word dİn here")) + "\n")
+
+    hits = RgScanner(rg).files_with_match(["din"], [a])
+    assert hits == {a}
+
+
 def test_rg_scanner_raises_on_bad_pattern(tmp_path):
     """A pattern the rust engine rejects surfaces as ScannerError (callers
     fall back to scan-all), never a silent empty candidate set."""
@@ -217,6 +272,29 @@ def test_unsafe_pattern_forces_scan_all(tmp_path):
     assert corpus.candidate_refs([r"alpha\s+beta"]) == [ref_a, ref_b]
 
 
+def test_scanner_failure_forces_scan_all(tmp_path, monkeypatch, capsys):
+    """A scanner that raises at runtime (not just an unsafe pattern) must also
+    fall back to scan-all — under-selecting here would silently drop a true
+    hit, not just miss an optimization. The failure is also noted on stderr
+    (stdout is the stdio MCP channel) so a real prefilter breakage is visible
+    rather than indistinguishable from an empty-corpus no-op."""
+    enc = tmp_path / "enc"
+    ref_a = _write_session(enc, SID_A, [_entry("alpha")])
+    ref_b = _write_session(enc, SID_B, [_entry("beta", session=SID_B)])
+    corpus = Corpus([ref_a, ref_b])
+
+    class BoomScanner:
+        def files_with_match(self, patterns, files):
+            raise ScannerError("simulated scanner crash")
+
+    monkeypatch.setattr(corpus_mod, "make_scanner", lambda: BoomScanner())
+
+    assert corpus.candidate_refs(["alpha"]) == [ref_a, ref_b]
+    err = capsys.readouterr().err
+    assert "prefilter failed" in err
+    assert "simulated scanner crash" in err
+
+
 def test_mixed_safe_and_unsafe_patterns_scan_all(tmp_path):
     """One unsafe pattern in the set disables the prefilter for the call —
     candidates must be a superset for EVERY pattern simultaneously."""
@@ -260,6 +338,19 @@ def test_superset_at_stripped_xml_newline_boundary(tmp_path):
     # ...and the prefilter keeps the session as a candidate (scan-all route).
     assert not rg_safe(pattern)
     assert corpus.candidate_refs([pattern]) == [ref]
+
+
+def test_superset_at_bare_dot_escape_boundary(tmp_path):
+    """A second case the rg_safe gate exists for: a bare `.` matches exactly
+    one char, so `a.b` matches extracted `a"b` but NOT raw JSONL bytes, where
+    the quote is escaped to the two-char `a\\"b`. The pattern must route to
+    scan-all so the prefilter cannot drop the true hit."""
+    enc = tmp_path / "enc"
+    ref = _write_session(enc, SID_A, [_entry('a"b in the middle')])
+    corpus = Corpus([ref])
+
+    assert not rg_safe("a.b")
+    assert corpus.candidate_refs(["a.b"]) == [ref]
 
 
 def test_prefilter_equivalent_to_full_scan_for_safe_patterns(tmp_path):
@@ -345,3 +436,35 @@ def test_narrow_skips_too_short_ids(tmp_path):
 
     # <6 chars: not globbed (the resolver raises its own too-short error).
     assert corpus.narrow_to_artifact_ids([AGENT_ID[:4]]).refs == []
+
+
+# =============================================================================
+# SessionInfo.load / promote_refs — a ref whose file vanished
+# =============================================================================
+
+
+def test_session_info_load_returns_none_for_missing_file(tmp_path):
+    """A ref pointing at a path that no longer exists (deleted between
+    discovery and promotion) is treated like any other unreadable session —
+    load returns None rather than raising, per its documented contract."""
+    ref = SessionRef(
+        session_id=PrefixId(SID_A),
+        path=tmp_path / "does-not-exist.jsonl",
+        project_path="/fake",
+    )
+    assert SessionInfo.load(ref) is None
+
+
+def test_promote_refs_drops_missing_file_ref(tmp_path):
+    """One good ref plus one whose file vanished promotes to just the good
+    session — promote_refs' whole job is silently dropping load's None."""
+    enc = tmp_path / "enc"
+    good = _write_session(enc, SID_A, [_entry("real content")])
+    missing = SessionRef(
+        session_id=PrefixId(SID_B),
+        path=tmp_path / "gone.jsonl",
+        project_path="/fake",
+    )
+
+    sessions = promote_refs([good, missing])
+    assert [s.session_id for s in sessions] == [good.session_id]

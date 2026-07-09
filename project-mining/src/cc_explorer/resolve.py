@@ -19,6 +19,7 @@ from typing import Optional
 from fastmcp.exceptions import ToolError
 
 from .corpus import MIN_ID_LEN, SessionRef
+from .search import SessionInfo
 from .subagents import collect_agent_files, resolve_subagents_dir
 from .utils import PrefixId
 
@@ -30,15 +31,33 @@ def resolve_unique_ref_or_none(
 
     Ambiguity is a hard error even here: a colliding prefix must be
     disambiguated by the caller, not silently re-routed to a fallback path.
+    Decided over sessions that actually parse non-empty — a prefix colliding
+    with an empty/unreadable session file resolves through to the real one
+    rather than erroring, matching pre-redesign behavior. Promotion (via
+    `SessionInfo.load`) touches only the colliding refs, so cost stays
+    bounded regardless of corpus size.
     """
     matches = [r for r in refs if r.session_id == session]
     if not matches:
         return None
     distinct = {r.session_id.full for r in matches}
     if len(distinct) > 1:
-        where = ", ".join(sorted({r.project_path or "?" for r in matches}))
+        # One ref per distinct full id decides whether the collision is real:
+        # a prefix matching an empty/unparseable session alongside a real one
+        # isn't ambiguous, it's just noise from the empty file.
+        one_per_id = {r.session_id.full: r for r in matches}
+        surviving = {
+            fid: r for fid, r in one_per_id.items() if SessionInfo.load(r) is not None
+        }
+        if len(surviving) == 1:
+            return next(iter(surviving.values()))
+        if not surviving:
+            return None
+        where = ", ".join(
+            sorted({r.project_path or "?" for r in surviving.values()})
+        )
         raise ToolError(
-            f"Session prefix {session!r} is ambiguous — it matches {len(distinct)} "
+            f"Session prefix {session!r} is ambiguous — it matches {len(surviving)} "
             f"distinct sessions (in: {where}). Pass a longer id or scope with `projects`."
         )
     return matches[0]

@@ -11,6 +11,7 @@ Core functions:
 
 import os
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union, cast
@@ -256,19 +257,23 @@ class TranscriptCache:
         self._lru: LRUCache[Path, CachedTranscript] = LRUCache(
             maxsize=max_bytes, getsizeof=lambda v: v.nbytes
         )
+        # cachetools.LRUCache mutates its recency order on both get and put, and
+        # isn't thread-safe; FastMCP dispatches sync tools on a thread pool
+        # (anyio.to_thread), so concurrent tool calls can otherwise corrupt the
+        # LRU bookkeeping.
+        self._lock = threading.Lock()
 
     def get(self, path: Path) -> Optional[CachedTranscript]:
-        return self._lru.get(path)
+        with self._lock:
+            return self._lru.get(path)
 
     def put(self, path: Path, value: CachedTranscript) -> None:
-        try:
-            self._lru[path] = value
-        except ValueError:
-            # Value alone exceeds the cache cap — serve it uncached.
-            pass
-
-    def clear(self) -> None:
-        self._lru.clear()
+        with self._lock:
+            try:
+                self._lru[path] = value
+            except ValueError:
+                # Value alone exceeds the cache cap — serve it uncached.
+                pass
 
 
 _cache = TranscriptCache(_cache_max_bytes())
