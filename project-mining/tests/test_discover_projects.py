@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import cc_explorer._claude_paths as paths
-from cc_explorer.search import discover_projects, resolve_projects
+from cc_explorer.corpus import discover_projects, resolve_projects
 
 
 def _write_jsonl(path: Path, lines: list[dict]) -> None:
@@ -119,9 +119,9 @@ def test_resolve_projects_explicit_list_dedups():
 
 
 def test_resolve_projects_empty_calls_discover():
-    from cc_explorer.search import ProjectInfo
+    from cc_explorer.corpus import ProjectInfo
 
     fake = [ProjectInfo(path="/x", name="x"), ProjectInfo(path="/y", name="y")]
-    with patch("cc_explorer.search.discover_projects", return_value=fake):
+    with patch("cc_explorer.corpus.discover_projects", return_value=fake):
         assert resolve_projects(None) == ["/x", "/y"]
         assert resolve_projects([]) == ["/x", "/y"]

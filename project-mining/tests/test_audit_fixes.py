@@ -69,6 +69,8 @@ from cc_explorer.models import (
     TranscriptStats,
 )
 from cc_explorer.search import MatchHit, SessionInfo
+
+from tests.conftest import patch_session_corpus
 from cc_explorer.utils import PrefixId
 
 
@@ -186,7 +188,7 @@ class TestGrepSessionsSurfacesUnresolvedPrefixes:
         def fake_search_multi(target_sessions, patterns, **kwargs):
             return {s.session_id: _hit_multi(s.session_id) for s in target_sessions}
 
-        with patch("cc_explorer.mcp_server.load_sessions", return_value=sessions), \
+        with patch_session_corpus(sessions), \
              patch("cc_explorer.mcp_server.search_multi", side_effect=fake_search_multi):
             resp = grep_sessions(
                 sessions=["aaaaaaaa", "deadbeef", "cafef00d"],
@@ -207,7 +209,7 @@ class TestGrepSessionsSurfacesUnresolvedPrefixes:
         good_id = "aaaaaaaa-1111-2222-3333-444444444444"
         sessions = [_build_session(good_id, "good")]
 
-        with patch("cc_explorer.mcp_server.load_sessions", return_value=sessions):
+        with patch_session_corpus(sessions):
             with pytest.raises(ToolError):
                 grep_sessions(
                     sessions=["deadbeef", "cafef00d"],
@@ -301,7 +303,7 @@ class TestSessionToolAuditCountsReflectSkippedAgents:
             # Empty trace — we just care about the counts
             return [], {}, 0
 
-        with patch("cc_explorer.mcp_server.load_sessions", return_value=sessions), \
+        with patch_session_corpus(sessions), \
              patch("cc_explorer.mcp_server.discover_subagents", return_value=all_agents), \
              patch("cc_explorer.mcp_server.resolve_output_files", side_effect=fake_resolve), \
              patch("cc_explorer.mcp_server.scan_output_file_stats", side_effect=fake_scan), \
@@ -347,7 +349,7 @@ class TestSessionToolAuditCountsReflectSkippedAgents:
             ),
         ]
 
-        with patch("cc_explorer.mcp_server.load_sessions", return_value=sessions), \
+        with patch_session_corpus(sessions), \
              patch("cc_explorer.mcp_server.discover_subagents", return_value=all_agents), \
              patch("cc_explorer.mcp_server.resolve_output_files", side_effect=lambda *a, **k: None), \
              patch("cc_explorer.mcp_server.scan_output_file_stats", return_value={}):
@@ -386,7 +388,7 @@ class TestGrepSessionsPreservesInputOrder:
         def fake_search_multi(target_sessions, patterns, **kwargs):
             return {s.session_id: _hit_multi(s.session_id) for s in target_sessions}
 
-        with patch("cc_explorer.mcp_server.load_sessions", return_value=sessions), \
+        with patch_session_corpus(sessions), \
              patch("cc_explorer.mcp_server.search_multi", side_effect=fake_search_multi):
             # Caller passes c, a, b — output must follow that order, not the
             # underlying load_sessions order.
@@ -416,7 +418,7 @@ class TestGrepSessionsOmitsZeroHitSessions:
                 for s in target_sessions
             }
 
-        with patch("cc_explorer.mcp_server.load_sessions", return_value=sessions), \
+        with patch_session_corpus(sessions), \
              patch("cc_explorer.mcp_server.search_multi", side_effect=fake_search_multi):
             resp = grep_sessions(
                 sessions=["aaaaaaaa", "bbbbbbbb"],

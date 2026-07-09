@@ -20,7 +20,8 @@ from .formatting import format_entry_line, format_session_date, render_trace
 from .utils import PrefixId
 
 if TYPE_CHECKING:
-    from .search import MatchHit, PatternTriageResults, ProjectInfo, SessionInfo
+    from .corpus import ProjectInfo
+    from .search import MatchHit, PatternTriageResults, SessionInfo
     from .subagents import SubagentInfo
 
 

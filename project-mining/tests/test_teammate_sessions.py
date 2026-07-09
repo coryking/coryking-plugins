@@ -81,7 +81,7 @@ def _load(entries):
     conversations = {
         SESSION_ID: ConversationRef(path=Path(f"{SESSION_ID}.jsonl"), worktree=None)
     }
-    with patch("cc_explorer.search.load_conversations", return_value=conversations), \
+    with patch("cc_explorer.corpus.load_conversations", return_value=conversations), \
          patch("cc_explorer.search.load_transcript", return_value=entries):
         return load_sessions("/fake/project")
 

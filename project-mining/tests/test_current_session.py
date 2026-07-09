@@ -141,19 +141,21 @@ def test_search_response_omits_marker_when_nothing_excluded():
 
 def test_search_projects_only_self_points_at_exclusion(monkeypatch):
     """When the calling session is the only session in scope, the error names
-    the exclusion (and the override) rather than blaming the patterns. The
-    exclusion branch fires before any transcript is loaded."""
+    the exclusion (and the override) rather than blaming the patterns."""
     import cc_explorer.mcp_server as srv
+    from cc_explorer.corpus import Corpus
     from fastmcp.exceptions import ToolError
+
+    from tests.conftest import patch_session_corpus
 
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", CALLER_ID)
     monkeypatch.setattr(srv, "resolve_projects", lambda projects=None: ["/tmp/fake"])
-    monkeypatch.setattr(
-        srv, "load_sessions", lambda proj, with_agents_present=False: [_session(CALLER_ID)]
-    )
+    # Prefilter is not under test here — pass every ref through as a candidate.
+    monkeypatch.setattr(Corpus, "candidate_refs", lambda self, patterns: list(self.refs))
 
-    with pytest.raises(ToolError) as exc:
-        srv.search_projects(patterns=["anything"])
+    with patch_session_corpus([_session(CALLER_ID)]):
+        with pytest.raises(ToolError) as exc:
+            srv.search_projects(patterns=["anything"])
     msg = str(exc.value)
     assert "include_current_session" in msg
     assert CALLER_ID[:8] in msg  # names the excluded session by short id

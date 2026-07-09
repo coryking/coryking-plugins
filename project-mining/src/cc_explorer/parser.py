@@ -9,11 +9,15 @@ Core functions:
 - extract_text — re-exported from models.py
 """
 
-import json
+import os
+import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union, cast
 
+import orjson
+from cachetools import LRUCache
 from pydantic import BaseModel
 
 from .utils import PrefixId
@@ -199,13 +203,102 @@ def create_transcript_entry(data: dict[str, Any]) -> TranscriptEntry:
 
 @dataclass
 class CachedTranscript:
-    """Parsed transcript entries with the file mtime at parse time."""
+    """Parsed transcript entries with the file mtime at parse time.
+
+    `nbytes` is the entry's estimated heap cost (raw file size x the measured
+    heap factor) — what the byte-capped cache charges for holding it.
+    """
 
     mtime: float
     entries: list[TranscriptEntry]
+    nbytes: int
 
 
-_cache: dict[Path, CachedTranscript] = {}
+# Parsed pydantic entry graphs occupy ~1.8x the raw file bytes on the heap
+# (measured against the real corpus: a 3.13 GB corpus parsed to a 5.5 GB RSS).
+# Used to charge cache entries by estimated heap cost without walking the
+# object graph.
+_HEAP_FACTOR = 1.8
+
+_DEFAULT_CACHE_MB = 200
+
+
+def _cache_max_bytes() -> int:
+    """Cache cap in bytes (CC_EXPLORER_CACHE_MB env, default 200 MB).
+
+    Only a positive value is honored; an unparseable or non-positive override
+    falls back to the default rather than silently disabling the cache or
+    unbounding it.
+    """
+    raw = os.environ.get("CC_EXPLORER_CACHE_MB")
+    if raw:
+        try:
+            mb = float(raw)
+            if mb > 0:
+                return int(mb * 1024 * 1024)
+        except ValueError:
+            pass
+    return _DEFAULT_CACHE_MB * 1024 * 1024
+
+
+class TranscriptCache:
+    """Byte-capped LRU of parsed transcripts, keyed by resolved path.
+
+    Entries are charged their estimated heap cost via `CachedTranscript.nbytes`,
+    so total retained memory stays near the cap regardless of how much of the
+    corpus a tool call touches. This replaces the unbounded module dict that
+    retained every transcript ever parsed — one cross-project search over a
+    ~3 GB corpus left a 5.5 GB process behind. Staleness is the caller's
+    concern (compare mtime); a single transcript larger than the whole cap is
+    served uncached rather than erroring.
+    """
+
+    def __init__(self, max_bytes: int) -> None:
+        self._lru: LRUCache[Path, CachedTranscript] = LRUCache(
+            maxsize=max_bytes, getsizeof=lambda v: v.nbytes
+        )
+        # cachetools.LRUCache mutates its recency order on both get and put, and
+        # isn't thread-safe; FastMCP dispatches sync tools on a thread pool
+        # (anyio.to_thread), so concurrent tool calls can otherwise corrupt the
+        # LRU bookkeeping.
+        self._lock = threading.Lock()
+
+    def get(self, path: Path) -> Optional[CachedTranscript]:
+        with self._lock:
+            return self._lru.get(path)
+
+    def put(self, path: Path, value: CachedTranscript) -> None:
+        with self._lock:
+            try:
+                self._lru[path] = value
+            except ValueError:
+                # Value alone exceeds the cache cap — serve it uncached.
+                pass
+
+
+_cache = TranscriptCache(_cache_max_bytes())
+
+
+# Structural header line types that are part of the wire format but are not
+# conversation data: session mode/permission/title/prompt headers, worktree and
+# PR bookkeeping, and our own conversion-provenance sentinel. Skipped silently
+# (they are expected in well-formed files); everything else that fails to parse
+# is counted and reported so tolerant parsing is no longer silent.
+_STRUCTURAL_LINE_TYPES = frozenset(
+    {
+        "mode",
+        "permission-mode",
+        "custom-title",
+        "ai-title",
+        "last-prompt",
+        "attachment",
+        "agent-name",
+        "relocated",
+        "worktree-state",
+        "pr-link",
+        "x-converter-provenance",
+    }
+)
 
 
 def load_transcript(path: Path) -> list[TranscriptEntry]:
@@ -213,30 +306,54 @@ def load_transcript(path: Path) -> list[TranscriptEntry]:
 
     Caches results by (path, mtime) — the MCP server is a persistent process,
     so the cache lives across tool calls. Re-parses only when the file changes.
+    The cache is byte-capped (CC_EXPLORER_CACHE_MB, default 200 MB), so a
+    corpus-wide operation can't accumulate the whole corpus in memory.
 
-    Skips malformed lines and unknown entry types. Returns all entry types.
+    Skips structural header lines silently and malformed/unknown lines with a
+    counted stderr note. Returns all entry types.
     """
     resolved = path.resolve()
-    mtime = resolved.stat().st_mtime
+    stat = resolved.stat()
+    mtime = stat.st_mtime
 
     cached = _cache.get(resolved)
     if cached is not None and cached.mtime == mtime:
         return cached.entries
 
     entries: list[TranscriptEntry] = []
+    skipped = 0
     with open(resolved, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             try:
-                data = json.loads(line)
-                entry = create_transcript_entry(data)
-                entries.append(entry)
-            except (json.JSONDecodeError, ValueError, Exception):
+                data = orjson.loads(line)
+            except orjson.JSONDecodeError:
+                skipped += 1
                 continue
+            if not isinstance(data, dict) or data.get("type") in _STRUCTURAL_LINE_TYPES:
+                continue
+            try:
+                entries.append(create_transcript_entry(data))
+            except Exception:
+                skipped += 1
 
-    _cache[resolved] = CachedTranscript(mtime=mtime, entries=entries)
+    if skipped:
+        # stderr, never stdout — stdout is the stdio MCP protocol channel.
+        print(
+            f"[cc-explorer parser] {resolved.name}: skipped {skipped} unparseable line(s)",
+            file=sys.stderr,
+        )
+
+    _cache.put(
+        resolved,
+        CachedTranscript(
+            mtime=mtime,
+            entries=entries,
+            nbytes=int(stat.st_size * _HEAP_FACTOR),
+        ),
+    )
     return entries
 
 
@@ -353,7 +470,7 @@ def _orphan_worktree_dirs(
         _get_projects_dir,
         _sanitize_path,
     )
-    from cc_explorer.search import _cwd_from_transcripts, _repo_root_from_worktree_path
+    from cc_explorer.corpus import _cwd_from_transcripts, _repo_root_from_worktree_path
 
     prefix = _sanitize_path(repo_root)
     projects_dir = _get_projects_dir()
