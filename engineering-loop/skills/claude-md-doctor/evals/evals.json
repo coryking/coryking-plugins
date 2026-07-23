@@ -23,6 +23,7 @@
         "Every pointer stub left in AGENTS.md carries concrete facts (a name, value, or command) before its link — no bare 'See <file>' stubs",
         "At least one move is gated apply:ask, remains unchecked in proposed-changes.md, and its content is unchanged in the tree",
         "With no chat corpus, no move's evidence line claims 'confirmed scar tissue' from mining alone — structural evidence (duplication, discoverability, staleness) or a 'suspected' downgrade is cited instead",
+        "Any move routed to a skill/hook/path-scoped-rule mechanism has a drafted artifact under the bundle's scaffolds/ directory (SKILL.md with name + trigger description, hook JSON, or rule file with paths: frontmatter), is gated apply:ask, and nothing is installed outside the bundle",
         "Nothing is committed: git log still shows only the initial commit, and the working tree is dirty with the applied edits",
         "CLAUDE.md carries the last-decomposed marker; execution-report.md reports before/after line counts and the undo commands"
       ]

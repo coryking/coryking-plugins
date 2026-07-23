@@ -40,6 +40,7 @@ A bare "See `<file>`" is a validation failure in Stage 6. Exception: pointers to
 | Temporal phrase | "now uses", "recently", "currently", "we later" | ADR / scar tissue suspect |
 | Self-reference | file mentions its own path | recursion — flag in QUESTIONS |
 | Duplicate H2 across scopes | same H2 in two CLAUDE.mds | duplication, candidate for one-authoritative-source consolidation |
+| Emphasis density | >5 ALL-CAPS imperative tokens (MUST/NEVER/ALWAYS/IMPORTANT/CRITICAL) in one file | over-trigger risk on current models (see model-guidance primer); propose de-escalation as `ask` |
 
 ## Wrong-mechanism routing table
 

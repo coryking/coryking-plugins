@@ -1,7 +1,7 @@
 ---
 name: el:claude-md-doctor
 description: "Diagnose CLAUDE.md / .claude/rules / nested instruction files for bloat, wrong-mechanism content, and scar tissue — then apply the high-confidence fixes in the same run. Writes an evidence bundle first, edits second; the uncommitted git diff is the review gate. Use when CLAUDE.md feels heavy, an auto-loaded file has grown past a screenful, or before adding a new rule."
-argument-hint: "[blank = diagnose + apply | 'diagnose' = map only, no edits]"
+argument-hint: "[blank = diagnose + apply | 'diagnose' = map only, no edits | 'refresh' = update the model-guidance primer from live docs]"
 ---
 
 # claude-md-doctor
@@ -32,7 +32,9 @@ Diagnoses the repo's instruction surface with evidence, then presses the button:
 
 **Rich abstracts, not bare links.** When a move leaves a pointer behind, the stub is 2–4 sentences carrying the concrete values — names, thresholds, the one command — followed by the link, so a fresh session answers common questions without opening the target. A bare "see X" link forces a file-read for every question; the synopsis is where the context savings actually happen.
 
-**Loader semantics, verified live.** `@import` resolves recursively and auto-loads at session start — it is inline-equivalent, not progressive disclosure. `.claude/rules/*.md` with `paths:` frontmatter loads conditionally on matching files. A plain markdown link is the only true read-on-demand trapdoor. These semantics are version-dependent: when a routing decision hinges on how Claude Code loads a file, verify against current documentation (the `claude-code-guide` agent) instead of trusting this paragraph.
+**Judge against the primer, never against intuition.** `references/model-guidance.md` is the sole doctrine for what works in an instruction file on current models — sizing targets, loader semantics (`@import` is inline-equivalent, not progressive disclosure; only skills, path-scoped rules, plain links, and deletion shrink the launch footprint), and generation-specific judgment like emphasis calibration. Judging from the primer is what makes two runs on the same repo agree. The primer is version-stamped, and `refresh` mode — not ad-hoc web reading mid-run — is how it tracks reality.
+
+**Wrong-mechanism findings ship as scaffolds.** When a unit routes to a different mechanism (skill, hook, path-scoped rule), the bundle contains the drafted target — a `SKILL.md` with name and trigger-rich description seeded from the unit, a `settings.json` hook block, or a rule file with `paths:` frontmatter — under `scaffolds/`, and the move's checkbox is "install this," not "go figure out how." These moves create files, so they are always `apply: ask`.
 
 ## The instruction surface (four scopes)
 
@@ -53,7 +55,8 @@ Treat every Markdown H2 (`## …`) as a unit. Bulleted lists under no heading ar
 
 ### Stage 0 — Preconditions
 
-`git status --porcelain` must be clean. If dirty: downgrade the whole run to diagnose-only, say so up front, and note it in the bundle. The `diagnose` argument forces map-only regardless of tree state.
+- `git status --porcelain` must be clean. If dirty: downgrade the whole run to diagnose-only, say so up front, and note it in the bundle. The `diagnose` argument forces map-only regardless of tree state.
+- **Primer stamp check**: compare the provenance stamp in `references/model-guidance.md` against the session's model family and `claude --version`. On mismatch, proceed on the stamped doctrine but lead the final report with the mismatch and recommend a `refresh` run. Never fetch docs mid-run to compensate — that trades consistency for freshness one run at a time.
 
 ### Stage 1 — Triage (always)
 
@@ -116,7 +119,8 @@ Files (skeletons in `references/bundle-template.md`):
 3. **`proposed-changes.md`** — the move checklist. Each move carries its `apply: auto | ask` gate and the evidence that earned it. At most 10 moves; longer "why" narratives keyed by number at the bottom.
 4. **`user-global-proposals.md`** — same shape, scoped to `~/.claude/*`. Header: "This skill cannot edit user-global files. Apply manually via chezmoi if managed."
 5. **`metadata.json`** — `{skill_version, repo_sha, branch, mode, tier_by_file, files_analyzed, started_at, finished_at, marker_sha}`.
-6. **`execution-report.md`** — written by Stage 6 (absent in diagnose-only runs).
+6. **`scaffolds/`** — one drafted artifact per wrong-mechanism move: `scaffolds/<name>/SKILL.md` for skill-shaped units (frontmatter with `name:` and a trigger-rich `description:`, body seeded from the unit), `scaffolds/hooks.json` snippets for hook-shaped units, `scaffolds/rules/<topic>.md` with `paths:` frontmatter for path-scoped units. The corresponding `ask` move's "How" line is "install `scaffolds/<…>` to `<destination>`."
+7. **`execution-report.md`** — written by Stage 6 (absent in diagnose-only runs).
 
 Then write the marker at the top of `<repo>/CLAUDE.md` (and only that file), replacing any prior marker:
 
@@ -145,16 +149,22 @@ Apply every `apply: auto` move exactly as its "How" line specifies — no improv
 - Write `execution-report.md`: before/after line counts per file, moves applied vs. left, validation results, and one honest line — did any applied move require judgment the bundle hadn't already made?
 - Print: bundle path, `git diff --stat`, and the undo commands (`git stash` to shelve; `git checkout -- . && git clean -fd` to discard, listing any new files created).
 
+### `refresh` mode
+
+Invoked as `el:claude-md-doctor refresh`. Skips every stage above and instead updates `references/model-guidance.md` per the "Refresh procedure" section inside that file: fetch the stamped sources plus the current model family's prompting page, apply changes as a diff (never a rewrite), update the stamp, and leave the edit uncommitted in the plugin repo for review. Then run the evals — doctrine changes can silently change gating behavior. Refresh when Stage 0 reports a stamp mismatch (new model family or Claude Code version), not on a schedule.
+
 ## Self-test
 
 `evals/` holds synthetic fixture surfaces and assertion lists (`evals/evals.json`). After changing this skill's heuristics, gating, or stages, run the evals: copy a fixture to a temp dir, `git init` + commit it, run the skill against it, check every assertion. The fixtures are seeded with known defects (a lying ASCII tree, a stale hostname, a verbatim docs duplicate) — never "fix" a fixture to make an assertion pass.
 
 ## References
 
+- `references/model-guidance.md` — the judging doctrine: sizing, loading mechanics, current-model prompting guidance, refresh procedure. Version-stamped.
 - `references/decompose-technique.md` — verbatim decompose-prompt gist; the methodology core.
 - `references/heuristics.md` — smell regex table, wrong-mechanism routing, scar-tissue rubric, apply-gating table, truth-check procedure, rich-abstract stub spec.
 - `references/bundle-template.md` — bundle skeletons.
 
+@./references/model-guidance.md
 @./references/decompose-technique.md
 @./references/heuristics.md
 @./references/bundle-template.md
