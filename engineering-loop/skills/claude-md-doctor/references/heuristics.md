@@ -1,5 +1,34 @@
 # Heuristics
 
+## Apply-gating table
+
+Every move in `proposed-changes.md` carries exactly one gate. When in doubt, gate `ask` — a wrongly-gated `auto` deletes something a human wanted; a wrongly-gated `ask` costs one checkbox.
+
+| Gate | Criteria (any one suffices) |
+|---|---|
+| `auto` | Verified verbatim duplicate of an existing doc (compared, not assumed) · discoverable-from-filesystem content (ASCII trees, file inventories) · generic tool knowledge with zero repo-specific residue (git tutorials, stock troubleshooting) · fact verified stale by the truth check · relocation whose target file already exists and whose content passed the truth check |
+| `ask` | Deletes unique content on judgment · creates a new file · MISSING additions (new rules) · "suspected" evidence rather than "confirmed" · public-repo personal-data flags · compactions where a defensible case exists both ways (e.g. a hardware cheat-sheet) · anything adjacent to a `<!-- locked -->` unit |
+
+## Truth-check procedure
+
+For each unit kept or relocated, extract its checkable claims and verify the cheap ones:
+
+1. **Filenames / paths** → `ls` / `test -e` against the repo. A tree or inventory naming a file that doesn't exist is a lying unit.
+2. **Values duplicated from an authoritative file** (config values, pin assignments, thresholds) → diff against that file. The instruction file never wins a disagreement.
+3. **Hostnames / ports / URLs** → check configs first; hit the live source only when one cheap command answers it.
+
+Verdicts land in `decompose.md` as `(facts: verified | stale — <what drifted>)`. Stale → the fact is corrected at its authoritative source or dropped with the drift cited as evidence. Never relocate a stale fact verbatim; never silently patch it either — the fix must appear in the bundle.
+
+## Rich-abstract stub spec
+
+When a move replaces a section with a pointer, the stub must carry, in 2–4 sentences:
+- the name of the thing (tool, framework, subsystem) so no read is needed to learn what's there,
+- the one constraint or threshold that determines correctness,
+- the single most-used command, if one exists,
+- what *additional* detail the linked file holds — so a session can judge whether to follow the link.
+
+A bare "See `<file>`" is a validation failure in Stage 6. Exception: pointers to content that is pure reference (external doc URLs, ADR history) may be one line.
+
 ## Smell regex table
 
 | Smell | Regex / test | Implication |
