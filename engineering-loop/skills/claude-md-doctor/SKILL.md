@@ -19,7 +19,7 @@ Diagnoses the repo's instruction surface with evidence, then presses the button:
 
 ## What this skill does NOT do
 
-- Commit, push, or otherwise change git state (reading history is fine). The uncommitted diff IS the review; `git stash` shelves it, `git checkout -- . && git clean -fd` discards it.
+- Commit, push, or otherwise change git state (reading history is fine). The uncommitted diff IS the review; `git stash -u` shelves the whole run (edits, bundle, and new files — plain `git stash` would strand the untracked ones), and full discard is `git checkout -- . && git clean -fd` — which deletes the bundle too, so shelve instead if you want to keep the diagnosis.
 - Apply any `ask`-gated move. Deleting unique content on judgment, creating new rules, and compactions where reasonable people differ stay human decisions, checklist-only.
 - Touch `~/.claude/*`. User-global findings go in `user-global-proposals.md`.
 - Preserve false content. This skill explicitly rejects zero-information-loss dogma — see "Truth before relocation."
@@ -34,7 +34,7 @@ Diagnoses the repo's instruction surface with evidence, then presses the button:
 
 **Judge against the primer, never against intuition.** `references/model-guidance.md` is the sole doctrine for what works in an instruction file on current models — sizing targets, loader semantics (`@import` is inline-equivalent, not progressive disclosure; only skills, path-scoped rules, plain links, and deletion shrink the launch footprint), and generation-specific judgment like emphasis calibration. Judging from the primer is what makes two runs on the same repo agree. The primer is version-stamped, and `refresh` mode — not ad-hoc web reading mid-run — is how it tracks reality.
 
-**Wrong-mechanism findings ship as scaffolds.** When a unit routes to a different mechanism (skill, hook, path-scoped rule), the bundle contains the drafted target — a `SKILL.md` with name and trigger-rich description seeded from the unit, a `settings.json` hook block, or a rule file with `paths:` frontmatter — under `scaffolds/`, and the move's checkbox is "install this," not "go figure out how." These moves create files, so they are always `apply: ask`.
+**Wrong-mechanism findings ship as scaffolds.** When a unit routes to a different mechanism (skill, hook, path-scoped rule), the bundle contains the drafted target — a `SKILL.md` with name and trigger-rich description seeded from the unit, a `scaffolds/hooks.json` fragment to merge into `.claude/settings.json`, or a rule file with `paths:` frontmatter — under `scaffolds/`, and the move's checkbox is "install this," not "go figure out how." These moves create files, so they are always `apply: ask`.
 
 ## The instruction surface (four scopes)
 
@@ -42,8 +42,10 @@ Diagnoses the repo's instruction surface with evidence, then presses the button:
 |---|---|---|---|
 | managed | `~/CLAUDE.md` if `<!-- Managed by chezmoi -->` marker present | no | no |
 | user-global | `~/.claude/CLAUDE.md`, `~/.claude/rules/*.md` | no | no (read-only; surface findings in `user-global-proposals.md`) |
-| project | `<repo>/CLAUDE.md`, `<repo>/**/CLAUDE.md` (nested) | yes | yes — `auto` moves and the HTML marker |
+| project | `<repo>/CLAUDE.md`, `<repo>/**/CLAUDE.md` (nested), **plus every repo-internal file they reach via `@import`** (max depth 4) | yes | yes — `auto` moves and the HTML marker |
 | project-local | `<repo>/.claude/rules/*.md` if present | yes | yes — `auto` moves only |
+
+**Import expansion is part of scoping, not an afterthought.** A CLAUDE.md that is just `@AGENTS.md` (the official shim pattern) is a healthy 1-line Tier-0 file — but the AGENTS.md it imports IS the project instruction file and joins the surface as a first-class member: triaged, decomposed, and edited like any other. The same applies to any other repo-internal `@import` target. Imports resolving outside the repo are noted in `triage.md` but not triaged or edited.
 
 Public-repo signal: if `<repo>` is public (check `gh repo view --json visibility`), flag rules that contain personal-data / private-host names as **gitignore-or-extract** candidates — always `apply: ask`, never auto.
 
@@ -62,10 +64,10 @@ Treat every Markdown H2 (`## …`) as a unit. Bulleted lists under no heading ar
 
 Announce: `claude-md-doctor: triage`.
 
-For each file in the instruction surface (excluding managed):
+First expand the surface: for each CLAUDE.md, resolve its `@import` lines (repo-internal, max depth 4) and add the imported files to the surface. Then, for each file in the surface (excluding managed):
 - line count
 - has HTML marker `<!-- last-decomposed: <sha> @ <date> -->`?
-- regex smells (table in `references/heuristics.md`): code fences over 15 lines, bullet count > 25, repeated H2 names across files, ASCII trees, temporal phrasing
+- regex smells — thresholds live in the table in `references/heuristics.md` (the single authority): long code fences, bullet-heavy sections, duplicate H2s across files, ASCII trees, temporal phrasing, emphasis density
 - git: `git log --format="%h %ai" -- <file>` — last touch, total commits
 - if marker present: `git log <marker_sha>..HEAD -- <file>` — has anything changed since last run?
 
@@ -122,7 +124,7 @@ Files (skeletons in `references/bundle-template.md`):
 6. **`scaffolds/`** — one drafted artifact per wrong-mechanism move: `scaffolds/<name>/SKILL.md` for skill-shaped units (frontmatter with `name:` and a trigger-rich `description:`, body seeded from the unit), `scaffolds/hooks.json` snippets for hook-shaped units, `scaffolds/rules/<topic>.md` with `paths:` frontmatter for path-scoped units. The corresponding `ask` move's "How" line is "install `scaffolds/<…>` to `<destination>`."
 7. **`execution-report.md`** — written by Stage 6 (absent in diagnose-only runs).
 
-Then write the marker at the top of `<repo>/CLAUDE.md` (and only that file), replacing any prior marker:
+Then write the marker at the top of **every file decomposed this run** (Tier 1+), replacing any prior marker in each. The marker travels with the file it describes — that's what makes Stage 1's freshness check work per-file, including for an AGENTS.md that entered the surface via the shim (and for repos that have an AGENTS.md but no CLAUDE.md at all). HTML comments are stripped before context injection, so markers are free.
 
 ```
 <!-- last-decomposed: <head-sha> @ <ISO-date> → see .claude/claude-md-doctor/<ts>/ -->
@@ -147,7 +149,7 @@ Apply every `apply: auto` move exactly as its "How" line specifies — no improv
 - Every markdown link and `@import` in edited files resolves to an existing file.
 - Confirm no `ask` move was applied and no locked unit changed.
 - Write `execution-report.md`: before/after line counts per file, moves applied vs. left, validation results, and one honest line — did any applied move require judgment the bundle hadn't already made?
-- Print: bundle path, `git diff --stat`, and the undo commands (`git stash` to shelve; `git checkout -- . && git clean -fd` to discard, listing any new files created).
+- Print: bundle path, `git diff --stat`, the new files created, and the undo options: `git stash -u` shelves everything including the bundle and new files; `git checkout -- . && git clean -fd` discards everything **including the bundle** — to keep the diagnosis while discarding edits, shelve, or move the bundle out first.
 
 ### `refresh` mode
 

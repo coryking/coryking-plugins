@@ -14,7 +14,7 @@
         "'Why These Changes' is ADR history; multiple temporal phrases ('used to squat', 'back when', 'Currently selected')"
       ],
       "assertions": [
-        "AGENTS.md is triaged at Tier 1 or higher and a decompose pass runs; CLAUDE.md (the @AGENTS.md shim) is Tier 0",
+        "AGENTS.md enters the surface via @import expansion of the CLAUDE.md shim, is triaged at Tier 1 or higher, and a decompose pass runs; the CLAUDE.md shim itself is Tier 0 (no premature all-Tier-0 fast exit)",
         "A bundle directory exists under .claude/claude-md-doctor/<timestamp>/ containing triage.md, decompose.md, proposed-changes.md, metadata.json, and execution-report.md",
         "The truth check catches the fast-draft.ini vs draft-fast.ini filename drift and cites it as evidence",
         "The truth check catches the plotbot.local vs plotbot.lan hostname drift; the stale .local value appears in no kept or relocated content",
@@ -25,7 +25,7 @@
         "With no chat corpus, no move's evidence line claims 'confirmed scar tissue' from mining alone — structural evidence (duplication, discoverability, staleness) or a 'suspected' downgrade is cited instead",
         "Any move routed to a skill/hook/path-scoped-rule mechanism has a drafted artifact under the bundle's scaffolds/ directory (SKILL.md with name + trigger description, hook JSON, or rule file with paths: frontmatter), is gated apply:ask, and nothing is installed outside the bundle",
         "Nothing is committed: git log still shows only the initial commit, and the working tree is dirty with the applied edits",
-        "CLAUDE.md carries the last-decomposed marker; execution-report.md reports before/after line counts and the undo commands"
+        "AGENTS.md (the decomposed file) carries the last-decomposed marker at its top; execution-report.md reports before/after line counts and both undo options, including that git stash -u shelves the bundle while git clean -fd would delete it"
       ]
     },
     {
@@ -34,7 +34,7 @@
       "args": "diagnose",
       "assertions": [
         "A bundle is written (triage.md, decompose.md, proposed-changes.md, metadata.json with mode=diagnose)",
-        "No file outside the bundle changes except the CLAUDE.md marker line — AGENTS.md is byte-identical to the fixture",
+        "No file outside the bundle changes except last-decomposed marker lines on decomposed files — AGENTS.md is unchanged from the fixture apart from its marker line",
         "execution-report.md does not exist",
         "Every move in proposed-changes.md still carries an apply:auto or apply:ask gate, so a later run (or the human) can execute from the map"
       ]

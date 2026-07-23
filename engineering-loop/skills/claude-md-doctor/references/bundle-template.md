@@ -102,7 +102,7 @@ Same shape as `proposed-changes.md`, prefixed with:
 # Execution report
 
 **Summary:** <A>/<N> moves applied, <B> left as `ask`. <path>: <before> → <after> lines. Validation: <PASS | issues below>.
-**Undo:** `git stash` to shelve · `git checkout -- . && git clean -fd` to discard. New files: <list or none>.
+**Undo:** `git stash -u` shelves everything (edits + bundle + new files) · `git checkout -- . && git clean -fd` discards everything INCLUDING this bundle. New files: <list or none>.
 
 ## Applied
 - **1.** <unit-name> — <one line: what changed>

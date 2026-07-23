@@ -37,7 +37,7 @@ A bare "See `<file>`" is a validation failure in Stage 6. Exception: pointers to
 | Many bullets under one H2 | >12 bullets in one section | section is a list, not a principle — likely fragment of a skill or rule |
 | ASCII tree | `^[│├└─]` line at start | discoverable from filesystem, drop |
 | Path-anchored fact | line contains a `~/projects/` or absolute path *and* is one of N>=3 sibling bullets | path-scoped-rule shaped |
-| Temporal phrase | "now uses", "recently", "currently", "we later" | ADR / scar tissue suspect |
+| Temporal phrase | present-drift: "now uses", "recently", "currently"; past-tense origin narration: "we later", "used to", "back when", "predates", "was rewritten", "no longer", "at the time" | ADR / scar tissue suspect |
 | Self-reference | file mentions its own path | recursion — flag in QUESTIONS |
 | Duplicate H2 across scopes | same H2 in two CLAUDE.mds | duplication, candidate for one-authoritative-source consolidation |
 | Emphasis density | >5 ALL-CAPS imperative tokens (MUST/NEVER/ALWAYS/IMPORTANT/CRITICAL) in one file | over-trigger risk on current models (see model-guidance primer); propose de-escalation as `ask` |
