@@ -1,0 +1,54 @@
+{
+  "skill_name": "el:claude-md-doctor",
+  "how_to_run": "For each eval: copy the fixture directory to a temp dir, `git init` it, make one initial commit, then invoke the skill in that dir with the given args. The runner is an agent: check every assertion against the resulting tree and bundle, and report pass/fail per assertion. Fixtures are seeded with known defects — never edit a fixture to make an assertion pass. Note: fixtures have no cc-explorer chat corpus, so Stage 3 mining runs against an empty corpus by design — evidence confidence must degrade accordingly (see assertions).",
+  "evals": [
+    {
+      "id": "messy-apply",
+      "fixture": "fixtures/messy-surface",
+      "args": "",
+      "seeded_defects": [
+        "ASCII tree names profiles/fast-draft.ini; the real file is profiles/draft-fast.ini",
+        "AGENTS.md says plotbot.local; docs/host.md (authoritative) says plotbot.lan",
+        "Troubleshooting section is a verbatim copy of docs/tips.md 'Common Issues & Solutions'",
+        "Git Workflow section is a generic git tutorial with zero repo-specific content",
+        "'Why These Changes' is ADR history; multiple temporal phrases ('used to squat', 'back when', 'Currently selected')"
+      ],
+      "assertions": [
+        "AGENTS.md enters the surface via @import expansion of the CLAUDE.md shim, is triaged at Tier 1 or higher, and a decompose pass runs; the CLAUDE.md shim itself is Tier 0 (no premature all-Tier-0 fast exit)",
+        "A bundle directory exists under .claude/claude-md-doctor/<timestamp>/ containing triage.md, decompose.md, proposed-changes.md, metadata.json, and execution-report.md",
+        "The truth check catches the fast-draft.ini vs draft-fast.ini filename drift and cites it as evidence",
+        "The truth check catches the plotbot.local vs plotbot.lan hostname drift; the stale .local value appears in no kept or relocated content",
+        "The ASCII File Structure tree, the Git Workflow section, and the duplicated Troubleshooting section are gated apply:auto and are absent from the resulting AGENTS.md",
+        "The DO-NOT guardrail block (no GRBL, no multi-pen), the stop-the-server-before-editing rule, and the Scope section survive in the resulting AGENTS.md",
+        "Every pointer stub left in AGENTS.md carries concrete facts (a name, value, or command) before its link — no bare 'See <file>' stubs",
+        "At least one move is gated apply:ask, remains unchecked in proposed-changes.md, and its content is unchanged in the tree",
+        "With no chat corpus, no move's evidence line claims 'confirmed scar tissue' from mining alone — structural evidence (duplication, discoverability, staleness) or a 'suspected' downgrade is cited instead",
+        "Any move routed to a skill/hook/path-scoped-rule mechanism has a drafted artifact under the bundle's scaffolds/ directory (SKILL.md with name + trigger description, hook JSON, or rule file with paths: frontmatter), is gated apply:ask, and nothing is installed outside the bundle",
+        "Nothing is committed: git log still shows only the initial commit, and the working tree is dirty with the applied edits",
+        "AGENTS.md (the decomposed file) carries the last-decomposed marker at its top; execution-report.md reports before/after line counts and lists every new file the run created, bundle included"
+      ]
+    },
+    {
+      "id": "messy-diagnose-only",
+      "fixture": "fixtures/messy-surface",
+      "args": "diagnose",
+      "assertions": [
+        "A bundle is written (triage.md, decompose.md, proposed-changes.md, metadata.json with mode=diagnose)",
+        "No file outside the bundle changes except last-decomposed marker lines on decomposed files — AGENTS.md is unchanged from the fixture apart from its marker line",
+        "execution-report.md does not exist",
+        "Every move in proposed-changes.md still carries an apply:auto or apply:ask gate, so a later run (or the human) can execute from the map"
+      ]
+    },
+    {
+      "id": "healthy-fast-exit",
+      "fixture": "fixtures/healthy-surface",
+      "args": "",
+      "assertions": [
+        "CLAUDE.md is triaged Tier 0",
+        "Only triage.md is written — no decompose.md, no proposed-changes.md, no execution-report.md",
+        "No file in the fixture is edited; no marker is added; nothing is committed",
+        "The run is cheap: no mining calls, no decompose pass"
+      ]
+    }
+  ]
+}

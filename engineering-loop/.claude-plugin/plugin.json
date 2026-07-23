@@ -1,7 +1,7 @@
 {
   "name": "engineering-loop",
-  "version": "0.6.0",
-  "description": "Slim parallel-review and curated research agents for solo development, plus claude-md-doctor for diagnosing instruction-surface bloat. The parts of compound-engineering's workflow that actually compound for a single operator, without the team-scale scaffolding.",
+  "version": "0.7.0",
+  "description": "Slim parallel-review and curated research agents for solo development, plus claude-md-doctor for diagnosing and repairing instruction-surface bloat. The parts of compound-engineering's workflow that actually compound for a single operator, without the team-scale scaffolding.",
   "author": {
     "name": "Cory King",
     "email": "me@coryk.ing",

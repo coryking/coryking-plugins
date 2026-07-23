@@ -52,22 +52,25 @@ This is the shape only — use it as a structural reference, not a fill-in form.
 # Proposed changes — actionable checklist
 
 **Read this top-to-bottom on your phone. Each item is independently applicable.**
-**Total moves:** <N>.   **Estimated effort:** <complexity tag, not time>.
+**Total moves:** <N> (<A> auto, <B> ask).   **Estimated effort:** <complexity tag, not time>.
 
-- [ ] **1.** <verb> <unit-name> from <source> → <target>
-- [ ] **2.** ...
+- [ ] **1.** `auto` — <verb> <unit-name> from <source> → <target>
+- [ ] **2.** `ask` — ...
 
 ---
 
 ## Why narratives
 
 ### 1. <verb> <unit-name> …
+- **Apply:** auto | ask — <one clause naming the gating criterion from the heuristics table>
 - **Why:** <2 sentences, behavioral>
 - **How:** <one-line action>
-- **Evidence:** <citations>
+- **Evidence:** <citations, incl. truth-check verdicts>
 
 ### 2. …
 ```
+
+After Stage 5, applied moves are checked off in place (`- [x]`); `ask` moves stay unchecked.
 
 ## `user-global-proposals.md` skeleton
 
@@ -84,6 +87,7 @@ Same shape as `proposed-changes.md`, prefixed with:
   "skill_version": "<from plugin.json>",
   "repo_sha": "<head>",
   "branch": "<name>",
+  "mode": "apply | diagnose | diagnose (dirty tree)",
   "started_at": "<ISO>",
   "finished_at": "<ISO>",
   "tier_by_file": { "<path>": <tier> },
@@ -92,18 +96,30 @@ Same shape as `proposed-changes.md`, prefixed with:
 }
 ```
 
-## `design-flaws.md` skeleton
+## `execution-report.md` skeleton (apply runs only)
 
 ```
-# Design flaws / temptations log
+# Execution report
 
-<one entry per moment you wanted to do more than diagnose>
+**Summary:** <A>/<N> moves applied, <B> left as `ask`. <path>: <before> → <after> lines. Validation: <PASS | issues below>.
+**Footprint:** nothing committed; edits + this bundle + new files are one dirty working tree. New files: <list or none>.
 
-## <short-tag>
-- **Wanted to:** <…>
-- **Blocked by:** diagnose-only constraint
-- **Bundle sufficient?** <yes / no — <why>>
+## Applied
+- **1.** <unit-name> — <one line: what changed>
+- ...
+
+## Left for you (`ask`)
+- **N.** <unit-name> — <the judgment only you can make, one line>
+
+## Validation
+- Smells re-scan: <clean | surviving smell + explanation>
+- Links + @imports: <all resolve | broken: …>
+- Locked units untouched: <yes>
+- `ask` moves untouched: <yes>
+
+## Regrades
+<moves that started `auto` but hit un-mapped judgment mid-apply — what stopped them. "none" if none.>
 
 ---
-**Calibration:** <one-line honest answer to: did the map alone feel like enough?>
+**Calibration:** <one honest line: did any applied move require judgment the bundle hadn't already made?>
 ```
