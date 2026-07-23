@@ -25,7 +25,7 @@
         "With no chat corpus, no move's evidence line claims 'confirmed scar tissue' from mining alone — structural evidence (duplication, discoverability, staleness) or a 'suspected' downgrade is cited instead",
         "Any move routed to a skill/hook/path-scoped-rule mechanism has a drafted artifact under the bundle's scaffolds/ directory (SKILL.md with name + trigger description, hook JSON, or rule file with paths: frontmatter), is gated apply:ask, and nothing is installed outside the bundle",
         "Nothing is committed: git log still shows only the initial commit, and the working tree is dirty with the applied edits",
-        "AGENTS.md (the decomposed file) carries the last-decomposed marker at its top; execution-report.md reports before/after line counts and both undo options, including that git stash -u shelves the bundle while git clean -fd would delete it"
+        "AGENTS.md (the decomposed file) carries the last-decomposed marker at its top; execution-report.md reports before/after line counts and lists every new file the run created, bundle included"
       ]
     },
     {

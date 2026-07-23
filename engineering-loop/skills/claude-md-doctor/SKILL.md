@@ -19,7 +19,7 @@ Diagnoses the repo's instruction surface with evidence, then presses the button:
 
 ## What this skill does NOT do
 
-- Commit, push, or otherwise change git state (reading history is fine). The uncommitted diff IS the review; `git stash -u` shelves the whole run (edits, bundle, and new files — plain `git stash` would strand the untracked ones), and full discard is `git checkout -- . && git clean -fd` — which deletes the bundle too, so shelve instead if you want to keep the diagnosis.
+- Commit, push, or otherwise change git state (reading history is fine). The uncommitted diff IS the review; keeping, shelving, or discarding it is the operator's call. Note the bundle and any new files are untracked in that same tree — the entire run is one dirty working tree.
 - Apply any `ask`-gated move. Deleting unique content on judgment, creating new rules, and compactions where reasonable people differ stay human decisions, checklist-only.
 - Touch `~/.claude/*`. User-global findings go in `user-global-proposals.md`.
 - Preserve false content. This skill explicitly rejects zero-information-loss dogma — see "Truth before relocation."
@@ -149,7 +149,7 @@ Apply every `apply: auto` move exactly as its "How" line specifies — no improv
 - Every markdown link and `@import` in edited files resolves to an existing file.
 - Confirm no `ask` move was applied and no locked unit changed.
 - Write `execution-report.md`: before/after line counts per file, moves applied vs. left, validation results, and one honest line — did any applied move require judgment the bundle hadn't already made?
-- Print: bundle path, `git diff --stat`, the new files created, and the undo options: `git stash -u` shelves everything including the bundle and new files; `git checkout -- . && git clean -fd` discards everything **including the bundle** — to keep the diagnosis while discarding edits, shelve, or move the bundle out first.
+- Print: bundle path, `git diff --stat`, and the new files created (bundle included) so the operator sees the run's full footprint in one place.
 
 ### `refresh` mode
 
