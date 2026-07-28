@@ -1,6 +1,7 @@
 {
   "skill_name": "el:claude-md-doctor",
   "how_to_run": "For each eval: copy the fixture directory to a temp dir, `git init` it, make one initial commit, then invoke the skill in that dir with the given args. The runner is an agent: check every assertion against the resulting tree and bundle, and report pass/fail per assertion. Fixtures are seeded with known defects — never edit a fixture to make an assertion pass. Note: fixtures have no cc-explorer chat corpus, so Stage 3 mining runs against an empty corpus by design — evidence confidence must degrade accordingly (see assertions).",
+  "memory_setup": "Evals with `seed_memory: true` also need auto memory staged, because it lives outside the repo. After `git init` and the initial commit, resolve the memory directory the way Claude Code does for the temp repo (`~/.claude/projects/<derived>/memory/`), then MOVE — not copy — `memory-seed/` from the fixture tree to that path, so no `memory-seed/` remains in the repo. Record the resolved path and a checksum of every seeded file before the run. Delete the seeded memory directory afterward; leave any snapshot the run wrote under `~/.claude/claude-md-doctor-backups/` in place for inspection, then clean it up too. If the runner cannot write to `~/.claude/projects/`, skip the memory evals and report them skipped — do not fall back to leaving the seed inside the repo, which would test a path the skill treats as inert.",
   "evals": [
     {
       "id": "messy-apply",
@@ -29,12 +30,48 @@
       ]
     },
     {
+      "id": "memory-scope",
+      "fixture": "fixtures/messy-surface",
+      "args": "",
+      "seed_memory": true,
+      "seeded_defects": [
+        "MEMORY.md indexes pen-changes.md, which does not exist",
+        "MEMORY.md's last entry is a ~350-char paragraph about paper stock with no link, while the real paper-stock.md is unindexed",
+        "serial-bridge.md restates the not-GRBL guidance that AGENTS.md already carries",
+        "controller-host.md says plotbot.local; docs/host.md (authoritative) says plotbot.lan",
+        "pen-pressure.md says 60% fineliner pressure; fineliner-notes.md says 40% and that 60% shreds the paper",
+        "profile-workflow.md is a six-step procedure with four code fences — skill-shaped, sitting in memory",
+        "quick-notes.md has no frontmatter and no index entry",
+        "paper-stock.md is long (~70 lines) and healthy — a control, not a defect",
+        "team/vlan-move.md is shared-team memory and must survive untouched"
+      ],
+      "assertions": [
+        "The memory directory is resolved from the git repo (not the cwd) and named in triage.md; memory-report.md exists in the bundle and leads with the resolved path, the index's loaded size against the 200-line/25KB cap, and the topic-file count",
+        "A snapshot of the memory directory exists under ~/.claude/claude-md-doctor-backups/ before any memory edit, and execution-report.md prints the cp -r restore command",
+        "The dead pen-changes.md index entry is gated apply:auto and is gone from MEMORY.md",
+        "The unlinked paper-stock paragraph is demoted: its detail lands in the existing paper-stock.md and its index line becomes a linked hook under ~150 characters. The index is not simply truncated",
+        "paper-stock.md's length is never treated as a defect — no move, smell, or finding proposes shortening or splitting it",
+        "serial-bridge.md is identified as duplicating AGENTS.md's not-GRBL guidance by text comparison and deleted apply:auto; the AGENTS.md guardrail itself survives",
+        "controller-host.md's plotbot.local is caught by the truth check against docs/host.md; the string plotbot.local appears in no surviving memory file",
+        "The pen-pressure.md / fineliner-notes.md contradiction is surfaced with both files named and gated apply:ask — both files still exist and neither body is edited",
+        "profile-workflow.md is routed skill-shaped, gated apply:ask, with a drafted SKILL.md under the bundle's scaffolds/; nothing is installed and the memory file is untouched",
+        "team/vlan-move.md is byte-identical to the seed",
+        "quick-notes.md is reported as unindexed and frontmatter-less but is not deleted — with no verified duplicate and no verified stale fact, it cannot reach apply:auto",
+        "Every surviving topic file is byte-identical to its seed: the run edited MEMORY.md and deleted files, and rewrote no topic-file body",
+        "No memory file carries a last-decomposed marker",
+        "Personal or machine-local facts are cited by file and line in the bundle, not quoted into it",
+        "Nothing is committed, and git diff shows only the in-repo edits — the memory changes appear in execution-report.md because git cannot show them"
+      ]
+    },
+    {
       "id": "messy-diagnose-only",
       "fixture": "fixtures/messy-surface",
       "args": "diagnose",
+      "seed_memory": true,
       "assertions": [
-        "A bundle is written (triage.md, decompose.md, proposed-changes.md, metadata.json with mode=diagnose)",
+        "A bundle is written (triage.md, decompose.md, proposed-changes.md, memory-report.md, metadata.json with mode=diagnose)",
         "No file outside the bundle changes except last-decomposed marker lines on decomposed files — AGENTS.md is unchanged from the fixture apart from its marker line",
+        "Every seeded memory file is byte-identical to the seed, MEMORY.md included, and no snapshot is required since nothing was applied",
         "execution-report.md does not exist",
         "Every move in proposed-changes.md still carries an apply:auto or apply:ask gate, so a later run (or the human) can execute from the map"
       ]
@@ -47,6 +84,7 @@
         "CLAUDE.md is triaged Tier 0",
         "Only triage.md is written — no decompose.md, no proposed-changes.md, no execution-report.md",
         "No file in the fixture is edited; no marker is added; nothing is committed",
+        "The absent memory directory is reported in one line and does not block the Tier-0 exit; no memory-report.md is written",
         "The run is cheap: no mining calls, no decompose pass"
       ]
     }

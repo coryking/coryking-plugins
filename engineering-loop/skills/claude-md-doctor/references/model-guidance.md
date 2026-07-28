@@ -8,11 +8,12 @@ against live docs or trained intuition** — so that two runs on the same repo a
 ```yaml
 # provenance stamp — refresh mode updates this; Stage 0 checks it
 model_family: claude-5 (fable) / claude-4.8-era docs
-cc_version: 2.1.218
+cc_version: 2.1.220
 refreshed: 2026-07-23
+partial_refresh: 2026-07-28 — memory.md re-fetched to source the auto-memory section; other sources unchanged
 sources:
   - https://code.claude.com/docs/en/best-practices.md          # CLAUDE.md include/exclude, sizing
-  - https://code.claude.com/docs/en/memory.md                  # loading mechanics, rules, imports
+  - https://code.claude.com/docs/en/memory.md                  # loading mechanics, rules, imports, auto memory
   - https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-4-best-practices  # serves current "Prompting best practices" (all current models)
   - https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-fable-5 # model-specific page; swap for the session's model family
 ```
@@ -59,8 +60,43 @@ sources:
   containing `@AGENTS.md` (optionally with Claude-specific additions below) or a
   symlink. When the doctor sees this shim, the AGENTS.md is the real project
   instruction file.
-- **Auto memory** `MEMORY.md`: only the first 200 lines / 25KB load; CLAUDE.md has no
-  hard cutoff — length costs adherence instead.
+
+## Auto memory (authoritative snapshot)
+
+Auto memory is the *second* thing loaded into every session, alongside CLAUDE.md. Claude
+writes it; the user writes CLAUDE.md. It is a real mechanism with a precise contract —
+the doctor judges it against this section, not against intuition about "memory."
+
+- **One directory per git repository**: `~/.claude/projects/<project>/memory/`, where
+  `<project>` derives from the repo, so **every worktree and subdirectory of one repo
+  shares one memory directory**. Outside a repo, the project root is used.
+  `autoMemoryDirectory` in any settings scope relocates it (absolute or `~/`-prefixed).
+  Toggles: `autoMemoryEnabled` setting, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
+- **That path is the only live location.** A `MEMORY.md` or memory-shaped directory
+  anywhere else — `~/.claude/MEMORY.md`, `~/.claude/memory/`, a repo-local `memory/` —
+  is not loaded by current Claude Code. Files there are inert no matter how good they
+  are. `/context` is the human's confirmation; the doctor's test is the path.
+- **`MEMORY.md` is an index, and only the index auto-loads**: the first 200 lines *or*
+  25KB, whichever comes first. Content past the threshold is silently dropped at session
+  start. Frontmatter and block-level HTML comments are stripped before both the load and
+  the measurement (v2.1.211+), so they are free.
+- **Claude Code enforces the cap at write time** (v2.1.210+): near a limit it reminds
+  Claude to shorten the index; over a limit the write succeeds but returns an error
+  telling Claude to rewrite it. An index the human hand-edited past the cap gets no such
+  warning — it just loses its tail.
+- **Topic files never load at startup.** Claude reads them on demand with ordinary file
+  tools, or a selector attaches them by matching the query against their `description`.
+  So a topic file costs zero launch context: its size is not a problem, and "bloat"
+  is the wrong lens for it entirely.
+- **`modified:`** is stamped automatically as an ISO 8601 timestamp on any memory file
+  that already has frontmatter (v2.1.214+). Claude Code never adds frontmatter to a file
+  that lacks it — so an unstamped file is also an unaudited one.
+- **Machine-local and single-player.** Memory is not shared across machines or cloud
+  environments, is not in version control, and is **not loaded into subagents** (a fork
+  is the exception; a subagent's own `memory` directory is separate).
+- Memory records are explicitly treated as *what was true at a point in time*. Official
+  guidance is to verify a recalled memory against current files before acting on it, and
+  to **delete** a memory that current reality contradicts rather than acting on it.
 
 ## What current models need — and no longer need
 
@@ -107,6 +143,34 @@ Derived from the above; these are what Stages 2 and 5 act on:
    straight from the official mechanism table.
 5. Never claim `@import` extraction saves context — it doesn't. Only skills, path-
    scoped rules, plain links, and deletion actually shrink the launch footprint.
+6. **Route between CLAUDE.md and memory on mechanism, not on topic.** The two differ on
+   four testable axes: who authors it (human / Claude), whether it reaches a fresh clone
+   or a teammate (git / machine-local), whether a subagent sees it (yes / no), and
+   whether a change is reviewable (diff / nothing). A durable convention anyone working
+   the repo needs belongs in CLAUDE.md or a rule. A machine-local or personal fact
+   sitting in a committed CLAUDE.md — especially in a public repo — has auto memory as a
+   legitimate destination: it is machine-local by construction and never committed.
+   Behavior that must hold *inside a dispatched subagent* can never live in memory.
+7. **Judge `MEMORY.md` as an index, `CLAUDE.md` as a rules file.** The index's unit is
+   one line — `- [Title](file.md) — hook`, under ~150 characters. An entry carrying its
+   own detail, or carrying no link at all, is content squatting in the auto-loaded
+   budget: demote the detail into the topic file and leave the hook. Judge the index by
+   entry discipline and by whether it still points at files that exist, not by whether
+   it reads well.
+8. **Do not judge a topic file by its length.** It costs nothing at launch. Judge it on
+   truth (rule 9), on whether its `description` frontmatter would actually get it
+   recalled for the queries it should serve, and on whether it contradicts another
+   memory or the repo.
+9. **Apply the truth check to memory harder than anywhere else.** Memory is explicitly a
+   point-in-time record with no review gate, so drift is the expected failure. A memory
+   contradicted by the current repo is deleted, not patched around — that is the
+   official instruction, not a preference. Merging memories means deleting the sources
+   and writing one fresh file (preserving the oldest `created:`), which is how the
+   harness's own pruning pass does it.
+10. **A memory duplicated by CLAUDE.md loses.** CLAUDE.md is versioned, shared, and
+    visible to subagents; the memory is none of those. Delete the memory and keep the
+    rule — unless the memory is deliberately the machine-local variant, which is a
+    `QUESTIONS` entry, not a move.
 
 ## Refresh procedure (`refresh` mode)
 
