@@ -1,0 +1,7 @@
+- [Serial bridge protocol](serial-bridge.md) — the controller speaks a custom line protocol, not GRBL
+- [Controller host](controller-host.md) — where the plot server runs and what port the bridge listens on
+- [Profile workflow](profile-workflow.md) — how to render a plot from a machine + paper profile
+- [Pen pressure](pen-pressure.md) — fineliner pressure setting
+- [Fineliner notes](fineliner-notes.md) — pen-specific pressure and paper behavior
+- [Pen changes](pen-changes.md) — how the single-carriage pen swap works
+- Paper stock: the workshop keeps 200gsm cold-press in the flat file under the bench, and the 300gsm hot-press is reserved for the framed series. Cold-press feeds fine at any speed. Hot-press needs the feed rate dropped or the leading edge lifts off the platen and smears the first pass. Reorder from the same supplier as last time.

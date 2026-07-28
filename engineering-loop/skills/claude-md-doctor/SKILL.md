@@ -1,18 +1,18 @@
 ---
 name: el:claude-md-doctor
-description: "Diagnose CLAUDE.md / .claude/rules / nested instruction files for bloat, wrong-mechanism content, and scar tissue — then apply the high-confidence fixes in the same run. Writes an evidence bundle first, edits second; the uncommitted git diff is the review gate. Use when CLAUDE.md feels heavy, an auto-loaded file has grown past a screenful, or before adding a new rule."
+description: "Diagnose CLAUDE.md / .claude/rules / nested instruction files and the repo's auto memory for bloat, wrong-mechanism content, stale facts, and scar tissue — then apply the high-confidence fixes in the same run. Writes an evidence bundle first, edits second; the uncommitted git diff (plus a memory snapshot) is the review gate. Use when CLAUDE.md feels heavy, an auto-loaded file has grown past a screenful, MEMORY.md has turned into a dump, or before adding a new rule."
 argument-hint: "[blank = diagnose + apply | 'diagnose' = map only, no edits | 'refresh' = update the model-guidance primer from live docs]"
 ---
 
 # claude-md-doctor
 
-Diagnoses the repo's instruction surface with evidence, then presses the button: moves the evidence supports unambiguously are applied in the same run; judgment calls are left as a checklist. Git is the undo — the run requires a clean tree going in and ends with an uncommitted diff for review.
+Diagnoses the repo's instruction surface with evidence, then presses the button: moves the evidence supports unambiguously are applied in the same run; judgment calls are left as a checklist. Git is the undo — the run requires a clean tree going in and ends with an uncommitted diff for review. Auto memory is in scope too, and since git cannot cover it, a pre-run snapshot is its undo.
 
 ## What this skill does
 
-1. Triages the instruction surface (line counts, smells, duplication, marker freshness). Cheap.
+1. Triages the instruction surface — CLAUDE.md files, rules, and this repo's auto memory (line counts, smells, duplication, index contract, marker freshness). Cheap.
 2. If the surface is clean → emits a Tier-0 verdict and exits. Target: <10s.
-3. Otherwise → decomposes each non-clean file using `references/decompose-technique.md` (PRESENT / MISSING / DROP CANDIDATES with citations).
+3. Otherwise → decomposes each non-clean file using `references/decompose-technique.md` (PRESENT / MISSING / DROP CANDIDATES with citations), and routes units between the instruction files and memory in both directions.
 4. Grounds DROP candidates with cc-explorer + git evidence (N≥2 utilization gate for proposing new rules in MISSING).
 5. Writes the artifact bundle, with **every proposed move gated `apply: auto` or `apply: ask`** (gating table in `references/heuristics.md`).
 6. **Applies the `auto` moves** — unless invoked with the `diagnose` argument — then validates the result and writes `execution-report.md`. Nothing is committed.
@@ -21,7 +21,8 @@ Diagnoses the repo's instruction surface with evidence, then presses the button:
 
 - Commit, push, or otherwise change git state (reading history is fine). The uncommitted diff IS the review; keeping, shelving, or discarding it is the operator's call. Note the bundle and any new files are untracked in that same tree — the entire run is one dirty working tree.
 - Apply any `ask`-gated move. Deleting unique content on judgment, creating new rules, and compactions where reasonable people differ stay human decisions, checklist-only.
-- Touch `~/.claude/*`. User-global findings go in `user-global-proposals.md`.
+- Touch `~/.claude/CLAUDE.md` or `~/.claude/rules/`. Those findings go in `user-global-proposals.md`. This repo's memory directory is the one exception, and it is editable only under Stage 0's snapshot.
+- Re-run the harness's own memory dream. Consolidation, deduplication, and pruning already have a mechanism; this skill does not duplicate it — see "Memory and instructions are one surface."
 - Preserve false content. This skill explicitly rejects zero-information-loss dogma — see "Truth before relocation."
 
 ## Doctrines
@@ -34,9 +35,20 @@ Diagnoses the repo's instruction surface with evidence, then presses the button:
 
 **Judge against the primer, never against intuition.** `references/model-guidance.md` is the sole doctrine for what works in an instruction file on current models — sizing targets, loader semantics (`@import` is inline-equivalent, not progressive disclosure; only skills, path-scoped rules, plain links, and deletion shrink the launch footprint), and generation-specific judgment like emphasis calibration. Judging from the primer is what makes two runs on the same repo agree. The primer is version-stamped, and `refresh` mode — not ad-hoc web reading mid-run — is how it tracks reality.
 
+**Memory and instructions are one surface.** A fresh session is steered by CLAUDE.md, the
+rules, and auto memory together, and content lands in the wrong one of the three all the
+time — a durable team convention Claude quietly saved to a machine-local memory, a
+personal hostname sitting in a committed instruction file. The harness's own memory dream
+already merges near-duplicates and prunes stale files; it works *within* memory and
+cannot see the repo's instruction surface. This skill's contribution is the part the
+dream structurally can't do: routing units between the two mechanisms, enforcing the
+index contract on `MEMORY.md`, verifying memory against repo truth, and catching memory
+files that load into nothing. When a finding is plain within-memory duplication with no
+routing question attached, name it and let the dream have it.
+
 **Wrong-mechanism findings ship as scaffolds.** When a unit routes to a different mechanism (skill, hook, path-scoped rule), the bundle contains the drafted target — a `SKILL.md` with name and trigger-rich description seeded from the unit, a `scaffolds/hooks.json` fragment to merge into `.claude/settings.json`, or a rule file with `paths:` frontmatter — under `scaffolds/`, and the move's checkbox is "install this," not "go figure out how." These moves create files, so they are always `apply: ask`.
 
-## The instruction surface (four scopes)
+## The instruction surface (five scopes)
 
 | Scope | Path | Owned by repo? | Editable here? |
 |---|---|---|---|
@@ -44,10 +56,28 @@ Diagnoses the repo's instruction surface with evidence, then presses the button:
 | user-global | `~/.claude/CLAUDE.md`, `~/.claude/rules/*.md` | no | no (read-only; surface findings in `user-global-proposals.md`) |
 | project | `<repo>/CLAUDE.md`, `<repo>/**/CLAUDE.md` (nested), **plus every repo-internal file they reach via `@import`** (max depth 4) | yes | yes — `auto` moves and the HTML marker |
 | project-local | `<repo>/.claude/rules/*.md` if present | yes | yes — `auto` moves only |
+| memory | `~/.claude/projects/<project>/memory/` — this repo's auto memory (`MEMORY.md` + topic files + `team/`) | no (machine-local, ungitted) | yes — `auto` moves, under Stage 0's snapshot |
+
+**Resolving the memory directory.** It is keyed to the *git repository*, so a worktree
+run resolves to the same directory as a main-checkout run. Honor `autoMemoryDirectory`
+from any settings scope if set; otherwise derive `<project>` from the repo root the way
+Claude Code does. If the directory does not exist, auto memory is empty or disabled
+(`autoMemoryEnabled`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY`) — say which in `triage.md` and
+move on. A `MEMORY.md` found anywhere else is inert; see the next paragraph.
+
+**Memory is instruction surface, and half of it is a trap.** `MEMORY.md` loads into every
+session exactly like CLAUDE.md and competes for the same adherence budget, so it is
+triaged like any other auto-loaded file — but only its first 200 lines / 25KB load, and
+it is an *index*, not a rules file, so it is judged against a different contract. Topic
+files load only on demand and cost nothing at launch; length is not a defect there.
+Memory-shaped files outside the resolved directory (`~/.claude/MEMORY.md`, a stray
+`~/.claude/memory/`, a repo-local `memory/`) load into nothing at all — report them as
+**inert**, with the number of lines the human believes are working and aren't. Mechanics
+in `references/model-guidance.md`; checks and gating in `references/heuristics.md`.
 
 **Import expansion is part of scoping, not an afterthought.** A CLAUDE.md that is just `@AGENTS.md` (the official shim pattern) is a healthy 1-line Tier-0 file — but the AGENTS.md it imports IS the project instruction file and joins the surface as a first-class member: triaged, decomposed, and edited like any other. The same applies to any other repo-internal `@import` target. Imports resolving outside the repo are noted in `triage.md` but not triaged or edited.
 
-Public-repo signal: if `<repo>` is public (check `gh repo view --json visibility`), flag rules that contain personal-data / private-host names as **gitignore-or-extract** candidates — always `apply: ask`, never auto.
+Public-repo signal: if `<repo>` is public (check `gh repo view --json visibility`), flag rules that contain personal-data / private-host names for extraction — always `apply: ask`, never auto. Auto memory is the preferred destination for a machine-local fact, ahead of a user-global rule or a gitignore entry; see the public-repo section of `references/heuristics.md`.
 
 ## Sectioning protocol
 
@@ -59,6 +89,7 @@ Treat every Markdown H2 (`## …`) as a unit. Bulleted lists under no heading ar
 
 - `git status --porcelain` must be clean. If dirty: downgrade the whole run to diagnose-only, say so up front, and note it in the bundle. The `diagnose` argument forces map-only regardless of tree state.
 - **Primer stamp check**: compare the provenance stamp in `references/model-guidance.md` against the session's model family and `claude --version`. On mismatch, proceed on the stamped doctrine but lead the final report with the mismatch and recommend a `refresh` run. Never fetch docs mid-run to compensate — that trades consistency for freshness one run at a time.
+- **Memory snapshot** (apply runs that resolved a memory directory): copy it to `~/.claude/claude-md-doctor-backups/<repo-name>-<ISO-timestamp>/` before Stage 5 touches anything. It goes outside the repo deliberately — memory holds personal and machine-local facts, and a bundle is not always gitignored. If the copy fails, downgrade memory to diagnose-only for the run and say so; the rest of the run proceeds. Print the one-line `cp -r` that restores it, in the final report and in `execution-report.md`. Git is the undo for the repo; this is the undo for memory.
 
 ### Stage 1 — Triage (always)
 
@@ -71,13 +102,20 @@ First expand the surface: for each CLAUDE.md, resolve its `@import` lines (repo-
 - git: `git log --format="%h %ai" -- <file>` — last touch, total commits
 - if marker present: `git log <marker_sha>..HEAD -- <file>` — has anything changed since last run?
 
+**Memory triage** runs alongside, with its own measurements because git and the smell
+regexes mostly don't apply:
+- `MEMORY.md`: loaded lines and bytes (strip frontmatter and block HTML comments first — they don't count), entries breaching the index contract, dead pointers, and whether the file exceeds 200 lines / 25KB. If it does, name the first entry that falls past the cut — everything from there down has never loaded.
+- Topic files: count, which are indexed, which lack frontmatter or a `description`, and `modified:` age where stamped. Note `team/` separately; it is `ask`-only.
+- Inert memory: check the conventional wrong locations (`~/.claude/MEMORY.md`, `~/.claude/memory/`, `<repo>/memory/`). Report each with its line count as **inert — loads into nothing**.
+- Tier the memory scope on `MEMORY.md` the same way as any auto-loaded file, but never on topic-file length. Topic files pull the scope above Tier 0 only through truth, contradiction, or routing findings.
+
 Compute a per-file tier:
 - **Tier 0** — file is under 50 lines, no smells, marker fresh OR file untouched since last marker. Verdict: "healthy, skip."
 - **Tier 1** — one or two smells, or no prior marker. Worth a decompose pass; no deep mining.
 - **Tier 2** — three+ smells, or file over 150 lines, or duplicated H2s across files. Decompose + mine.
 - **Tier 3** — auto-loaded surface over 300 lines total. Decompose all non-Tier-0 files + mine + cross-file duplication report.
 
-If **all** files are Tier 0: write `triage.md` only, update no marker, edit nothing, exit. Report the time budget consumed.
+If **all** files are Tier 0 *and* the memory scope is clean: write `triage.md` only, update no marker, edit nothing, exit. Report the time budget consumed.
 
 ### Stage 2 — Decompose (Tier 1+)
 
@@ -98,6 +136,16 @@ For each non-Tier-0 file, follow `references/decompose-technique.md` literally. 
 
 **Truth check.** For every unit surviving into PRESENT or proposed for relocation, verify its checkable facts (filenames against `ls`, values against the authoritative file, hostnames/ports against configs or live sources when cheap). Record each verified/stale verdict in `decompose.md`; stale facts feed the move's evidence line.
 
+**Memory decompose.** Each memory file is one unit — that is the mechanism's own
+granularity, so do not section it further. Run the truth check on every one, ordered
+oldest `modified:` first. Then run the cross-scope pass, which is the one that justifies
+memory being in scope at all:
+
+- **Duplication across mechanisms** — a memory restating a live CLAUDE.md or rule unit, or vice versa. Compare the text; do not assume from the title.
+- **Contradiction** — two memories, or a memory and an instruction unit, giving opposing guidance. Both go in `decompose.md` under QUESTIONS with the tension named; neither is resolved unilaterally.
+- **Misrouting, both directions** — run the memory rows of the wrong-mechanism table in `references/heuristics.md`. Promotion out of memory is the common case; demotion of a machine-local fact *into* memory is the case that fixes a public-repo leak.
+- **Index contract** — `MEMORY.md` against the index checks. These are the mechanical findings and most of the `auto` moves.
+
 ### Stage 3 — Mining (Tier 2+, optional in Tier 1)
 
 For each DROP CANDIDATE, validate with cc-explorer:
@@ -110,6 +158,8 @@ For each MISSING entry where the recommendation is "add a new rule":
 
 A thin corpus (few or zero sessions) caps confidence: without behavioral evidence, "confirmed scar tissue" downgrades to "suspected," which gates the move `ask` unless a structural rule (duplication, discoverability, staleness) independently confirms it.
 
+**Memory has no git history**, so the scar-tissue rubric's first criterion — added once, never edited — has no test. A `modified:` stamp is a weak substitute and unstamped files have nothing at all. A memory therefore reaches "confirmed" only through verified duplication or a verified stale fact; on chat evidence alone it stops at "suspected" and the move gates `ask`. Do not launder a stamp into certainty.
+
 ### Stage 4 — Write the bundle
 
 Bundle location: `<repo>/.claude/claude-md-doctor/<ISO-timestamp>/` (timestamp like `2026-05-14T1830Z`).
@@ -120,11 +170,14 @@ Files (skeletons in `references/bundle-template.md`):
 2. **`decompose.md`** — per file: PRESENT / MISSING / DROP CANDIDATES / ALTERNATIVE READING / QUESTIONS, with verifiability and truth-check verdicts. Locked sections marked `[locked]`.
 3. **`proposed-changes.md`** — the move checklist. Each move carries its `apply: auto | ask` gate and the evidence that earned it. At most 10 moves; longer "why" narratives keyed by number at the bottom.
 4. **`user-global-proposals.md`** — same shape, scoped to `~/.claude/*`. Header: "This skill cannot edit user-global files. Apply manually via chezmoi if managed."
-5. **`metadata.json`** — `{skill_version, repo_sha, branch, mode, tier_by_file, files_analyzed, started_at, finished_at, marker_sha}`.
+5. **`metadata.json`** — `{skill_version, repo_sha, branch, mode, tier_by_file, files_analyzed, started_at, finished_at, marker_sha, memory_dir, memory_snapshot_path}`.
 6. **`scaffolds/`** — one drafted artifact per wrong-mechanism move: `scaffolds/<name>/SKILL.md` for skill-shaped units (frontmatter with `name:` and a trigger-rich `description:`, body seeded from the unit), `scaffolds/hooks.json` snippets for hook-shaped units, `scaffolds/rules/<topic>.md` with `paths:` frontmatter for path-scoped units. The corresponding `ask` move's "How" line is "install `scaffolds/<…>` to `<destination>`."
-7. **`execution-report.md`** — written by Stage 6 (absent in diagnose-only runs).
+7. **`memory-report.md`** — written whenever a memory directory resolved. Leads with the resolved path, whether it was snapshotted and where, `MEMORY.md`'s loaded size against the 200-line / 25KB cap, topic-file count, and every inert location found with its line count. Then the cross-scope findings: duplications, contradictions, routing candidates. Memory moves themselves live in `proposed-changes.md` with everything else — this file is the scope's evidence, not a second checklist. **Cite personal facts by file and line; never quote them.** If no memory directory resolved, one line saying so and why.
+8. **`execution-report.md`** — written by Stage 6 (absent in diagnose-only runs).
 
 Then write the marker at the top of **every file decomposed this run** (Tier 1+), replacing any prior marker in each. The marker travels with the file it describes — that's what makes Stage 1's freshness check work per-file, including for an AGENTS.md that entered the surface via the shim (and for repos that have an AGENTS.md but no CLAUDE.md at all). HTML comments are stripped before context injection, so markers are free.
+
+**Memory files never get a marker.** Claude rewrites them on its own schedule, so a marker there is something a future rewrite has to preserve for no benefit — and `MEMORY.md` is measured against its cap with comments already stripped, so it would buy nothing either. `memory-report.md` carries the memory scope's provenance instead.
 
 ```
 <!-- last-decomposed: <head-sha> @ <ISO-date> → see .claude/claude-md-doctor/<ts>/ -->
@@ -138,18 +191,20 @@ Keep the bundle readable end-to-end on a phone. Summary info at the top of every
 
 Apply every `apply: auto` move exactly as its "How" line specifies — no improvising beyond the map. If execution surfaces a judgment the map didn't make, stop that move, regrade it `ask`, and record why in `execution-report.md`.
 
-- Replacement stubs follow the rich-abstract rule.
+- Replacement stubs follow the rich-abstract rule — except in `MEMORY.md`, where the index contract governs and a stub is one line.
 - Stale facts encountered mid-move are fixed at the authoritative source or dropped, per the truth-check verdicts — never copied forward.
+- In the memory scope: edit `MEMORY.md`, delete topic files, and nothing else. A topic-file body rewrite is an `ask` move by definition, so hitting the urge to make one mid-apply means the move was misgraded — stop it and record the regrade. Never touch `team/`.
 - Check off applied moves in `proposed-changes.md`; `ask` moves stay unchecked.
 - Do not commit anything.
 
 ### Stage 6 — Validate + report
 
 - Re-run the Stage-1 smell regexes on every edited file; any surviving smell must be explained (e.g., locked unit).
-- Every markdown link and `@import` in edited files resolves to an existing file.
-- Confirm no `ask` move was applied and no locked unit changed.
+- Every markdown link and `@import` in edited files resolves to an existing file. In `MEMORY.md` that means every entry still points at a file that exists — including after a deletion elsewhere in this run.
+- If `MEMORY.md` was edited: re-measure it stripped of frontmatter and comments, confirm it is under 200 lines and 25KB, and confirm every entry a move touched still carries a link.
+- Confirm no `ask` move was applied, no locked unit changed, no `team/` file changed, and no topic-file body was rewritten.
 - Write `execution-report.md`: before/after line counts per file, moves applied vs. left, validation results, and one honest line — did any applied move require judgment the bundle hadn't already made?
-- Print: bundle path, `git diff --stat`, and the new files created (bundle included) so the operator sees the run's full footprint in one place.
+- Print: bundle path, `git diff --stat`, the new files created (bundle included), and — because `git diff` cannot show them — the memory files changed or deleted, with the snapshot-restore command. The operator sees the run's full footprint in one place, including the half that git does not track.
 
 ### `refresh` mode
 
@@ -157,13 +212,13 @@ Invoked as `el:claude-md-doctor refresh`. Skips every stage above and instead up
 
 ## Self-test
 
-`evals/` holds synthetic fixture surfaces and assertion lists (`evals/evals.json`). After changing this skill's heuristics, gating, or stages, run the evals: copy a fixture to a temp dir, `git init` + commit it, run the skill against it, check every assertion. The fixtures are seeded with known defects (a lying ASCII tree, a stale hostname, a verbatim docs duplicate) — never "fix" a fixture to make an assertion pass.
+`evals/` holds synthetic fixture surfaces and assertion lists (`evals/evals.json`). After changing this skill's heuristics, gating, or stages, run the evals: copy a fixture to a temp dir, `git init` + commit it, run the skill against it, check every assertion. Evals marked `seed_memory` also need the fixture's `memory-seed/` moved out to the temp repo's resolved memory directory first — see `memory_setup` in `evals.json`. The fixtures are seeded with known defects (a lying ASCII tree, a stale hostname, a verbatim docs duplicate, an index entry pointing at a file that does not exist) and with controls that must *not* be flagged (a long, healthy topic file) — never "fix" a fixture to make an assertion pass.
 
 ## References
 
-- `references/model-guidance.md` — the judging doctrine: sizing, loading mechanics, current-model prompting guidance, refresh procedure. Version-stamped.
+- `references/model-guidance.md` — the judging doctrine: sizing, loading mechanics for both CLAUDE.md and auto memory, current-model prompting guidance, refresh procedure. Version-stamped.
 - `references/decompose-technique.md` — verbatim decompose-prompt gist; the methodology core.
-- `references/heuristics.md` — smell regex table, wrong-mechanism routing, scar-tissue rubric, apply-gating table, truth-check procedure, rich-abstract stub spec.
+- `references/heuristics.md` — smell regex table, memory-surface checks and index contract, wrong-mechanism routing, scar-tissue rubric, apply-gating tables, truth-check procedure, rich-abstract stub spec.
 - `references/bundle-template.md` — bundle skeletons.
 
 @./references/model-guidance.md

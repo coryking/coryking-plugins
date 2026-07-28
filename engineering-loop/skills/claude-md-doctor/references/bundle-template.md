@@ -20,7 +20,13 @@ This is the shape only — use it as a structural reference, not a fill-in form.
 - `dup-h2` — H2 name appears in another file
 - `temporal` — chronological phrasing
 - `no-paths` — rule file missing `paths:`
+- `index-dump` — MEMORY.md entries carrying content instead of hooks
+- `over-cap` — MEMORY.md past 200 lines / 25KB; the tail never loads
+- `inert` — memory-shaped file outside the resolved memory directory
 ```
+
+The memory scope gets one row for `MEMORY.md` and one summary row for the topic files —
+never a row per topic file. Detail lives in `memory-report.md`.
 
 ## `decompose.md` skeleton (one section per file)
 
@@ -72,6 +78,37 @@ This is the shape only — use it as a structural reference, not a fill-in form.
 
 After Stage 5, applied moves are checked off in place (`- [x]`); `ask` moves stay unchecked.
 
+## `memory-report.md` skeleton
+
+Cite personal facts by file and line. Do not quote them into the bundle.
+
+```
+# Memory — <resolved path>
+
+**Index:** MEMORY.md <L> lines / <K>KB loaded (cap 200 / 25KB) — <under cap | CUT AT: "<first entry past the cut>">.
+**Topic files:** <N> (<I> indexed, <U> unindexed, <F> without frontmatter). **team/:** <N or absent>.
+**Snapshot:** <path or "not taken — reason">.
+**Inert (loads into nothing):** <path — N lines> · ... | none
+
+## Index contract
+| Entry | Breach | Move |
+|-------|--------|------|
+
+## Cross-scope findings
+### Duplication (memory ↔ instruction surface)
+- **<memory file>** ↔ **<instruction file § H2>** — <verbatim | restated> — move <N>
+
+### Contradictions
+- **<a>** vs **<b>** — <the tension in one line> — QUESTIONS, not a move
+
+### Routing candidates
+- **<file>** → <mechanism> — <which row of the routing table> — move <N>
+
+## Truth check
+| File | modified | Claim checked | Verdict |
+|------|----------|---------------|---------|
+```
+
 ## `user-global-proposals.md` skeleton
 
 Same shape as `proposed-changes.md`, prefixed with:
@@ -103,6 +140,7 @@ Same shape as `proposed-changes.md`, prefixed with:
 
 **Summary:** <A>/<N> moves applied, <B> left as `ask`. <path>: <before> → <after> lines. Validation: <PASS | issues below>.
 **Footprint:** nothing committed; edits + this bundle + new files are one dirty working tree. New files: <list or none>.
+**Outside git:** memory files changed <list or none>, deleted <list or none>. Restore: `cp -r <snapshot>/. <memory-dir>/`
 
 ## Applied
 - **1.** <unit-name> — <one line: what changed>
@@ -116,6 +154,9 @@ Same shape as `proposed-changes.md`, prefixed with:
 - Links + @imports: <all resolve | broken: …>
 - Locked units untouched: <yes>
 - `ask` moves untouched: <yes>
+- MEMORY.md under cap after edits: <L lines / KKB | n/a>
+- Index entries all resolve: <yes | dangling: …>
+- `team/` untouched, no topic-file body rewritten: <yes | n/a>
 
 ## Regrades
 <moves that started `auto` but hit un-mapped judgment mid-apply — what stopped them. "none" if none.>
