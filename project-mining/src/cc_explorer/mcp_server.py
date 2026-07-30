@@ -37,15 +37,14 @@ from .conversion import (
 from .corpus import (
     MIN_ID_LEN,
     Corpus,
-    ScannerError,
     SessionRef,
     discover_projects,
     resolve_project,
     resolve_projects,
 )
-from .failures import ERROR_FLAG_PATTERN, survey_failures as run_failure_survey
+from .failures import narrow_to_error_sessions, survey_failures as run_failure_survey
 from .formatting import matches_id
-from .models import FailureKind, parse_hide
+from .models import FailureKind, parse_hide, parse_kinds
 from .parser import load_conversations
 from .resolve import (
     resolve_artifacts,
@@ -497,23 +496,6 @@ def _check_errors_only(errors_only: bool, hide: frozenset[str]) -> None:
         )
 
 
-def _narrow_to_error_files(corpus: Corpus) -> Corpus:
-    """Refs holding at least one transcript with a flagged tool failure.
-
-    A raw-JSONL prefilter (see failures.ERROR_FLAG_PATTERN) — no parsing. On a
-    scanner failure it degrades to the full corpus, which is slower but never
-    silently drops a session that did fail.
-    """
-    try:
-        return Corpus([ref for ref, _ in corpus.matching_files([ERROR_FLAG_PATTERN])])
-    except ScannerError as e:
-        print(
-            f"[cc-explorer] errors_only prefilter failed ({e}); scanning all sessions",
-            file=sys.stderr,
-        )
-        return corpus
-
-
 # UUIDs use hex digits and hyphens. The first 8 chars (the prefix form returned
 # by grep_session) are pure hex. Anything else is a hallucination — usually a
 # unix timestamp or a random word the model grabbed from a pipe-delimited line.
@@ -677,7 +659,7 @@ def search_projects(
     # a literal in the raw JSONL, so it names the ~40% of files that can hold a
     # failure at all without parsing anything.
     if errors_only:
-        corpus = _narrow_to_error_files(corpus)
+        corpus, _ = narrow_to_error_sessions(corpus)
         if not corpus.refs:
             raise no_match_error
 
@@ -1403,19 +1385,17 @@ def get_activity_timeline(
     return ActivityTimelineResponse.model_validate(result)
 
 
-def _parse_kinds(value: str | None) -> list[FailureKind] | None:
-    """Parse a comma-separated kinds filter, or None for 'all kinds'."""
-    if not value or not value.strip():
-        return None
-    valid = {k.value for k in FailureKind}
-    atoms = [a.strip() for a in value.split(",") if a.strip()]
-    invalid = [a for a in atoms if a not in valid]
-    if invalid:
-        raise ToolError(
-            f"Unknown failure kind(s): {', '.join(invalid)}. "
-            f"Valid: {', '.join(sorted(valid))}."
-        )
-    return [FailureKind(a) for a in atoms]
+def _parse_kinds_or_raise(value: str | None) -> list[FailureKind] | None:
+    """parse_kinds that converts ValueError to ToolError for MCP entry points.
+
+    Same split as `_parse_hide_or_raise`: the parser lives in models.py beside
+    FailureKind and is unit-testable off the boundary; this is only the
+    exception translation.
+    """
+    try:
+        return parse_kinds(value)
+    except ValueError as e:
+        raise ToolError(str(e))
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -1435,7 +1415,7 @@ def survey_failures(
     # than sending null, so None never reaches Pydantic validation.
     kinds: Annotated[
         str,
-        Field(description="Comma-separated failure kinds to keep, e.g. 'network,auth_failed,timeout' to hunt real breakage, or 'unclassified' to see only what the taxonomy could not name. Omit for all kinds. The full kind list (and what each means) is in the by_kind output schema."),
+        Field(description="Comma-separated failure kinds to keep, e.g. 'network,auth_failed,timeout' to hunt real breakage, or 'unclassified' to see only what the taxonomy could not name. Omit for all kinds. Naming 'cascade' here implies include_cascade=true — otherwise the default suppression would make that filter unanswerable. The full kind list (and what each means) is in the by_kind output schema."),
     ] = None,  # pyright: ignore[reportArgumentType]
     include_cascade: Annotated[
         bool,
@@ -1464,19 +1444,32 @@ def survey_failures(
         projects=projects,
         after=after,
         before=before,
-        kinds=_parse_kinds(kinds),
+        kinds=_parse_kinds_or_raise(kinds),
         include_cascade=include_cascade,
     )
     if survey.total == 0:
         window = ""
         if after or before:
             window = f" in [{after or '...'}, {before or '...'})"
+        # Name the remedy that is actually true. Suggesting "widen the window"
+        # when N cascades were found and suppressed sends the caller chasing a
+        # window that was never the problem.
+        if survey.cascade_suppressed:
+            remedy = (
+                f"{survey.cascade_suppressed} sibling-cancellation artifact(s) WERE "
+                f"found and suppressed — pass include_cascade=true to see them."
+            )
+        else:
+            remedy = (
+                "Widen the window, drop the `kinds` filter, or omit `projects` to "
+                "survey every project."
+            )
         raise ToolError(
             f"No failed tool calls found{window} across "
             f"{survey.sessions_scanned} scanned session(s)"
             + (f" for kinds={kinds}" if kinds else "")
-            + ". Widen the window, drop the `kinds` filter, or omit `projects` to "
-            "survey every project."
+            + ". "
+            + remedy
         )
     return SurveyFailuresResponse.from_survey(survey, limit=limit, examples=examples)
 

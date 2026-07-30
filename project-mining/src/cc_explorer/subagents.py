@@ -40,12 +40,11 @@ from .models import (
     TranscriptStats,
     collect_tool_calls,
     extract_text,
-    looks_like_no_match,
     substantive_human_text,
 )
 from .conversion import read_provenance
 from .parser import load_transcript
-from .utils import PrefixId
+from .utils import PrefixId, collapse_ws
 
 
 @dataclass
@@ -703,6 +702,35 @@ def _read_agent_id(path: Path) -> Optional[str]:
     return None
 
 
+# A DIFFERENT question from failure: "did this call come back empty / malformed
+# enough that the agent learned nothing?" Only audit_session_tools asks it — a
+# zero-hit search is a tool-usage problem worth seeing even though the harness
+# considers the call a success. Deliberately NOT part of the model's failure
+# gate (see the taxonomy note in models.py), so it lives with its one caller.
+NO_MATCH_MARKERS = (
+    "no matches",
+    "not found",
+    "validation error",
+    "input should be",
+    "missing required",
+    "unexpected keyword",
+    "exceeds maximum",
+)
+
+
+def looks_like_no_match(text: str) -> bool:
+    """True when a SUCCESSFUL tool result reads as a zero-hit / rejected call.
+
+    A prose heuristic, and a noisy one at corpus scale (it fires on any command
+    output containing "not found"). Scoped to single-session tool auditing,
+    where the false-positive cost is a human glancing at one extra row.
+    """
+    if not text:
+        return False
+    head = text[:300].lower()
+    return any(marker in head for marker in NO_MATCH_MARKERS)
+
+
 def _format_tool_input_summary(input_obj: Any, truncate: int) -> str:
     """One-line summary of a tool_use input dict, truncated for display."""
     if not input_obj:
@@ -759,12 +787,22 @@ def extract_agent_tool_audit(
         if call.result is None:
             continue
         text = call.result.text
-        if call.failure is not None or looks_like_no_match(text):
-            row["error"] = True
-            snippet = " ".join(text.split())
-            if truncate and len(snippet) > truncate:
+        # `has_failure` is the flag check; the prose heuristic only has to run
+        # when the harness did NOT flag the call. Never classify — the audit
+        # reports the error text, not its kind.
+        if not call.has_failure and not looks_like_no_match(text):
+            continue
+
+        row["error"] = True
+        if truncate:
+            # Bounded before normalizing — error text is where the 500 KB
+            # results live, and only `truncate` chars of it survive.
+            snippet = collapse_ws(text, truncate + 1)
+            if len(snippet) > truncate:
                 snippet = snippet[: truncate - 1] + "…"
-            row["error_text"] = snippet
-            error_count += 1
+        else:
+            snippet = " ".join(text.split())
+        row["error_text"] = snippet
+        error_count += 1
 
     return calls, dict(tool_counts.most_common()), error_count

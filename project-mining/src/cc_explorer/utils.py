@@ -23,6 +23,24 @@ def smart_truncate(text: str, width: int, placeholder: str = "...") -> str:
     return text[: width - len(placeholder)] + placeholder
 
 
+# Whitespace collapse can only ever SHRINK a string, so bounding the input to a
+# generous multiple of the wanted width is safe and keeps the cost proportional
+# to the window rather than to the input.
+_COLLAPSE_SLACK = 8
+
+
+def collapse_ws(text: str, limit: int) -> str:
+    """Whitespace-collapsed leading slice, bounded BEFORE it is normalized.
+
+    `" ".join(text.split())[:limit]` normalizes the WHOLE string to read a
+    `limit`-char window — on a 540 KB tool result that is ~96x slower than
+    necessary, and tool results are exactly where huge strings live. Slicing
+    first is equivalent for any input whose leading `limit * 8` chars are not
+    overwhelmingly whitespace, and bounded regardless of input size.
+    """
+    return " ".join(text[: limit * _COLLAPSE_SLACK].split())[:limit]
+
+
 
 class PrefixId(str):
     """UUID value object with prefix matching and short display.

@@ -36,10 +36,12 @@ from .conversion import read_provenance
 from .corpus import Corpus, ScannerError, SessionRef
 from .models import (
     FailureKind,
+    ToolResultContent,
     collect_tool_calls,
 )
 from .parser import load_transcript
-from .utils import PrefixId
+from .search import session_sources
+from .utils import PrefixId, collapse_ws
 
 
 # The raw-JSONL literal that names every transcript file able to contribute a
@@ -81,10 +83,24 @@ class KindTally:
 
 @dataclass
 class ToolTally:
-    tool: str
+    """One tool's exposure and failure load, keyed by its FULL name.
+
+    Full name, not `short_name`: `mcp__serverA__search` and
+    `mcp__serverB__search` are different tools with different failure rates, and
+    17 short names in the live corpus are shared by two or three servers. The
+    display name is resolved at the end (`display`), collapsing to the short
+    form only when it is unambiguous within the scan.
+    """
+
+    name: str
     errors: int = 0
     calls: int = 0
     kinds: Counter[FailureKind] = field(default_factory=Counter)
+    display: str = ""
+
+    @property
+    def short_name(self) -> str:
+        return self.name.split("__")[-1]
 
 
 @dataclass
@@ -144,27 +160,16 @@ def _as_utc(dt: Optional[datetime]) -> Optional[datetime]:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
-def _agent_id_for(path: Path, main: Path) -> Optional[PrefixId]:
-    """The subagent id a transcript file belongs to, or None for the main file."""
-    if path == main:
-        return None
-    stem = path.stem
-    return PrefixId(stem[len("agent-"):]) if stem.startswith("agent-") else None
-
-
-def _excerpt(text: str, limit: int) -> str:
-    """Whitespace-collapsed leading slice — the form both shapes and examples use."""
-    return " ".join(text.split())[:limit]
-
-
-def _candidate_files(
+def error_candidate_files(
     corpus: Corpus,
 ) -> tuple[list[tuple[SessionRef, list[Path]]], bool]:
     """Transcript files that can possibly hold a failure, per session.
 
-    Returns (pairs, prefiltered). A scanner failure is not fatal — it degrades
-    to scanning everything, which is slow but never silently wrong. The caller
-    surfaces `prefiltered` so a degraded run is legible rather than mysterious.
+    THE error prefilter — `survey_failures` and search's `errors_only` both go
+    through here, so the degrade path exists once. Returns (pairs, prefiltered).
+    A scanner failure is not fatal: it falls back to every transcript, which is
+    slow but never silently wrong. Callers surface `prefiltered` so a degraded
+    run is legible rather than mysterious.
     """
     try:
         return corpus.matching_files([ERROR_FLAG_PATTERN]), True
@@ -176,6 +181,45 @@ def _candidate_files(
             file=sys.stderr,
         )
         return [(ref, ref.transcript_files()) for ref in corpus.refs], False
+
+
+def narrow_to_error_sessions(corpus: Corpus) -> tuple[Corpus, bool]:
+    """The session-granular view of `error_candidate_files`, for errors_only."""
+    pairs, prefiltered = error_candidate_files(corpus)
+    return Corpus([ref for ref, _ in pairs]), prefiltered
+
+
+def _example(
+    result: ToolResultContent,
+    tool: str,
+    ref: SessionRef,
+    project: str,
+    agent_id: Optional[PrefixId],
+) -> FailureExample:
+    """Build a representative failure. Excerpting error text is the expensive
+    part of a survey, so this is called only where a tally has no example yet —
+    at most once per kind and once per unclassified shape."""
+    return FailureExample(
+        text=collapse_ws(result.text, EXAMPLE_CHARS),
+        tool=tool,
+        session=ref.session_id,
+        project=project,
+        agent=agent_id,
+    )
+
+
+def _assign_tool_display_names(tallies: list[ToolTally]) -> None:
+    """Name each tool as briefly as is still unambiguous within this scan.
+
+    `Bash` stays `Bash` and a lone MCP tool shows as `grep_session`, but when
+    two servers in scope expose the same short name they keep their full
+    `mcp__server__tool` names — otherwise their rows merge and the `error_rate`
+    denominator, which is the whole point of `by_tool`, becomes a blend of two
+    different tools.
+    """
+    shared = Counter(t.short_name for t in tallies)
+    for t in tallies:
+        t.display = t.short_name if shared[t.short_name] == 1 else t.name
 
 
 def survey_failures(
@@ -190,15 +234,20 @@ def survey_failures(
     `kinds` keeps only those FailureKinds in the error tallies (denominators
     still count every call, since they measure exposure, not failure).
     `include_cascade` re-admits the sibling-cancellation artifacts that are
-    suppressed by default — 774+ of them in a real corpus, every one of which
-    triples a parallel batch's apparent failure count if left in.
+    suppressed by default — 1246 of them in a real corpus, every one of which
+    triples a parallel batch's apparent failure count if left in. Naming
+    `cascade` in `kinds` implies `include_cascade`: otherwise the suppression
+    runs first and `kinds=['cascade']` is a query that can never return a row.
     """
     lo = _as_utc(after)
     hi = _as_utc(before)
     wanted = set(kinds) if kinds else None
+    keep_cascade = include_cascade or (
+        wanted is not None and FailureKind.cascade in wanted
+    )
 
     corpus = Corpus.discover(projects)
-    pairs, prefiltered = _candidate_files(corpus)
+    pairs, prefiltered = error_candidate_files(corpus)
 
     survey = FailureSurvey(
         after=lo, before=hi, prefiltered=prefiltered,
@@ -224,15 +273,21 @@ def survey_failures(
         project = ref.project_path or ""
         touched = False
 
-        for path in files:
+        # `session_sources` already knows a session's searchable corpus: the
+        # main transcript plus every subagent body, agent ids attached and
+        # conversion artifacts dropped. Intersect it with the rg hits rather
+        # than re-deriving agent ids from filenames and re-reading provenance.
+        hit_files = set(files)
+        for source in session_sources(ref.path):
+            path = source.path
+            if path not in hit_files:
+                continue
             if lo_ts is not None:
                 try:
                     if path.stat().st_mtime < lo_ts:
                         continue
                 except OSError:
                     continue
-            if path != ref.path and read_provenance(path) is not None:
-                continue
 
             try:
                 entries = load_transcript(path)
@@ -240,7 +295,7 @@ def survey_failures(
                 continue
             survey.transcripts_scanned += 1
             touched = True
-            agent_id = _agent_id_for(path, ref.path)
+            agent_id = source.agent_id
 
             for call in collect_tool_calls(entries):
                 ts = call.timestamp
@@ -249,30 +304,24 @@ def survey_failures(
                 if hi is not None and (ts is None or ts >= hi):
                     continue
 
-                tool = call.short_name
-                tally = tool_tallies.get(tool)
+                tally = tool_tallies.get(call.name)
                 if tally is None:
-                    tally = tool_tallies[tool] = ToolTally(tool=tool)
+                    tally = tool_tallies[call.name] = ToolTally(name=call.name)
                 tally.calls += 1
 
-                kind = call.failure
-                if kind is None:
+                # Gate on the flag before classifying: `has_failure` is a bool
+                # read, `failure` runs the whole rule table, and the vast
+                # majority of scanned calls succeeded.
+                if not call.has_failure:
                     continue
-                if kind is FailureKind.cascade and not include_cascade:
+                assert call.result is not None  # has_failure implies a result
+                kind = call.result.failure
+                assert kind is not None
+                if kind is FailureKind.cascade and not keep_cascade:
                     survey.cascade_suppressed += 1
                     continue
                 if wanted is not None and kind not in wanted:
                     continue
-
-                assert call.result is not None  # failure implies a result
-                text = _excerpt(call.result.text, EXAMPLE_CHARS)
-                example = FailureExample(
-                    text=text,
-                    tool=tool,
-                    session=ref.session_id,
-                    project=project,
-                    agent=agent_id,
-                )
 
                 survey.total += 1
                 tally.errors += 1
@@ -284,7 +333,9 @@ def survey_failures(
                 kt.count += 1
                 kt.sessions.add(sid)
                 if kt.example is None:
-                    kt.example = example
+                    kt.example = _example(
+                        call.result, tally.short_name, ref, project, agent_id
+                    )
 
                 st = session_tallies.get(sid)
                 if st is None:
@@ -300,14 +351,16 @@ def survey_failures(
                         st.last = ts
 
                 if kind is FailureKind.unclassified:
-                    shape = text[:SHAPE_CHARS]
+                    shape = collapse_ws(call.result.text, SHAPE_CHARS)
                     sh = shape_tallies.get(shape)
                     if sh is None:
                         sh = shape_tallies[shape] = ShapeTally(shape=shape)
                     sh.count += 1
                     sh.sessions.add(sid)
                     if sh.example is None:
-                        sh.example = example
+                        sh.example = _example(
+                            call.result, tally.short_name, ref, project, agent_id
+                        )
 
         if touched:
             survey.sessions_scanned += 1
@@ -316,6 +369,10 @@ def survey_failures(
     survey.by_kind = sorted(
         kind_tallies.values(), key=lambda k: k.count, reverse=True
     )
+    # Resolved over EVERY tool seen, not just the error-bearing rows that get
+    # rendered: if two servers expose `search` and only one of them failed,
+    # calling that row `search` reads as "all search calls", which it is not.
+    _assign_tool_display_names(list(tool_tallies.values()))
     survey.by_tool = sorted(
         (t for t in tool_tallies.values() if t.errors),
         key=lambda t: t.errors,

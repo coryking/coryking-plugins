@@ -60,9 +60,10 @@ def sort_sessions_newest_first(sessions: list["SessionInfo"]) -> None:
 def session_sources(transcript_path: Path) -> list["TranscriptSource"]:
     """Expand a session's transcript path into its whole searchable corpus.
 
-    Takes a bare path, not a SessionInfo: the expansion is a filesystem walk,
-    so it must be reachable from a SessionRef (no parse) as well as from a
-    promoted session. Callers with a SessionInfo pass `session.path`.
+    Takes a bare path, not a SessionInfo: the expansion is a pure filesystem
+    walk and nothing in it needs a parsed session, so `failures.py` can reach it
+    straight off a `SessionRef` instead of re-deriving agent ids from filenames.
+    Callers holding a SessionInfo pass `session.path`.
 
     The main transcript plus every subagent transcript on disk. We use
     `collect_agent_files` (a pure filesystem walk over `subagents/`, including
@@ -441,6 +442,28 @@ def search_types_for(
     return conversation_types_for(hide, base_types)
 
 
+def context_types_for(
+    hide: frozenset[str],
+    base_types: tuple[type, ...],
+    errors_only: bool = False,
+) -> tuple[type, ...]:
+    """The entry types the CONTEXT around a hit is drawn from.
+
+    Normally just `conversation_types_for`. With `errors_only` the assistant
+    side is forced in regardless of `role`: the one turn that explains a failed
+    tool result is the assistant `tool_use` that caused it, and at the default
+    role='user' the context types are (HumanEntry,) — so the causing call is
+    structurally unreachable. Measured over the live corpus (n=11,576 failed
+    results), the causing assistant turn is a median of 1 entry back, while the
+    nearest preceding human turn is a median of 8 (p90 81, max 677) and for 24
+    of them does not exist at all. So role='user' context was showing unrelated
+    conversation, or nothing.
+    """
+    if errors_only and AssistantTranscriptEntry not in base_types:
+        base_types = base_types + (AssistantTranscriptEntry,)
+    return conversation_types_for(hide, base_types)
+
+
 def _entry_matches(
     entry: TranscriptEntry,
     pattern: re.Pattern,
@@ -456,11 +479,14 @@ def _entry_matches(
     - ToolResultEntry: output content (unless 'outputs' in hide)
 
     With `errors_only`, an entry matches only if it is a FAILED tool result
-    (`ToolResultEntry.failure`) AND the pattern hits its output — so the
+    (`ToolResultEntry.has_failure`) AND the pattern hits its output — so the
     pattern narrows the topic instead of having to guess the error's wording.
+    `has_failure`, not `failure`: this runs once per entry PER PATTERN, and the
+    kind is thrown away, so classifying here would run the rule table N times
+    for an answer nobody reads.
     """
     if errors_only:
-        if not isinstance(entry, ToolResultEntry) or entry.failure is None:
+        if not isinstance(entry, ToolResultEntry) or not entry.has_failure:
             return False
         output_text = extract_output_text(entry)
         return bool(output_text and pattern.search(output_text))
@@ -499,9 +525,10 @@ def _get_context(
     context: int,
     base_types: tuple[type, ...],
     hide: frozenset[str] = frozenset(),
+    errors_only: bool = False,
 ) -> tuple[list[TranscriptEntry], list[TranscriptEntry]]:
     """Get context entries around a match, filtered to visible conversation types."""
-    conv_types = conversation_types_for(hide, base_types)
+    conv_types = context_types_for(hide, base_types, errors_only)
 
     before: list[TranscriptEntry] = []
     count = 0
@@ -690,7 +717,9 @@ def search_multi(
                     per_pattern_totals[pi] += 1
                     if len(per_pattern[pi]) >= max_results_per_pattern:
                         continue  # over the cap; only the total grows
-                    before, after = _get_context(entries, idx, context, base_types, hide)
+                    before, after = _get_context(
+                        entries, idx, context, base_types, hide, errors_only
+                    )
                     per_pattern[pi].append(
                         MatchHit(
                             session_id=session.session_id,

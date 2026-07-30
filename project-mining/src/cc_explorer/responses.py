@@ -1150,8 +1150,8 @@ class FailureExampleOut(SparseModel):
 class FailureKindRow(SparseModel):
     """One failure kind and how much of the total it accounts for."""
 
-    kind: str = Field(description="Failure classification. Kinds: cascade (a sibling call in the same parallel batch failed, so this one was cancelled), user_rejected (a human declined the call), permission_denied (the permission system declined it), stale_read (edited/read a file without reading it first, or after it changed), oversized_read (read a file too big to return), edit_no_match (the string to replace wasn't there), bad_call (malformed arguments), bad_path (file/dir/cwd doesn't exist), auth_failed, network, http_status, timeout, command_not_found, git_rejected, parse_error, exit_code (a command failed for a reason no rule named), unclassified (no rule matched — see the `unclassified` section).")
-    category: str = Field(description="Whose problem it is — the axis that separates noise from breakage. 'agent': the model used the tool wrong (most of the volume, and self-corrected). 'policy': a human or the permission system said no. 'environment': the world outside said no — this is what you want when hunting real breakage. 'cascade': collateral damage. 'unknown': unclassified.")
+    kind: str = Field(description="Failure classification. Kinds: cascade (a sibling call in the same parallel batch failed, so this one was cancelled), user_rejected (a human declined the call), permission_denied (the permission system declined it), stale_read (edited/read a file without reading it first, or after it changed), oversized_read (read a file too big to return), edit_no_match (the string to replace wasn't there), bad_call (malformed arguments), bad_path (a file/dir/cwd the call named doesn't exist), auth_failed (credentials rejected — bad key, expired token, publickey denied), network (host unreachable, connection refused, DNS failure), http_status (an HTTP request came back 4xx/5xx), timeout (the call exceeded its time budget), command_not_found (the shell couldn't find the binary), git_rejected (git refused the push/pull — non-fast-forward and friends), parse_error (code the agent wrote didn't parse — broken heredoc, bad jq filter, undecodable JSON), exit_code (a command failed for a reason no rule named), unclassified (no rule matched — see the `unclassified` section).")
+    category: str = Field(description="Whose problem it is — the axis that separates noise from breakage. 'agent': the model used the tool wrong, or wrote code that didn't parse (most of the volume, and usually self-corrected). 'policy': a human or the permission system said no. 'environment': the world outside said no — this is what you want when hunting real breakage. 'cascade': collateral damage. 'unknown': unclassified.")
     count: int = Field(description="Failures of this kind in scope.")
     sessions: int = Field(description="Distinct sessions this kind occurred in.")
     example: FailureExampleOut | None = Field(default=None, description="A representative failure. Only present when the call set examples=true.")
@@ -1160,7 +1160,7 @@ class FailureKindRow(SparseModel):
 class FailureToolRow(SparseModel):
     """One tool's failure load, with the denominator that makes it mean something."""
 
-    tool: str = Field(description="Short tool name.")
+    tool: str = Field(description="Tool name — short form (`Bash`, `grep_session`) unless two MCP servers in scope expose the same short name, in which case the full `mcp__server__tool` name is shown so their denominators stay separate.")
     errors: int = Field(description="Failed calls in scope.")
     calls: int = Field(description="Invocations of this tool in the transcripts that were SCANNED — the ones carrying at least one flagged error. NOT a corpus-wide denominator: error-free transcripts are never parsed. Use it to compare failure density BETWEEN tools in the same scan, not as an absolute reliability rate.")
     error_rate: float = Field(description="errors / calls, rounded to 3 places. Same scope caveat as `calls`.")
@@ -1287,7 +1287,7 @@ class SurveyFailuresResponse(SparseModel):
             ),
             by_tool=[
                 FailureToolRow(
-                    tool=t.tool,
+                    tool=t.display,
                     errors=t.errors,
                     calls=t.calls,
                     error_rate=round(t.errors / t.calls, 3) if t.calls else 0.0,

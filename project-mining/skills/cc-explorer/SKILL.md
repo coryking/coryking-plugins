@@ -68,7 +68,7 @@ Failure is its own axis of the corpus. Every tool result carries an `is_error` f
 Read a survey in this order:
 
 1. `total` / `sessions_affected` size the problem.
-2. `by_kind` splits it by what went wrong — and each kind carries a **category**. Most failure volume is category `agent` (the model called a tool wrong and recovered: reading a file it hadn't read, an edit whose target string moved). When hunting real breakage, look at category `environment`; when auditing tool ergonomics, look at `agent`.
+2. `by_kind` splits it by what went wrong — and each kind carries a **category**. Most failure volume is category `agent` (the model called a tool wrong and recovered: editing a file it hadn't read, an edit whose target string moved, a `python -c` heredoc that didn't parse). When hunting real breakage, look at category `environment`; when auditing tool ergonomics, look at `agent`.
 3. `unclassified` is the yield — recurring failure shapes no rule anticipated, grouped by leading text and ranked by recurrence. Everything else is subtraction; this is the part that tells you something new.
 4. `by_tool` and `by_session` are drill-in targets.
 
