@@ -773,7 +773,7 @@ def test_conversion_agent_excluded_from_search_corpus(fake_claude):
     )
 
     # session_sources excludes the conversion agent's file.
-    src_paths = {s.path for s in session_sources(session)}
+    src_paths = {s.path for s in session_sources(session.path)}
     assert _lay_down_subagent.__name__  # sanity
     assert (fake_claude.project_dir(PROJECT) / SID_PARENT / "subagents" / f"agent-{real_agent}.jsonl") in src_paths
     assert (fake_claude.project_dir(PROJECT) / SID_PARENT / "subagents" / f"agent-{conv_agent}.jsonl") not in src_paths

@@ -69,6 +69,199 @@ def parse_hide(value: str | None) -> frozenset[str]:
 
 
 # =============================================================================
+# Failure taxonomy — what a failed tool call was, and whose fault it was
+# =============================================================================
+#
+# The ONE place that answers "did this tool call fail, and how?" — the failure
+# analogue of UserOrigin. `ToolResultContent.failure` is the only classification
+# entry point; everything else (audit, search's errors_only, survey_failures)
+# reads it rather than re-deriving.
+#
+# The GATE is the structured signal: `is_error`. Prose heuristics are not used
+# to decide *whether* something failed — measured against the live corpus, a
+# marker-text heuristic ("not found", "no matches") fires on ~1400 results that
+# the harness did NOT flag, and sampling those shows they are overwhelmingly
+# successful command output that merely CONTAINS the phrase (npm build logs,
+# ssh banners, grep output). Using prose as the gate would bury real breakage
+# under noise. See `looks_like_no_match` for the separate, narrower question
+# audit_session_tools asks.
+#
+# Kinds are matched in order, first hit wins, against a leading window of the
+# whitespace-normalized result text (see FAILURE_SCAN_CHARS). Order matters:
+# specific content rules run BEFORE `exit_code`, so a Bash failure is reported
+# as what actually went wrong (git_rejected, parse_error, bad_path) rather than
+# collapsing half the corpus into one uninformative bucket.
+
+
+class FailureCategory(str, Enum):
+    """Whose problem a failure is — the axis that separates noise from breakage.
+
+    Most failure volume is `agent`: the model called a tool wrong and corrected
+    itself. Someone asking "is SSH broken?" needs that out of the way, and
+    someone asking "are my agents using my tools right?" needs exactly it.
+    """
+
+    cascade = "cascade"          # collateral damage from a sibling call in the same batch
+    policy = "policy"            # a human or the permission system declined the call
+    agent = "agent"              # the agent used the tool wrong
+    environment = "environment"  # the world outside said no
+    unknown = "unknown"          # unclassified
+
+
+class FailureKind(str, Enum):
+    """A failed tool result's classification. `unclassified` is not a fallback
+    to be ignored — it is the tool's yield, the breakage no rule anticipated."""
+
+    cascade = "cascade"
+    user_rejected = "user_rejected"
+    permission_denied = "permission_denied"
+    stale_read = "stale_read"
+    oversized_read = "oversized_read"
+    edit_no_match = "edit_no_match"
+    bad_call = "bad_call"
+    bad_path = "bad_path"
+    auth_failed = "auth_failed"
+    network = "network"
+    http_status = "http_status"
+    timeout = "timeout"
+    command_not_found = "command_not_found"
+    git_rejected = "git_rejected"
+    parse_error = "parse_error"
+    exit_code = "exit_code"
+    unclassified = "unclassified"
+
+    @property
+    def category(self) -> FailureCategory:
+        return _FAILURE_CATEGORIES.get(self, FailureCategory.unknown)
+
+
+_FAILURE_CATEGORIES: dict[FailureKind, FailureCategory] = {
+    FailureKind.cascade: FailureCategory.cascade,
+    FailureKind.user_rejected: FailureCategory.policy,
+    FailureKind.permission_denied: FailureCategory.policy,
+    FailureKind.stale_read: FailureCategory.agent,
+    FailureKind.oversized_read: FailureCategory.agent,
+    FailureKind.edit_no_match: FailureCategory.agent,
+    FailureKind.bad_call: FailureCategory.agent,
+    FailureKind.bad_path: FailureCategory.agent,
+    FailureKind.auth_failed: FailureCategory.environment,
+    FailureKind.network: FailureCategory.environment,
+    FailureKind.http_status: FailureCategory.environment,
+    FailureKind.timeout: FailureCategory.environment,
+    FailureKind.command_not_found: FailureCategory.environment,
+    FailureKind.git_rejected: FailureCategory.environment,
+    FailureKind.parse_error: FailureCategory.environment,
+    FailureKind.exit_code: FailureCategory.environment,
+    FailureKind.unclassified: FailureCategory.unknown,
+}
+
+
+# How much of a result to read when classifying. Long enough to reach past a
+# leading "Exit code N" into the real error, short enough that a phrase buried
+# in 200 lines of successful output can't misclassify the result.
+FAILURE_SCAN_CHARS = 1000
+
+
+_FAILURE_RULES: tuple[tuple[FailureKind, re.Pattern[str]], ...] = (
+    # An artifact, not a failure: one real error in a parallel batch cancels or
+    # errors every sibling. Must be caught FIRST or every parallel batch triples.
+    (FailureKind.cascade, re.compile(
+        r"Sibling tool call errored|Cancelled: parallel tool call", re.I)),
+    # A human said no.
+    (FailureKind.user_rejected, re.compile(
+        r"user doesn't want to proceed|Permission for this (?:action|tool use) was denied|"
+        r"^Denied by user", re.I)),
+    # The permission system said no (a rule, or an auto-deny).
+    (FailureKind.permission_denied, re.compile(
+        r"Permission to use \S+ has been (?:auto-)?denied", re.I)),
+    # Agent-behavior errors: the model called the tool wrong.
+    (FailureKind.stale_read, re.compile(
+        r"File has not been read yet|File has been modified since read", re.I)),
+    (FailureKind.oversized_read, re.compile(
+        r"exceeds maximum allowed (?:tokens|size)|read specific portions of the file", re.I)),
+    (FailureKind.edit_no_match, re.compile(
+        r"String to replace not found in file|Found \d+ matches of the string to replace", re.I)),
+    # Deliberately narrow: only markers a schema validator emits. A loose
+    # "missing required" would swallow `your authentication token is missing
+    # required scopes`, which is an auth failure, not a malformed call.
+    (FailureKind.bad_call, re.compile(
+        r"InputValidationError|validation error for call|Input should be|"
+        r"missing required (?:argument|parameter|field|propert)|"
+        r"unexpected keyword argument|Agent type '[^']*' not found", re.I)),
+    # The world said no. Network before timeout so a refused/timed-out SSH reads
+    # as a network fact rather than a generic timeout.
+    (FailureKind.network, re.compile(
+        r"ssh: connect to host|Connection refused|Could not resolve host|"
+        r"Network is unreachable|No route to host|ECONNREFUSED|ENOTFOUND", re.I)),
+    (FailureKind.auth_failed, re.compile(
+        r"Permission denied \(publickey|Permission denied, please try again|"
+        r"authentication token|AADSTS\d+|401 Unauthorized|Bad credentials|"
+        r"Authentication failed", re.I)),
+    (FailureKind.http_status, re.compile(
+        r"status code [45]\d\d|HTTP (?:error )?[45]\d\d|\b[45]\d\d (?:Forbidden|Not Found|"
+        r"Bad Request|Internal Server Error)", re.I)),
+    (FailureKind.timeout, re.compile(
+        r"timed out after|timeout of \d+\s*ms exceeded|Connection timed out|ETIMEDOUT", re.I)),
+    (FailureKind.command_not_found, re.compile(
+        r"command not found|\bsh: \d+: [^:]+: not found", re.I)),
+    (FailureKind.git_rejected, re.compile(
+        r"Note about fast-forwards|! \[rejected\]|cannot pull with rebase|"
+        r"Not possible to fast-forward|non-fast-forward", re.I)),
+    (FailureKind.parse_error, re.compile(
+        r"JSONDecodeError|jq: error|SyntaxError|Expecting value: line|ParserError", re.I)),
+    (FailureKind.bad_path, re.compile(
+        r"File does not exist|EISDIR|ENOENT|no such file or directory|does not exist", re.I)),
+    # Late catch-all: a Bash command that failed for a reason no rule named.
+    (FailureKind.exit_code, re.compile(r"^Exit code \d+", re.I)),
+)
+
+
+def classify_failure(text: str) -> FailureKind:
+    """Classify already-known-failed result text into a FailureKind.
+
+    Does NOT decide whether something failed — the caller has already read the
+    `is_error` flag. Returns `unclassified` when no rule matches, which is the
+    signal a surveyor actually wants: breakage the taxonomy has not seen.
+    """
+    window = " ".join(text.split())[:FAILURE_SCAN_CHARS]
+    if not window:
+        return FailureKind.unclassified
+    for kind, rx in _FAILURE_RULES:
+        if rx.search(window):
+            return kind
+    return FailureKind.unclassified
+
+
+# A DIFFERENT question from failure: "did this call come back empty / malformed
+# enough that the agent learned nothing?" audit_session_tools asks it because a
+# zero-hit search is a tool-usage problem worth seeing, even though the harness
+# considers the call a success. It is deliberately NOT part of the failure gate
+# — see the taxonomy note above.
+NO_MATCH_MARKERS = (
+    "no matches",
+    "not found",
+    "validation error",
+    "input should be",
+    "missing required",
+    "unexpected keyword",
+    "exceeds maximum",
+)
+
+
+def looks_like_no_match(text: str) -> bool:
+    """True when a SUCCESSFUL tool result reads as a zero-hit / rejected call.
+
+    A prose heuristic, and a noisy one at corpus scale (it fires on any command
+    output containing "not found"). Scoped to single-session tool auditing,
+    where the false-positive cost is a human glancing at one extra row.
+    """
+    if not text:
+        return False
+    head = text[:300].lower()
+    return any(marker in head for marker in NO_MATCH_MARKERS)
+
+
+# =============================================================================
 # Content Models
 # =============================================================================
 
@@ -109,6 +302,33 @@ class ToolResultContent(BaseModel):
     content: Union[str, list[dict[str, Any]]]
     is_error: Optional[bool] = None
     agentId: Optional[PrefixId] = None
+
+    @property
+    def text(self) -> str:
+        """The result's text, untruncated and unformatted.
+
+        Content arrives either as a bare string or as a list of typed blocks;
+        this is the single place that flattens both. Non-text blocks (images)
+        contribute nothing.
+        """
+        if isinstance(self.content, str):
+            return self.content
+        parts: list[str] = []
+        for block in self.content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        return "\n".join(parts)
+
+    @property
+    def failure(self) -> Optional[FailureKind]:
+        """This result's FailureKind, or None when the call succeeded.
+
+        `is_error` is the gate — see the failure-taxonomy note above for why
+        prose is never used to decide failure, only to classify it.
+        """
+        if not self.is_error:
+            return None
+        return classify_failure(self.text)
 
 
 ContentItem = Union[
@@ -357,6 +577,30 @@ class ToolResultEntry(BaseTranscriptEntry):
     toolUseResult: Optional[ToolUseResult] = None
     isMeta: Optional[bool] = None
     # agentId is inherited from BaseTranscriptEntry — do not redeclare
+
+    @property
+    def results(self) -> list[ToolResultContent]:
+        """The tool_result blocks this entry carries.
+
+        One entry can answer several parallel tool calls, so this is a list.
+        """
+        content = self.message.content
+        if not isinstance(content, list):
+            return []
+        return [b for b in content if isinstance(b, ToolResultContent)]
+
+    @property
+    def failure(self) -> Optional[FailureKind]:
+        """The kind of the first failed result block, or None if none failed.
+
+        The entry-level view of `ToolResultContent.failure` — what search's
+        `errors_only` filter keys on.
+        """
+        for block in self.results:
+            kind = block.failure
+            if kind is not None:
+                return kind
+        return None
 
     @property
     def origin(self) -> UserOrigin:
@@ -778,20 +1022,72 @@ def extract_output_text(entry: "ToolResultEntry") -> str:
     untruncated and unformatted — intended for search and centered-excerpt
     extraction, not for direct rendering.
     """
-    parts: list[str] = []
     content = entry.message.content
-    if isinstance(content, list):
-        for item in content:
-            if isinstance(item, ToolResultContent):
-                if isinstance(item.content, str):
-                    parts.append(item.content)
-                elif isinstance(item.content, list):
-                    for block in item.content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            parts.append(block.get("text", ""))
-    elif isinstance(content, str):
-        parts.append(content)
-    return "\n".join(parts)
+    if isinstance(content, str):
+        return content
+    return "\n".join(block.text for block in entry.results)
+
+
+# =============================================================================
+# Tool call pairing — the tool_use ↔ tool_result relation
+# =============================================================================
+
+
+@dataclass
+class ToolCall:
+    """One tool invocation paired with the result it got back.
+
+    `result` is None when the transcript holds no matching tool_result — the
+    call was cut off, or the transcript ends mid-flight. That is distinct from
+    a result that came back empty, so callers must not conflate them.
+    """
+
+    name: str  # full tool name, e.g. mcp__server__do_thing
+    input: dict[str, Any]
+    timestamp: Optional[datetime] = None
+    result: Optional[ToolResultContent] = None
+
+    @property
+    def short_name(self) -> str:
+        """Display name — the segment after the last `__` for MCP tools."""
+        return self.name.split("__")[-1]
+
+    @property
+    def failure(self) -> Optional[FailureKind]:
+        """This call's FailureKind, or None if it succeeded or never returned."""
+        return self.result.failure if self.result is not None else None
+
+
+def collect_tool_calls(entries: list[TranscriptEntry]) -> list[ToolCall]:
+    """Pair every tool_use in a transcript with its tool_result.
+
+    THE walk behind every tool-outcome question — the single-session audit and
+    the corpus-wide failure survey both build on it, so the pairing rules live
+    in one place. Returns calls in tool_use order (results arrive later in the
+    file and are backfilled), including calls that never got a result.
+    """
+    calls: list[ToolCall] = []
+    pending: dict[str, ToolCall] = {}
+
+    for entry in entries:
+        if isinstance(entry, AssistantTranscriptEntry):
+            for item in entry.message.content:
+                if not isinstance(item, ToolUseContent):
+                    continue
+                call = ToolCall(
+                    name=item.name,
+                    input=item.input,
+                    timestamp=entry.timestamp,
+                )
+                pending[item.id.full] = call
+                calls.append(call)
+        elif isinstance(entry, ToolResultEntry):
+            for block in entry.results:
+                call = pending.pop(block.tool_use_id.full, None)
+                if call is not None:
+                    call.result = block
+
+    return calls
 
 
 # =============================================================================
