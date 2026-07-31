@@ -58,6 +58,26 @@ Tools for tracing subagent execution — a separate axis from conversation conte
 
 Use when tracing what an agent did, correlating outputs with sessions, or building timelines that distinguish "discussed doing X" from "dispatched agents to do X."
 
+## The failure tools
+
+Failure is its own axis of the corpus. Every tool result carries an `is_error` flag, so "which calls failed" is a structured question — you never have to guess what an error *said* and regex for the prose.
+
+- **`survey_failures`** — the landing page. Every failed tool call in a window, classified by kind and rolled up per tool and per session. Start here.
+- **`errors_only=true`** on `search_projects`, `grep_session`, and `grep_sessions` — restricts hits to failed tool calls. The pattern then narrows the **topic**, not the error vocabulary: `patterns=["ssh"], errors_only=true` finds every failed ssh-related call however it phrased the failure.
+
+Read a survey in this order:
+
+1. `total` / `sessions_affected` size the problem.
+2. `by_kind` splits it by what went wrong — and each kind carries a **category**. Most failure volume is category `agent` (the model called a tool wrong and recovered: editing a file it hadn't read, an edit whose target string moved, a `python -c` heredoc that didn't parse). When hunting real breakage, look at category `environment`; when auditing tool ergonomics, look at `agent`.
+3. `unclassified` is the yield — recurring failure shapes no rule anticipated, grouped by leading text and ranked by recurrence. Everything else is subtraction; this is the part that tells you something new.
+4. `by_tool` and `by_session` are drill-in targets.
+
+Then drill in with the read tools: `grep_session(..., errors_only=true)` on a hot session, `audit_session_tools` for one session's per-agent tool usage, `read_turn` for a specific moment. The survey orients; those read.
+
+Two defaults worth knowing. **Cascade errors are suppressed**: when one call in a parallel batch fails, the harness cancels its siblings and records each cancellation as its own error, so counting them multiplies that batch's apparent failure count — the suppressed total is always reported as `cascade_suppressed`, and `include_cascade=true` folds them back in. **Error text is opt-in** (`examples=true`): the default payload is counts, because a first orienting call rarely needs the prose.
+
+Read `by_tool.calls` as relative failure density between tools, not as an absolute reliability rate — it counts calls in the transcripts that were *scanned* (the ones carrying at least one error), since error-free transcripts are never parsed at all.
+
 ## The conversion tools
 
 Tools that create, mutate, or remove transcripts — the one mutating axis in the toolset. `convert_session` only ever copies; `rewind_transcript` and `delete_conversions` mutate or delete, but **only conversion artifacts** (files carrying the `x-converter-provenance` line) — a real session or dispatched subagent is never touched.
@@ -101,6 +121,8 @@ Each session carries a `worktree` field (absent for the main worktree, set to th
 **"Show me what was said"** → `grep_session` for pattern-matched content with context, or `read_turn` to read a specific moment at full fidelity. Use `full_length` values in grep output to gauge entry size before reading.
 
 **"Trace agent execution"** → `list_project_sessions(min_agents=1)` → `list_session_agents` → `get_agent_detail` (or `audit_session_tools` for the whole-session tool-usage view). Top-down zoom from project to session to individual agent.
+
+**"What broke?" / "catalog every X failure"** → `survey_failures` for the shape of it, then `grep_session`/`grep_sessions` with `errors_only=true` to read the actual calls. Do **not** brainstorm candidate error strings and search for them — that guessing is exactly what this axis removes.
 
 **"Why did that session decide X? What did it learn?"** → `convert_session`, then `SendMessage` (needs `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` — see the conversion-tools prerequisite above). Grep finds what was said; a converted session can answer for what it meant.
 

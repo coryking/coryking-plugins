@@ -57,8 +57,13 @@ def sort_sessions_newest_first(sessions: list["SessionInfo"]) -> None:
 # =============================================================================
 
 
-def session_sources(session: "SessionInfo") -> list["TranscriptSource"]:
-    """Expand a session into every transcript that belongs to its search corpus.
+def session_sources(transcript_path: Path) -> list["TranscriptSource"]:
+    """Expand a session's transcript path into its whole searchable corpus.
+
+    Takes a bare path, not a SessionInfo: the expansion is a pure filesystem
+    walk and nothing in it needs a parsed session, so `failures.py` can reach it
+    straight off a `SessionRef` instead of re-deriving agent ids from filenames.
+    Callers holding a SessionInfo pass `session.path`.
 
     The main transcript plus every subagent transcript on disk. We use
     `collect_agent_files` (a pure filesystem walk over `subagents/`, including
@@ -74,8 +79,10 @@ def session_sources(session: "SessionInfo") -> list["TranscriptSource"]:
     them would double-count and surface synthetic copies. They remain visible in
     list_session_agents (labeled), just not searched.
     """
-    sources: list[TranscriptSource] = [TranscriptSource(agent_id=None, path=session.path)]
-    for af in collect_agent_files(resolve_subagents_dir(session.path)):
+    sources: list[TranscriptSource] = [
+        TranscriptSource(agent_id=None, path=transcript_path)
+    ]
+    for af in collect_agent_files(resolve_subagents_dir(transcript_path)):
         if af.is_conversion_artifact:
             continue
         sources.append(
@@ -417,10 +424,51 @@ def load_sessions(project_path: str) -> list[SessionInfo]:
 # =============================================================================
 
 
+def search_types_for(
+    hide: frozenset[str],
+    base_types: tuple[type, ...],
+    errors_only: bool = False,
+) -> tuple[type, ...]:
+    """The entry types a search should MATCH against.
+
+    Normally `conversation_types_for` (role + hide). With `errors_only` the
+    answer collapses to ToolResultEntry: only a tool result can carry a failure,
+    so restricting the match set is both the filter and the optimization. `role`
+    still governs the CONTEXT turns around each hit — you asked to find failures,
+    not to stop seeing the conversation they happened in.
+    """
+    if errors_only:
+        return (ToolResultEntry,)
+    return conversation_types_for(hide, base_types)
+
+
+def context_types_for(
+    hide: frozenset[str],
+    base_types: tuple[type, ...],
+    errors_only: bool = False,
+) -> tuple[type, ...]:
+    """The entry types the CONTEXT around a hit is drawn from.
+
+    Normally just `conversation_types_for`. With `errors_only` the assistant
+    side is forced in regardless of `role`: the one turn that explains a failed
+    tool result is the assistant `tool_use` that caused it, and at the default
+    role='user' the context types are (HumanEntry,) — so the causing call is
+    structurally unreachable. Measured over the live corpus (n=11,576 failed
+    results), the causing assistant turn is a median of 1 entry back, while the
+    nearest preceding human turn is a median of 8 (p90 81, max 677) and for 24
+    of them does not exist at all. So role='user' context was showing unrelated
+    conversation, or nothing.
+    """
+    if errors_only and AssistantTranscriptEntry not in base_types:
+        base_types = base_types + (AssistantTranscriptEntry,)
+    return conversation_types_for(hide, base_types)
+
+
 def _entry_matches(
     entry: TranscriptEntry,
     pattern: re.Pattern,
     hide: frozenset[str] = frozenset(),
+    errors_only: bool = False,
 ) -> bool:
     """Check if an entry's content matches the pattern.
 
@@ -429,7 +477,20 @@ def _entry_matches(
     - AssistantTranscriptEntry: text + tool inputs (unless 'inputs' in hide)
       + thinking blocks (unless 'thinking' in hide)
     - ToolResultEntry: output content (unless 'outputs' in hide)
+
+    With `errors_only`, an entry matches only if it is a FAILED tool result
+    (`ToolResultEntry.has_failure`) AND the pattern hits its output — so the
+    pattern narrows the topic instead of having to guess the error's wording.
+    `has_failure`, not `failure`: this runs once per entry PER PATTERN, and the
+    kind is thrown away, so classifying here would run the rule table N times
+    for an answer nobody reads.
     """
+    if errors_only:
+        if not isinstance(entry, ToolResultEntry) or not entry.has_failure:
+            return False
+        output_text = extract_output_text(entry)
+        return bool(output_text and pattern.search(output_text))
+
     if isinstance(entry, HumanEntry):
         text = extract_text(entry)
         return bool(pattern.search(text))
@@ -464,9 +525,10 @@ def _get_context(
     context: int,
     base_types: tuple[type, ...],
     hide: frozenset[str] = frozenset(),
+    errors_only: bool = False,
 ) -> tuple[list[TranscriptEntry], list[TranscriptEntry]]:
     """Get context entries around a match, filtered to visible conversation types."""
-    conv_types = conversation_types_for(hide, base_types)
+    conv_types = context_types_for(hide, base_types, errors_only)
 
     before: list[TranscriptEntry] = []
     count = 0
@@ -503,15 +565,17 @@ def triage(
     base_types: tuple[type, ...] = (HumanEntry,),
     example_width: int = 150,
     hide: frozenset[str] = frozenset(),
+    errors_only: bool = False,
 ) -> list[TriageResult]:
     """Count pattern matches per session. Returns sorted by hit count descending.
 
     Search is exhaustive across all content not in `hide`. `base_types` controls
     which sides of the conversation are considered (user / assistant / all);
     ToolResultEntry rides along when assistant is in scope and 'outputs' is not hidden.
+    `errors_only` restricts matches to failed tool results.
     """
     compiled = re.compile(pattern, re.IGNORECASE)
-    search_types = conversation_types_for(hide, base_types)
+    search_types = search_types_for(hide, base_types, errors_only)
     results: list[TriageResult] = []
 
     for session in sessions:
@@ -520,12 +584,12 @@ def triage(
         count = 0
         first_example = ""
         first_agent_id: Optional[PrefixId] = None
-        for source in session_sources(session):
+        for source in session_sources(session.path):
             entries = load_transcript(source.path)
             for entry in entries:
                 if not _is_searchable(entry, search_types):
                     continue
-                if _entry_matches(entry, compiled, hide):
+                if _entry_matches(entry, compiled, hide, errors_only):
                     count += 1
                     if not first_example:
                         first_example = _match_example(
@@ -552,14 +616,16 @@ def triage_multi(
     base_types: tuple[type, ...] = (HumanEntry,),
     example_width: int = 150,
     hide: frozenset[str] = frozenset(),
+    errors_only: bool = False,
 ) -> PatternTriageResults:
     """Count matches for multiple patterns in a single pass over each session.
 
     Loads each session's transcript once and checks all patterns per entry.
     Returns PatternTriageResults — same type consumed by SearchProjectsResponse.from_triage.
+    `errors_only` restricts matches to failed tool results.
     """
     compiled = [(pat, re.compile(pat, re.IGNORECASE)) for pat in patterns]
-    search_types = conversation_types_for(hide, base_types)
+    search_types = search_types_for(hide, base_types, errors_only)
 
     # Per-pattern accumulators: {pattern_index: {session_index: (count, first_example, first_agent_id)}}
     accum: dict[int, dict[int, tuple[int, str, Optional[PrefixId]]]] = {
@@ -570,13 +636,13 @@ def triage_multi(
         if session.is_conversion_artifact:
             continue
         # Search the whole corpus: main transcript + every subagent body (#22).
-        for source in session_sources(session):
+        for source in session_sources(session.path):
             entries = load_transcript(source.path)
             for entry in entries:
                 if not _is_searchable(entry, search_types):
                     continue
                 for pi, (_, regex) in enumerate(compiled):
-                    if _entry_matches(entry, regex, hide):
+                    if _entry_matches(entry, regex, hide, errors_only):
                         count, example, agent_id = accum[pi].get(si, (0, "", None))
                         if not example:
                             example = _match_example(
@@ -611,6 +677,7 @@ def search_multi(
     context: int = 1,
     max_results_per_pattern: int = 30,
     hide: frozenset[str] = frozenset(),
+    errors_only: bool = False,
 ) -> dict[PrefixId, list[tuple[str, list[MatchHit], int]]]:
     """Search N patterns across N sessions in a single pass per session.
 
@@ -623,10 +690,10 @@ def search_multi(
     Returns: {session_id: [(pattern, matches, total_hits), ...]} where
     `matches` is capped at `max_results_per_pattern` per (session, pattern)
     cell and `total_hits` is the uncapped count for that cell so callers can
-    surface overflow.
+    surface overflow. `errors_only` restricts matches to failed tool results.
     """
     compiled = [(pat, re.compile(pat, re.IGNORECASE)) for pat in patterns]
-    search_types = conversation_types_for(hide, base_types)
+    search_types = search_types_for(hide, base_types, errors_only)
 
     out: dict[PrefixId, list[tuple[str, list[MatchHit], int]]] = {}
 
@@ -639,18 +706,20 @@ def search_multi(
 
         # Walk the whole corpus: main transcript + every subagent body (#22).
         # Context is drawn from within the same source the match came from.
-        for source in session_sources(session):
+        for source in session_sources(session.path):
             entries = load_transcript(source.path)
             for idx, entry in enumerate(entries):
                 if not _is_searchable(entry, search_types):
                     continue
                 for pi, (_, regex) in enumerate(compiled):
-                    if not _entry_matches(entry, regex, hide):
+                    if not _entry_matches(entry, regex, hide, errors_only):
                         continue
                     per_pattern_totals[pi] += 1
                     if len(per_pattern[pi]) >= max_results_per_pattern:
                         continue  # over the cap; only the total grows
-                    before, after = _get_context(entries, idx, context, base_types, hide)
+                    before, after = _get_context(
+                        entries, idx, context, base_types, hide, errors_only
+                    )
                     per_pattern[pi].append(
                         MatchHit(
                             session_id=session.session_id,
@@ -702,7 +771,7 @@ def search(
             continue
         session_matches: list[MatchHit] = []
 
-        for source in session_sources(session):
+        for source in session_sources(session.path):
             entries = load_transcript(source.path)
             for idx, entry in enumerate(entries):
                 if not _is_searchable(entry, search_types):
@@ -786,7 +855,7 @@ def get_turn_context(
         target_sessions = [s for s in sessions if s.session_id == session_id]
 
     for session in target_sessions:
-        for source in session_sources(session):
+        for source in session_sources(session.path):
             entries = load_transcript(source.path)
             for idx, entry in enumerate(entries):
                 if not isinstance(entry, BaseTranscriptEntry):

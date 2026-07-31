@@ -42,8 +42,9 @@ from .corpus import (
     resolve_project,
     resolve_projects,
 )
+from .failures import narrow_to_error_sessions, survey_failures as run_failure_survey
 from .formatting import matches_id
-from .models import parse_hide
+from .models import FailureKind, parse_hide, parse_kinds
 from .parser import load_conversations
 from .resolve import (
     resolve_artifacts,
@@ -71,6 +72,7 @@ from .responses import (
     SessionAgentsResponse,
     SessionListResponse,
     SessionToolAuditResponse,
+    SurveyFailuresResponse,
 )
 from .search import (
     ENTRY_TYPE_MAP,
@@ -120,7 +122,14 @@ the main transcript, so an agent's own tool calls / thinking are searchable too
    and audit_session_tools to check whether the agents used their tools correctly
    (per-tool counts, error rates, retries).
 
-3. Attention reconstruction — what a window of agent-driving looked like.
+3. Failures — what broke, without guessing what the errors said.
+   survey_failures is the landing page: every failed tool call in a window,
+   classified by kind and category, counted per tool and per session. Then
+   drill in with grep_session / grep_sessions / search_projects using
+   errors_only=true, which restricts hits to failed tool calls so the pattern
+   narrows the TOPIC ("ssh", "psql") rather than the error vocabulary.
+
+4. Attention reconstruction — what a window of agent-driving looked like.
    get_activity_timeline rolls every project's transcripts over a time window
    into a turn-count grid plus pre-computed attention rollups (sessions running
    at once, peaks, hands-on vs autonomous time). Session ids and projects it
@@ -447,6 +456,19 @@ def _exclude_current_session(
     return kept, PrefixId(current)
 
 
+# Shared description for the errors_only filter. One wording, three tools.
+_ERRORS_ONLY_DESC = (
+    "Restrict hits to tool calls that FAILED (the transcript's own `is_error` "
+    "flag), so you never have to guess what an error said. The pattern then "
+    "narrows the TOPIC rather than the error vocabulary: patterns=['ssh'] with "
+    "errors_only=true finds every failed ssh-related call, no matter how it "
+    "phrased the failure. Only tool results can fail, so `role` no longer "
+    "affects what matches (it still governs the surrounding context turns), and "
+    "hide='outputs' is incompatible. For the no-pattern view — every failure in "
+    "a window, classified and counted — use survey_failures."
+)
+
+
 def _parse_hide_or_raise(value: str | None) -> frozenset[str]:
     """parse_hide that converts ValueError to ToolError for MCP entry points.
 
@@ -457,6 +479,21 @@ def _parse_hide_or_raise(value: str | None) -> frozenset[str]:
         return parse_hide(value)
     except ValueError as e:
         raise ToolError(str(e))
+
+
+def _check_errors_only(errors_only: bool, hide: frozenset[str]) -> None:
+    """Refuse errors_only together with hide='outputs' — they cancel out.
+
+    A failure only ever lives in a tool result, so hiding tool results while
+    asking for failures can only return nothing. Say so rather than returning a
+    confident empty answer the caller will read as "no failures here."
+    """
+    if errors_only and "outputs" in hide:
+        raise ToolError(
+            "errors_only=true is incompatible with hide='outputs': failures only "
+            "appear in tool results, so hiding them leaves nothing to match. Drop "
+            "'outputs' from `hide`."
+        )
 
 
 # UUIDs use hex digits and hyphens. The first 8 chars (the prefix form returned
@@ -591,6 +628,10 @@ def search_projects(
             description="Include the calling conversation itself. Default False — the live session that invoked this search is excluded so it can't return itself as a (useless) hit. Set True to search across it too."
         ),
     ] = False,
+    errors_only: Annotated[
+        bool,
+        Field(description=_ERRORS_ONLY_DESC),
+    ] = False,
 ) -> SearchProjectsResponse:
     """Scan chat history across one or many projects for patterns, grouped by pattern with hit counts and per-project/session breakdowns.
 
@@ -599,6 +640,8 @@ def search_projects(
     Search is exhaustive by default and spans the whole corpus: conversation text, tool inputs (Bash commands, file paths, grep patterns), tool outputs, assistant thinking — and subagent transcripts, not just the main session. The pattern is the precision tool — use tight regex to narrow noisy searches.
 
     Pass all your candidate search terms at once — each gets its own hit count and breakdown so you can see which terms are useful. Use separate patterns rather than regex OR pipes (e.g. ["facebook.*scrape", "fb_capture"] not "facebook.*scrape|fb_capture"). Results are sorted by hit count (hottest first). Follow up with grep_session (scoped to the returned project) or get_agent_detail (for an `agent` hit).
+
+    Set errors_only=true to search only FAILED tool calls — the pattern then narrows the topic instead of having to guess the error's wording.
     """
     proj_paths = resolve_projects(projects)
     corpus = Corpus.discover(proj_paths)
@@ -606,10 +649,19 @@ def search_projects(
         raise ToolError(f"No conversations found for: {', '.join(proj_paths) or '(no projects)'}")
 
     no_match_error = ToolError(
-        f"No matches for: {', '.join(patterns)} across {len(proj_paths)} project(s). "
-        f"Patterns are case-insensitive regex — try shorter or broader terms, set "
-        f"role='all' to search both sides, or widen the date range."
+        f"No matches for: {', '.join(patterns)} across {len(proj_paths)} project(s)"
+        + (" (errors_only)" if errors_only else "")
+        + ". Patterns are case-insensitive regex — try shorter or broader terms, set "
+        "role='all' to search both sides, or widen the date range."
     )
+
+    # errors_only narrows the corpus BEFORE the pattern prefilter: `is_error` is
+    # a literal in the raw JSONL, so it names the ~40% of files that can hold a
+    # failure at all without parsing anything.
+    if errors_only:
+        corpus, _ = narrow_to_error_sessions(corpus)
+        if not corpus.refs:
+            raise no_match_error
 
     # Raw-byte prefilter: cost scales with the answer, not the corpus. The
     # candidate set is a SUPERSET of true hits (rg-unsafe patterns or scanner
@@ -635,7 +687,11 @@ def search_projects(
     base_types = ENTRY_TYPE_MAP[role]
 
     all_results = triage_multi(
-        sessions, patterns, base_types=base_types, example_width=excerpt_width
+        sessions,
+        patterns,
+        base_types=base_types,
+        example_width=excerpt_width,
+        errors_only=errors_only,
     )
 
     # Check if anything matched
@@ -696,6 +752,10 @@ def grep_session(
             description="Comma-separated assistant-turn content to suppress from both search and display. Atoms: 'inputs' (tool calls), 'outputs' (tool results), 'thinking' (reasoning blocks). Default empty = search and show everything. Text is always visible and is not an atom.",
         ),
     ] = None,
+    errors_only: Annotated[
+        bool,
+        Field(description=_ERRORS_ONLY_DESC),
+    ] = False,
 ) -> GrepSessionResponse:
     """Show matches for one or more patterns within a single conversation, with surrounding context.
 
@@ -704,11 +764,14 @@ def grep_session(
     Search is exhaustive by default across text, tool inputs, tool outputs, and thinking blocks. Each entry includes its full character length so you can gauge size before calling read_turn.
 
     Match blocks have three fields: `before` (context turns before), `match` (the matching entry, excerpted on the hit so it stays visible even when truncated), and `after` (context turns after).
+
+    Set errors_only=true to see only the FAILED tool calls in this session — the drill-in after survey_failures names a hot session.
     """
     if not patterns:
         raise ToolError("patterns must contain at least one pattern")
 
     hide_set = _parse_hide_or_raise(hide)
+    _check_errors_only(errors_only, hide_set)
     target = _resolve_session(session, projects)
 
     base_types = ENTRY_TYPE_MAP[role]
@@ -722,13 +785,15 @@ def grep_session(
         context=context,
         max_results_per_pattern=limit,
         hide=hide_set,
+        errors_only=errors_only,
     )
     pattern_results = multi_results[target.session_id]
 
     if not any(matches for _, matches, _ in pattern_results):
+        scope = " among failed tool calls" if errors_only else ""
         raise ToolError(
-            f"No matches for any pattern: {', '.join(patterns)}. Try shorter or "
-            f"broader regex, set role='all', or use browse_session to read the "
+            f"No matches for any pattern{scope}: {', '.join(patterns)}. Try shorter "
+            f"or broader regex, set role='all', or use browse_session to read the "
             f"session directly."
         )
 
@@ -789,12 +854,18 @@ def grep_sessions(
             description="Comma-separated assistant-turn content to suppress. Atoms: 'inputs', 'outputs', 'thinking'. Default empty.",
         ),
     ] = None,
+    errors_only: Annotated[
+        bool,
+        Field(description=_ERRORS_ONLY_DESC),
+    ] = False,
 ) -> GrepSessionsResponse:
     """Fan out grep across multiple sessions in one call.
 
     Use this when you've already identified your hot sessions (via `search_projects`) and want context blocks across all of them for the same patterns. One call replaces N `grep_session` calls.
 
     Returns one entry per session that had at least one match (zero-hit sessions are omitted). Each entry has the same shape as `grep_session` output: per-pattern hit counts and match blocks with surrounding context. Sort order preserves the order of `sessions`.
+
+    Set errors_only=true to see only FAILED tool calls — the fan-out drill-in after survey_failures names several hot sessions.
     """
     if not sessions:
         raise ToolError("sessions must contain at least one session id")
@@ -802,6 +873,7 @@ def grep_sessions(
         raise ToolError("patterns must contain at least one pattern")
 
     hide_set = _parse_hide_or_raise(hide)
+    _check_errors_only(errors_only, hide_set)
     corpus = Corpus.discover(projects).narrow_to_ids(sessions)
 
     # Resolve each session prefix to a ref, preserving input order, and promote
@@ -831,6 +903,7 @@ def grep_sessions(
         context=context,
         max_results_per_pattern=limit,
         hide=hide_set,
+        errors_only=errors_only,
     )
 
     session_responses: list[GrepSessionResponse] = []
@@ -862,8 +935,9 @@ def grep_sessions(
         # to return an empty-sessions response with not_found populated.
         if not_found and len(not_found) == len(sessions):
             raise ToolError(f"No sessions matched: {', '.join(not_found)}")
+        scope = " among failed tool calls" if errors_only else ""
         raise ToolError(
-            f"No matches in any session for any pattern: {', '.join(patterns)}. "
+            f"No matches in any session{scope} for any pattern: {', '.join(patterns)}. "
             f"Try shorter or broader regex, set role='all', or confirm the session "
             f"ids with list_project_sessions."
         )
@@ -1309,6 +1383,95 @@ def get_activity_timeline(
         tz=tz,
     )
     return ActivityTimelineResponse.model_validate(result)
+
+
+def _parse_kinds_or_raise(value: str | None) -> list[FailureKind] | None:
+    """parse_kinds that converts ValueError to ToolError for MCP entry points.
+
+    Same split as `_parse_hide_or_raise`: the parser lives in models.py beside
+    FailureKind and is unit-testable off the boundary; this is only the
+    exception translation.
+    """
+    try:
+        return parse_kinds(value)
+    except ValueError as e:
+        raise ToolError(str(e))
+
+
+@mcp.tool(annotations=_TOOL_ANNOTATIONS)
+def survey_failures(
+    projects: ProjectsParam = None,
+    after: Annotated[
+        datetime | None,
+        Field(description="Only failures at or after this datetime (naive read as UTC). Strongly recommended — it also lets the scan skip transcripts untouched since then, so a windowed survey is far cheaper than an all-time one."),
+    ] = None,
+    before: Annotated[
+        datetime | None,
+        Field(description="Only failures strictly before this datetime (naive read as UTC)."),
+    ] = None,
+    # Declared `str` with a None default ON PURPOSE, not `str | None`: a union
+    # makes Pydantic emit an `anyOf` that Claude clients render as type
+    # "unknown" instead of "string". MCP clients omit absent optionals rather
+    # than sending null, so None never reaches Pydantic validation.
+    kinds: Annotated[
+        str,
+        Field(description="Comma-separated failure kinds to keep, e.g. 'network,auth_failed,timeout' to hunt real breakage, or 'unclassified' to see only what the taxonomy could not name. Omit for all kinds. Naming 'cascade' here implies include_cascade=true — otherwise the default suppression would make that filter unanswerable. The full kind list (and what each means) is in the by_kind output schema."),
+    ] = None,  # pyright: ignore[reportArgumentType]
+    include_cascade: Annotated[
+        bool,
+        Field(description="Fold sibling-cancellation artifacts back into the counts. Default False: when one call in a parallel batch fails, the harness cancels its siblings and records each cancellation as its own error, so leaving them in multiplies that batch's apparent failure count. The suppressed total is always reported as `cascade_suppressed`."),
+    ] = False,
+    examples: Annotated[
+        bool,
+        Field(description="Attach a representative error excerpt to each kind and each unclassified shape. Default False, because error text is the expensive part of this payload and a first orienting call rarely needs it — turn it on once the counts tell you which kind or shape to look at."),
+    ] = False,
+    limit: Annotated[
+        int,
+        Field(description="Max rows per section (by_kind, unclassified, by_tool, by_session). Anything dropped is reported in that section's `*_overflow` field, never silently.", ge=1, le=200),
+    ] = 10,
+) -> SurveyFailuresResponse:
+    """Find every failed tool call in a window, classified and counted — without knowing what the errors say.
+
+    The entry point for "what broke?". Failure is otherwise not a queryable axis: you can slice transcripts by project, session, agent, role, pattern and date, but to reach a failure you have to guess its prose and regex for it. This reads the transcript's own `is_error` flag instead, so nothing depends on guessing vocabulary.
+
+    Read the payload in this order. `total` / `sessions_affected` size the problem. `by_kind` splits it by what went wrong AND by `category` — most failure volume is category 'agent' (the model called a tool wrong and recovered), so filter to category 'environment' in your head when you are hunting real breakage. `unclassified` is the yield: recurring failure shapes no rule anticipated, ranked by how often they recurred. `by_tool` and `by_session` are drill-in targets.
+
+    Then drill in with the tools you already have: grep_session / grep_sessions with errors_only=true on a hot session, audit_session_tools for one session's per-agent tool usage, read_turn for a specific moment. This tool orients; those read.
+
+    Cost scales with the answer: only transcripts whose raw bytes contain a flagged error are parsed, and with `after` set, only those written since. Note the denominator scope — `by_tool.calls` counts calls in the SCANNED transcripts (the ones with at least one error), not corpus-wide, so read it as relative failure density between tools rather than an absolute reliability rate.
+    """
+    survey = run_failure_survey(
+        projects=projects,
+        after=after,
+        before=before,
+        kinds=_parse_kinds_or_raise(kinds),
+        include_cascade=include_cascade,
+    )
+    if survey.total == 0:
+        window = ""
+        if after or before:
+            window = f" in [{after or '...'}, {before or '...'})"
+        # Name the remedy that is actually true. Suggesting "widen the window"
+        # when N cascades were found and suppressed sends the caller chasing a
+        # window that was never the problem.
+        if survey.cascade_suppressed:
+            remedy = (
+                f"{survey.cascade_suppressed} sibling-cancellation artifact(s) WERE "
+                f"found and suppressed — pass include_cascade=true to see them."
+            )
+        else:
+            remedy = (
+                "Widen the window, drop the `kinds` filter, or omit `projects` to "
+                "survey every project."
+            )
+        raise ToolError(
+            f"No failed tool calls found{window} across "
+            f"{survey.sessions_scanned} scanned session(s)"
+            + (f" for kinds={kinds}" if kinds else "")
+            + ". "
+            + remedy
+        )
+    return SurveyFailuresResponse.from_survey(survey, limit=limit, examples=examples)
 
 
 # =============================================================================

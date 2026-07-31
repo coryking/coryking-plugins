@@ -382,6 +382,41 @@ class Corpus:
             )
         return Corpus(out)
 
+    def matching_files(
+        self, raw_patterns: Sequence[str]
+    ) -> list[tuple[SessionRef, list[Path]]]:
+        """(ref, its transcript files that match) for refs with at least one hit.
+
+        FILE-granular, and matched against RAW JSONL BYTES with no `rg_safe`
+        gate — so the patterns must be authored against the on-disk JSON, not
+        against extracted text. (The gate exists to stop a USER regex, written
+        for extracted text, from false-negativing on JSON string escaping; a
+        pattern we wrote against the raw encoding has no such gap.) Callers
+        that hand user input here are wrong; use `candidate_refs`.
+
+        The file granularity is what keeps a scoped scan honest: a session
+        whose error lives in one subagent body should not drag its main
+        transcript and twenty siblings through the parser.
+
+        Raises ScannerError when the scan can't be trusted — the caller decides
+        whether to fall back to everything.
+        """
+        ref_files: list[tuple[SessionRef, list[Path]]] = []
+        files: list[Path] = []
+        for ref in self.refs:
+            tf = ref.transcript_files()
+            ref_files.append((ref, tf))
+            files.extend(tf)
+        if not files or not raw_patterns:
+            return []
+
+        hits = make_scanner().files_with_match(raw_patterns, files)
+        return [
+            (ref, matched)
+            for ref, tf in ref_files
+            if (matched := [f for f in tf if f in hits])
+        ]
+
     def candidate_refs(self, patterns: Sequence[str]) -> list[SessionRef]:
         """Refs that MAY match any pattern — a superset by construction.
 
@@ -396,15 +431,8 @@ class Corpus:
         if not all(rg_safe(p) for p in patterns):
             return list(self.refs)
 
-        ref_files: list[tuple[SessionRef, list[Path]]] = []
-        files: list[Path] = []
-        for ref in self.refs:
-            tf = ref.transcript_files()
-            ref_files.append((ref, tf))
-            files.extend(tf)
-
         try:
-            hits = make_scanner().files_with_match(patterns, files)
+            return [ref for ref, _ in self.matching_files(patterns)]
         except ScannerError as e:
             # stderr, never stdout — stdout is the stdio MCP protocol channel.
             print(
@@ -412,8 +440,6 @@ class Corpus:
                 file=sys.stderr,
             )
             return list(self.refs)
-
-        return [ref for ref, tf in ref_files if any(f in hits for f in tf)]
 
 
 # =============================================================================

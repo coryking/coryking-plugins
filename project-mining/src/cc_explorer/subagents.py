@@ -38,12 +38,13 @@ from .models import (
     ToolUseContent,
     TranscriptEntry,
     TranscriptStats,
+    collect_tool_calls,
     extract_text,
     substantive_human_text,
 )
 from .conversion import read_provenance
 from .parser import load_transcript
-from .utils import PrefixId
+from .utils import PrefixId, collapse_ws
 
 
 @dataclass
@@ -701,10 +702,12 @@ def _read_agent_id(path: Path) -> Optional[str]:
     return None
 
 
-# Heuristics for "this tool result was an error or zero-hit response."
-# Catches both is_error=True and the no-match ToolError text the cc-explorer
-# tools raise via FastMCP (e.g. "No matches for: pattern").
-_ERROR_MARKERS = (
+# A DIFFERENT question from failure: "did this call come back empty / malformed
+# enough that the agent learned nothing?" Only audit_session_tools asks it — a
+# zero-hit search is a tool-usage problem worth seeing even though the harness
+# considers the call a success. Deliberately NOT part of the model's failure
+# gate (see the taxonomy note in models.py), so it lives with its one caller.
+NO_MATCH_MARKERS = (
     "no matches",
     "not found",
     "validation error",
@@ -715,14 +718,17 @@ _ERROR_MARKERS = (
 )
 
 
-def _result_is_error(text: str, is_error_flag: bool) -> bool:
-    """True when a tool result represents an error or zero-match response."""
-    if is_error_flag:
-        return True
+def looks_like_no_match(text: str) -> bool:
+    """True when a SUCCESSFUL tool result reads as a zero-hit / rejected call.
+
+    A prose heuristic, and a noisy one at corpus scale (it fires on any command
+    output containing "not found"). Scoped to single-session tool auditing,
+    where the false-positive cost is a human glancing at one extra row.
+    """
     if not text:
         return False
     head = text[:300].lower()
-    return any(marker in head for marker in _ERROR_MARKERS)
+    return any(marker in head for marker in NO_MATCH_MARKERS)
 
 
 def _format_tool_input_summary(input_obj: Any, truncate: int) -> str:
@@ -746,6 +752,12 @@ def extract_agent_tool_audit(
 ) -> tuple[list[dict[str, Any]], dict[str, int], int]:
     """Walk a subagent transcript and extract tool calls with error pairing.
 
+    "Error" here is broader than `FailureKind`: it also covers a SUCCESSFUL
+    call that came back empty or malformed (`looks_like_no_match`), because a
+    zero-hit search is a tool-usage problem worth seeing even though the
+    harness considers it a success. The corpus-wide survey deliberately uses
+    the narrower, flag-gated definition — see the taxonomy note in models.py.
+
     Returns (calls, tool_counts, error_count) where:
       - calls: list of dicts with time/tool/input_summary/error/error_text,
         in chronological order, filtered by `tool_name_filter` substring
@@ -754,62 +766,43 @@ def extract_agent_tool_audit(
       - error_count: total errors across all tool calls (filtered by filter
         when filter is set, otherwise across everything)
     """
-    # Index tool_use blocks by id so we can pair them with later tool_results
-    pending: dict[str, dict[str, Any]] = {}
     calls: list[dict[str, Any]] = []
     tool_counts: Counter[str] = Counter()
     error_count = 0
 
-    for entry in entries:
-        if isinstance(entry, AssistantTranscriptEntry):
-            ts = entry.timestamp.strftime("%H:%M:%S") if entry.timestamp else "        "
-            for item in entry.message.content:
-                if not isinstance(item, ToolUseContent):
-                    continue
-                full_name = item.name
-                short = full_name.split("__")[-1]
-                tool_counts[short] += 1
+    for call in collect_tool_calls(entries):
+        tool_counts[call.short_name] += 1
+        if tool_name_filter and tool_name_filter not in call.name:
+            continue
 
-                if tool_name_filter and tool_name_filter not in full_name:
-                    continue
+        row = {
+            "time": call.timestamp.strftime("%H:%M:%S") if call.timestamp else "        ",
+            "tool": call.short_name,
+            "input_summary": _format_tool_input_summary(call.input, truncate),
+            "error": False,
+            "error_text": None,
+        }
+        calls.append(row)
 
-                call = {
-                    "time": ts,
-                    "tool": short,
-                    "input_summary": _format_tool_input_summary(item.input, truncate),
-                    "error": False,
-                    "error_text": None,
-                }
-                pending[item.id] = call
-                calls.append(call)
+        if call.result is None:
+            continue
+        text = call.result.text
+        # `has_failure` is the flag check; the prose heuristic only has to run
+        # when the harness did NOT flag the call. Never classify — the audit
+        # reports the error text, not its kind.
+        if not call.has_failure and not looks_like_no_match(text):
+            continue
 
-        elif isinstance(entry, ToolResultEntry):
-            content = entry.message.content
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, ToolResultContent):
-                    continue
-                call = pending.pop(block.tool_use_id, None)
-                if call is None:
-                    continue
-
-                # Render text from result content
-                text_parts: list[str] = []
-                if isinstance(block.content, str):
-                    text_parts.append(block.content)
-                elif isinstance(block.content, list):
-                    for sub in block.content:
-                        if isinstance(sub, dict) and sub.get("type") == "text":
-                            text_parts.append(sub.get("text", ""))
-                text = " ".join(text_parts)
-
-                if _result_is_error(text, bool(block.is_error)):
-                    call["error"] = True
-                    snippet = text.strip().replace("\n", " ")
-                    if truncate and len(snippet) > truncate:
-                        snippet = snippet[: truncate - 1] + "…"
-                    call["error_text"] = snippet
-                    error_count += 1
+        row["error"] = True
+        if truncate:
+            # Bounded before normalizing — error text is where the 500 KB
+            # results live, and only `truncate` chars of it survive.
+            snippet = collapse_ws(text, truncate + 1)
+            if len(snippet) > truncate:
+                snippet = snippet[: truncate - 1] + "…"
+        else:
+            snippet = " ".join(text.split())
+        row["error_text"] = snippet
+        error_count += 1
 
     return calls, dict(tool_counts.most_common()), error_count

@@ -21,6 +21,7 @@ from .utils import PrefixId
 
 if TYPE_CHECKING:
     from .corpus import ProjectInfo
+    from .failures import FailureSurvey
     from .search import MatchHit, PatternTriageResults, SessionInfo
     from .subagents import SubagentInfo
 
@@ -1115,3 +1116,201 @@ class DeleteConversionsResponse(SparseModel):
     refused: list[RefusedDeletion] = Field(
         default_factory=list, description="Ids not removed, each with a reason."
     )
+
+
+# =============================================================================
+# survey_failures
+# =============================================================================
+#
+# The failure-hunting landing page. It ORIENTS — counts, kinds, hot tools, hot
+# sessions — and deliberately does not reproduce error text beyond a short
+# recognizable excerpt; reading a failure is grep_session / read_turn's job.
+# Every list section is capped with an explicit overflow line naming what was
+# dropped and how to get it, because a silently truncated list reads as "that's
+# all of them" and quietly ends the investigation.
+
+
+def _overflow(shown: int, total: int, noun: str, how: str) -> str | None:
+    """Overflow hint, or None when nothing was dropped (costs zero tokens)."""
+    if shown >= total:
+        return None
+    return f"showing {shown} of {total} {noun} — {how}"
+
+
+class FailureExampleOut(SparseModel):
+    """One representative failure — enough to recognize it, not to read it."""
+
+    text: str = Field(description="Leading excerpt of the error, whitespace-collapsed and truncated. To read the whole thing, grep_session the shown session with a distinctive phrase from here, or read_turn.")
+    tool: str = Field(description="Tool that produced it (short name).")
+    session: PrefixId = Field(description="A session it happened in — pass to grep_session/browse_session.")
+    project: str | None = Field(default=None, description="Project that session belongs to.")
+    agent: PrefixId | None = Field(default=None, description="Subagent body it came from. Absent when it happened in the main transcript.")
+
+
+class FailureKindRow(SparseModel):
+    """One failure kind and how much of the total it accounts for."""
+
+    kind: str = Field(description="Failure classification. Kinds: cascade (a sibling call in the same parallel batch failed, so this one was cancelled), user_rejected (a human declined the call), permission_denied (the permission system declined it), stale_read (edited/read a file without reading it first, or after it changed), oversized_read (read a file too big to return), edit_no_match (the string to replace wasn't there), bad_call (malformed arguments), bad_path (a file/dir/cwd the call named doesn't exist), auth_failed (credentials rejected — bad key, expired token, publickey denied), network (host unreachable, connection refused, DNS failure), http_status (an HTTP request came back 4xx/5xx), timeout (the call exceeded its time budget), command_not_found (the shell couldn't find the binary), git_rejected (git refused the push/pull — non-fast-forward and friends), parse_error (code the agent wrote didn't parse — broken heredoc, bad jq filter, undecodable JSON), exit_code (a command failed for a reason no rule named), unclassified (no rule matched — see the `unclassified` section).")
+    category: str = Field(description="Whose problem it is — the axis that separates noise from breakage. 'agent': the model used the tool wrong, or wrote code that didn't parse (most of the volume, and usually self-corrected). 'policy': a human or the permission system said no. 'environment': the world outside said no — this is what you want when hunting real breakage. 'cascade': collateral damage. 'unknown': unclassified.")
+    count: int = Field(description="Failures of this kind in scope.")
+    sessions: int = Field(description="Distinct sessions this kind occurred in.")
+    example: FailureExampleOut | None = Field(default=None, description="A representative failure. Only present when the call set examples=true.")
+
+
+class FailureToolRow(SparseModel):
+    """One tool's failure load, with the denominator that makes it mean something."""
+
+    tool: str = Field(description="Tool name — short form (`Bash`, `grep_session`) unless two MCP servers in scope expose the same short name, in which case the full `mcp__server__tool` name is shown so their denominators stay separate.")
+    errors: int = Field(description="Failed calls in scope.")
+    calls: int = Field(description="Invocations of this tool in the transcripts that were SCANNED — the ones carrying at least one flagged error. NOT a corpus-wide denominator: error-free transcripts are never parsed. Use it to compare failure density BETWEEN tools in the same scan, not as an absolute reliability rate.")
+    error_rate: float = Field(description="errors / calls, rounded to 3 places. Same scope caveat as `calls`.")
+    top_kind: str = Field(description="This tool's most common failure kind.")
+
+
+class FailureSessionRow(SparseModel):
+    """One session's failure load — a drill-in target, not a summary of it."""
+
+    session: PrefixId = Field(description="Pass to grep_session (with errors_only=true) or audit_session_tools to see the actual failures.")
+    project: str | None = Field(default=None, description="Project — pass to the `projects` param when drilling in.")
+    errors: int = Field(description="Failures in this session, in scope.")
+    top_kind: str = Field(description="Most common failure kind in this session.")
+    date: str | None = Field(default=None, description="Date of the first in-scope failure (YYYY-MM-DD).")
+
+
+class FailureShapeRow(SparseModel):
+    """A recurring shape of UNCLASSIFIED failure — the survey's actual yield.
+
+    The taxonomy exists to subtract known noise so novel breakage stands out.
+    These rows are what no rule anticipated, grouped by leading text and ranked
+    by how often they recurred: a high count here is a failure mode worth naming.
+    """
+
+    shape: str = Field(description="Leading text shared by this group of unclassified failures.")
+    count: int = Field(description="How many failures share this shape.")
+    sessions: int = Field(description="Distinct sessions it occurred in.")
+    example: FailureExampleOut | None = Field(default=None, description="A representative failure, with a session to drill into. Only present when the call set examples=true.")
+
+
+class SurveyFailuresResponse(SparseModel):
+    """Every failed tool call in scope, rolled up — the answer to "what broke?"
+    without knowing what the errors say.
+
+    Summary first, then the taxonomy, then what the taxonomy MISSED, then the
+    drill-in targets. Read `unclassified` before `by_tool`/`by_session`: the
+    named kinds are mostly known noise, and the unnamed shapes are the finding.
+    """
+
+    total: int = Field(description="Failed tool calls in scope, after cascade suppression and any `kinds` filter.")
+    sessions_affected: int = Field(description="Distinct sessions containing at least one in-scope failure.")
+    unclassified_total: int = Field(description="How many of `total` no rule could name. A large share here means the taxonomy is behind the corpus — read the `unclassified` section.")
+    cascade_suppressed: int = Field(description="Sibling-cancellation artifacts excluded from every count above. One real failure in a parallel batch cancels its siblings, so leaving these in triples that batch's apparent failure count. Pass include_cascade=true to fold them back in.")
+    sessions_scanned: int = Field(description="Sessions whose transcripts were actually parsed. Only transcripts containing a flagged error are parsed at all, so this is much smaller than the corpus — and it is the scope of the `calls` denominators.")
+    transcripts_scanned: int = Field(description="Transcript files parsed (main sessions plus subagent bodies).")
+    after: datetime | None = Field(default=None, description="Window start actually applied. Absent when unbounded.")
+    before: datetime | None = Field(default=None, description="Window end actually applied. Absent when unbounded.")
+    kinds_filter: list[str] | None = Field(default=None, description="Kinds this call was restricted to. Absent when unfiltered.")
+    degraded_prefilter: bool | None = Field(default=None, description="True when the ripgrep prefilter failed and every transcript was scanned instead (slow, but complete). Absent on a normal run.")
+
+    by_kind: list[FailureKindRow] = Field(description="Failure kinds, most frequent first.")
+    by_kind_overflow: str | None = Field(default=None, description="Present only when kinds were dropped by `limit`.")
+
+    unclassified: list[FailureShapeRow] = Field(default_factory=list, description="Recurring shapes of failure no rule named, most frequent first. The survey's yield — everything else is subtraction.")
+    unclassified_overflow: str | None = Field(default=None, description="Present only when shapes were dropped by `limit`.")
+
+    by_tool: list[FailureToolRow] = Field(default_factory=list, description="Tools ranked by failure count, each with the denominator needed to read it.")
+    by_tool_overflow: str | None = Field(default=None, description="Present only when tools were dropped by `limit`.")
+
+    by_session: list[FailureSessionRow] = Field(default_factory=list, description="Hottest sessions — drill-in targets for grep_session(errors_only=true) or audit_session_tools.")
+    by_session_overflow: str | None = Field(default=None, description="Present only when sessions were dropped by `limit`.")
+
+    @classmethod
+    def from_survey(
+        cls,
+        survey: "FailureSurvey",
+        limit: int,
+        examples: bool,
+    ) -> SurveyFailuresResponse:
+        """Render a survey, capping every list at `limit` with an overflow hint.
+
+        `examples` is the one knob that adds error TEXT to the payload; without
+        it the response is pure counts, which is what a first orienting call
+        should cost.
+        """
+        def ex(e) -> FailureExampleOut | None:
+            if not examples or e is None:
+                return None
+            return FailureExampleOut(
+                text=e.text,
+                tool=e.tool,
+                session=e.session,
+                project=e.project or None,
+                agent=e.agent,
+            )
+
+        return cls(
+            total=survey.total,
+            sessions_affected=survey.sessions_affected,
+            unclassified_total=survey.unclassified_total,
+            cascade_suppressed=survey.cascade_suppressed,
+            sessions_scanned=survey.sessions_scanned,
+            transcripts_scanned=survey.transcripts_scanned,
+            after=survey.after,
+            before=survey.before,
+            kinds_filter=[k.value for k in survey.kinds_filter] if survey.kinds_filter else None,
+            degraded_prefilter=None if survey.prefiltered else True,
+            by_kind=[
+                FailureKindRow(
+                    kind=k.kind.value,
+                    category=k.kind.category.value,
+                    count=k.count,
+                    sessions=len(k.sessions),
+                    example=ex(k.example),
+                )
+                for k in survey.by_kind[:limit]
+            ],
+            by_kind_overflow=_overflow(
+                min(limit, len(survey.by_kind)), len(survey.by_kind),
+                "kinds", "raise `limit`",
+            ),
+            unclassified=[
+                FailureShapeRow(
+                    shape=s.shape,
+                    count=s.count,
+                    sessions=len(s.sessions),
+                    example=ex(s.example),
+                )
+                for s in survey.unclassified[:limit]
+            ],
+            unclassified_overflow=_overflow(
+                min(limit, len(survey.unclassified)), len(survey.unclassified),
+                "unclassified shapes", "raise `limit`, or narrow with kinds='unclassified'",
+            ),
+            by_tool=[
+                FailureToolRow(
+                    tool=t.display,
+                    errors=t.errors,
+                    calls=t.calls,
+                    error_rate=round(t.errors / t.calls, 3) if t.calls else 0.0,
+                    top_kind=t.kinds.most_common(1)[0][0].value if t.kinds else "",
+                )
+                for t in survey.by_tool[:limit]
+            ],
+            by_tool_overflow=_overflow(
+                min(limit, len(survey.by_tool)), len(survey.by_tool),
+                "tools", "raise `limit`",
+            ),
+            by_session=[
+                FailureSessionRow(
+                    session=s.session,
+                    project=s.project or None,
+                    errors=s.errors,
+                    top_kind=s.kinds.most_common(1)[0][0].value if s.kinds else "",
+                    date=format_session_date(s.first) or None,
+                )
+                for s in survey.by_session[:limit]
+            ],
+            by_session_overflow=_overflow(
+                min(limit, len(survey.by_session)), len(survey.by_session),
+                "sessions", "raise `limit`, or scope with `projects` / a tighter window",
+            ),
+        )

@@ -62,7 +62,7 @@ def _build(tmp_path, *, main_text, agent_text=None, wf_text=None) -> SessionInfo
 
 def test_session_sources_includes_main_and_subagents(tmp_path):
     session = _build(tmp_path, main_text="main", agent_text="sub", wf_text="wf")
-    sources = session_sources(session)
+    sources = session_sources(session.path)
     # main (agent_id None) + one direct subagent + one workflow orphan
     agent_ids = {s.agent_id for s in sources}
     assert None in agent_ids
