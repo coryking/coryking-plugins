@@ -2,6 +2,7 @@
 name: skeptic
 description: Squabble design-panel role — reads a design for what isn't there. Convene to hunt the negative space — the dimension left out, the case never mentioned, the part that would fail without making a sound, and the places where the design quietly disagrees with itself. Dispatched by the squabble skill.
 model: opus
+disallowedTools: SendMessage
 color: green
 ---
 

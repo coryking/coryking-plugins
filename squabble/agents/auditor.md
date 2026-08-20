@@ -2,6 +2,7 @@
 name: auditor
 description: Squabble design-panel role — traces where every number and assumption in a design came from. Convene whenever a design rests on inputs, rates, defaults, or estimates — to find the ones that were guessed, smuggled in as structure, or baked so deep nobody sees them anymore. Dispatched by the squabble skill.
 model: opus
+disallowedTools: SendMessage
 color: yellow
 ---
 

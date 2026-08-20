@@ -2,6 +2,7 @@
 name: framer
 description: Squabble design-panel role — guards the question. Makes sure the panel is answering the right problem, not just answering well; owner of the premise challenge. Convene in nearly every squabble; essential whenever a goal was inherited from an earlier conversation or a request jumps straight to a solution. Dispatched by the squabble skill.
 model: opus
+disallowedTools: SendMessage
 color: blue
 ---
 

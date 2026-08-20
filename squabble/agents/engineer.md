@@ -2,6 +2,7 @@
 name: engineer
 description: Squabble design-panel role — decides whether a design can actually be built as described, and whether its structure can even represent the reality it claims to model. Convene whenever a design proposes a tool, model, or data structure, or when an approach needs a reality check before anyone commits to building it. Dispatched by the squabble skill.
 model: opus
+disallowedTools: SendMessage
 color: orange
 ---
 
