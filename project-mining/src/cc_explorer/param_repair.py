@@ -40,19 +40,29 @@ from typing import Any
 ALIASES: dict[str, tuple[str, ...]] = {
     # Search surface: callers guess `query` for anything searchable.
     "query": ("patterns",),
-    "queries": ("patterns",),
     "pattern": ("patterns",),
-    "search": ("patterns",),
     # Singular/plural slips.
     "project": ("projects",),
     "session_id": ("session", "sessions"),
-    "session_ids": ("sessions",),
     "session": ("sessions",),
     "agent_id": ("agent_ids",),
     # Result-cap and id guesses seen in the corpus.
     "max_results": ("limit",),
     "turn_id": ("turn",),
 }
+
+# List parameters whose items are IDENTIFIERS (session ids, project paths, agent
+# ids) — the only ones where a string that looks like a JSON array is parsed
+# rather than wrapped. Nothing in an identifier ever needs `[` or `]`, so
+# `'["a","b"]'` there can only be a hand-serialized list.
+#
+# This is the complete set of array-typed parameters across the tools MINUS
+# `patterns`, which is regex-valued: `'["error"]'` and `'["\\d+"]'` are valid
+# patterns that happen to parse as JSON, and unwrapping them silently searches
+# for something the caller never asked for. A regex string is ALWAYS one pattern.
+ID_LIST_PARAMS: frozenset[str] = frozenset(
+    {"projects", "sessions", "ids", "agent_ids"}
+)
 
 
 def _properties(schema: dict[str, Any]) -> dict[str, Any]:
@@ -75,26 +85,30 @@ def _accepts_array(prop_schema: Any) -> bool:
     return False
 
 
-def _coerce(value: Any, prop_schema: Any) -> Any:
+def _coerce(name: str, value: Any, prop_schema: Any) -> Any:
     """Fix a string handed to a list-typed parameter.
 
     `projects="foo"` / `patterns="regex"` are the same slip as the name guesses:
     the caller has the right idea and the wrong shape. Pydantic will not coerce
     str -> list[str], so it fails validation; wrapping is unambiguous.
 
-    A string that is itself a JSON array (`patterns='["a","b"]'` — a common
-    shape when the caller hand-serializes its arguments) is parsed rather than
-    wrapped, so it doesn't become one nonsense pattern.
+    On an IDENTIFIER list (see ID_LIST_PARAMS) a string that is itself a JSON
+    array (`projects='["a","b"]'` — a common shape when the caller
+    hand-serializes its arguments) is parsed rather than wrapped, so it doesn't
+    become one nonsense id. Everywhere else, and on `patterns` especially, the
+    string is wrapped as-is: `'["error"]'` is a perfectly good regex, and
+    guessing that it was meant as a list would search for the wrong thing
+    without saying so.
     """
     if not isinstance(value, str) or not _accepts_array(prop_schema):
         return value
     text = value.strip()
-    if text.startswith("[") and text.endswith("]"):
+    if name in ID_LIST_PARAMS and text.startswith("[") and text.endswith("]"):
         try:
             parsed = json.loads(text)
         except ValueError:
             parsed = None
-        # All-strings only: `[1,2]` is a character class, not a payload.
+        # All-strings only: a list of anything else was never an id list.
         if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
             return parsed
     return [value]
@@ -124,7 +138,7 @@ def repair_arguments(
                     canonical = candidate
                     claimed.add(candidate)
                     break
-        repaired[canonical] = _coerce(value, props.get(canonical))
+        repaired[canonical] = _coerce(canonical, value, props.get(canonical))
     return repaired
 
 

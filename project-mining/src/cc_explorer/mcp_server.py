@@ -139,6 +139,15 @@ the main transcript, so an agent's own tool calls / thinking are searchable too
    into a turn-count grid plus pre-computed attention rollups (sessions running
    at once, peaks, hands-on vs autonomous time). Session ids and projects it
    returns pass straight back to the tools above.
+
+5. Interview — ask a past session what it meant, when grep can't answer.
+   convert_session copies the session into a resumable subagent; SendMessage
+   resumes it (no agent-teams needed — if SendMessage is not in your toolset it
+   is deferred, so load it with ToolSearch query "select:SendMessage"); send ONE
+   batched message with every question (splitting re-bills the replayed
+   context); then delete_conversions(ids=[created_id], force=true).
+   For a question-shaped investigation rather than a single lookup, dispatch the
+   session-researcher agent and let it drive this loop in its own context.
 """
 
 # =============================================================================
@@ -1691,6 +1700,11 @@ def convert_session(
             if not sa.is_conversion_artifact
         )
 
+        # Read the source's headroom facts BEFORE writing anything: a stats
+        # failure after the write would strand an artifact whose created_id the
+        # caller never receives, and so can never delete.
+        src_stats = _source_stats(src.path)
+
         result = convert_session_to_subagent(
             src_session_id=src.session_id.full,
             src_path=src.path,
@@ -1699,7 +1713,7 @@ def convert_session(
             dest_parent_session_dir=parent_session_dir,
             nested_agents=nested,
         )
-        return ConvertSessionResponse.from_result(result, _source_stats(src.path))
+        return ConvertSessionResponse.from_result(result, src_stats)
 
     # subagent_to_session
     af, holding = _resolve_agent_for_convert(src_id, src_project)
@@ -1735,6 +1749,10 @@ def convert_session(
     # destination project (set on ConversionResult.project via the caller below).
     src_proj_path = holding.project_path or ""
 
+    # Same ordering rule as the other direction: stats before the write, so a
+    # stats failure can't leave a written session the caller was never told about.
+    src_stats = _source_stats(af.path)
+
     try:
         result = convert_subagent_to_session(
             src_agent_id=agent_full,
@@ -1748,7 +1766,7 @@ def convert_session(
     # Override result.project to the destination (conversion.py sets it to
     # src_project_path; callers expect response.project == destination project).
     result.project = dest_proj_path
-    return ConvertSessionResponse.from_result(result, _source_stats(af.path))
+    return ConvertSessionResponse.from_result(result, src_stats)
 
 
 def _dest_project_dir(project_path: str) -> Path:

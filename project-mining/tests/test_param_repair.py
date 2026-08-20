@@ -19,6 +19,8 @@ from unittest.mock import patch
 
 import pytest
 from fastmcp.exceptions import ToolError
+from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
 
 from cc_explorer.mcp_server import mcp
 from cc_explorer.models import (
@@ -27,7 +29,13 @@ from cc_explorer.models import (
     TextContent,
     TranscriptStats,
 )
-from cc_explorer.param_repair import ALIASES, argument_error_message, repair_arguments
+from cc_explorer.param_repair import (
+    ALIASES,
+    ID_LIST_PARAMS,
+    _accepts_array,
+    argument_error_message,
+    repair_arguments,
+)
 from cc_explorer.search import MatchHit, SessionInfo
 from cc_explorer.utils import PrefixId
 
@@ -166,11 +174,31 @@ class TestAliasMapping:
         )
         assert repaired == {"patterns": ["regex"], "sessions": ["abc123"]}
 
-    def test_json_array_string_is_parsed_not_wrapped(self):
-        repaired = repair_arguments(
-            {"query": '["alpha", "beta"]'}, SCHEMAS["search_projects"]
-        )
-        assert repaired == {"patterns": ["alpha", "beta"]}
+    def test_json_array_string_is_parsed_for_identifier_lists(self):
+        # Nothing in a project path or session id needs brackets, so a
+        # hand-serialized list there can only have been meant as a list.
+        assert repair_arguments(
+            {"project": '["a", "b"]'}, SCHEMAS["search_projects"]
+        ) == {"projects": ["a", "b"]}
+        assert repair_arguments(
+            {"sessions": '["abc123", "def456"]'}, SCHEMAS["grep_sessions"]
+        ) == {"sessions": ["abc123", "def456"]}
+
+    def test_patterns_is_never_unwrapped_from_json(self):
+        """A regex is one pattern even when it parses as a JSON array of strings.
+
+        `["error"]` and `["\\d+"]` are valid character classes. Unwrapping them
+        would silently search for `error` / `\\d+` — a different query the caller
+        never asked for, with no error to notice.
+        """
+        for regex in ('["error"]', '["\\d+"]', '["a","b"]'):
+            assert repair_arguments(
+                {"patterns": regex}, SCHEMAS["search_projects"]
+            ) == {"patterns": [regex]}
+            # Same via the alias path — the parameter decides, not the name used.
+            assert repair_arguments({"query": regex}, SCHEMAS["grep_session"]) == {
+                "patterns": [regex]
+            }
 
     def test_regex_that_looks_like_a_list_stays_one_pattern(self):
         # `[abc]` and `[1,2]` are character classes, not payloads.
@@ -180,6 +208,21 @@ class TestAliasMapping:
         assert repair_arguments({"patterns": "[1,2]"}, SCHEMAS["search_projects"]) == {
             "patterns": ["[1,2]"]
         }
+
+    def test_every_array_parameter_is_classified(self):
+        """No array parameter may be left un-triaged as id-list or regex.
+
+        A new list-typed parameter must be a deliberate decision: identifiers
+        get the JSON unwrap, regexes must not. Anything else is an oversight —
+        this fails until it's named.
+        """
+        regex_params = {"patterns"}
+        unclassified = set()
+        for schema in SCHEMAS.values():
+            for name, prop in (schema.get("properties") or {}).items():
+                if _accepts_array(prop) and name not in ID_LIST_PARAMS | regex_params:
+                    unclassified.add(name)
+        assert not unclassified, f"array params neither id-list nor regex: {unclassified}"
 
     def test_scalar_params_are_not_wrapped(self):
         repaired = repair_arguments(
@@ -391,6 +434,43 @@ class TestForgivenessEndToEnd:
 
         assert result.structured_content["session"].startswith("aaaaaaaa")
         assert result.structured_content["patterns"][0]["pattern"] == "TARGET"
+
+    def test_validation_error_from_inside_the_tool_is_not_rewritten(self):
+        """A pydantic error from the tool BODY is not an argument error.
+
+        The middleware's gate is the pydantic title: only a function-call
+        validation (`call[...]`) describes the caller's arguments. A malformed
+        transcript that fails model validation deep inside the tool must surface
+        as itself — rewriting it into "here are grep_session's parameters" would
+        send the caller off fixing arguments that were never wrong.
+        """
+
+        class Deeper(BaseModel):
+            n: int
+
+        with pytest.raises(PydanticValidationError) as inner:
+            Deeper(n="not-an-int")
+        body_error = inner.value
+        assert not body_error.title.startswith("call[")
+
+        sessions = [_build_session()]
+
+        def blow_up(*args, **kwargs):
+            raise body_error
+
+        with patch_session_corpus(sessions), patch(
+            "cc_explorer.mcp_server.search_multi", side_effect=blow_up
+        ):
+            with pytest.raises(PydanticValidationError) as raised:
+                _call(
+                    "grep_session",
+                    {"session": SESSION_ID, "patterns": ["TARGET"], "projects": ["/fake"]},
+                )
+
+        assert raised.value is body_error
+        message = str(raised.value)
+        assert "Parameters of grep_session:" not in message
+        assert "No parameter" not in message
 
     def test_canonical_call_still_works(self):
         sessions = [_build_session()]

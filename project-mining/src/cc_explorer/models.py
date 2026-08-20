@@ -848,6 +848,11 @@ class TranscriptStats:
     duration_ms: Optional[int] = None
     compaction_events: list[CompactionEvent] = field(default_factory=list)
 
+    @property
+    def compaction_count(self) -> int:
+        """How many compactions this transcript went through."""
+        return len(self.compaction_events)
+
     @classmethod
     def from_entries(cls, entries: list[TranscriptEntry]) -> TranscriptStats:
         stats = cls()
@@ -879,18 +884,24 @@ class TranscriptStats:
                 stats.input_tokens += turn_input
                 stats.output_tokens += usage.output_tokens
 
-                # Compaction detection: context drops >30% from peak
+                # Compaction detection: context drops >30% from peak.
+                # Zero-usage turns are excluded, same as for context_tokens above:
+                # a `<synthetic>` placeholder (API error, interrupt) reports an
+                # all-zero usage block, which is not a context drop. Left
+                # unguarded such a turn both fabricates a 100% "compaction" and
+                # zeroes the baseline, masking the next real one.
                 if turn_input > peak_context:
                     peak_context = turn_input
-                if prev_context > 10000 and turn_input < prev_context * 0.7:
-                    drop_pct = (1 - turn_input / prev_context) * 100
-                    stats.compaction_events.append(CompactionEvent(
-                        turn=turn_num,
-                        from_tokens=prev_context,
-                        to_tokens=turn_input,
-                        drop_pct=drop_pct,
-                    ))
-                prev_context = turn_input
+                if turn_input > 0:
+                    if prev_context > 10000 and turn_input < prev_context * 0.7:
+                        drop_pct = (1 - turn_input / prev_context) * 100
+                        stats.compaction_events.append(CompactionEvent(
+                            turn=turn_num,
+                            from_tokens=prev_context,
+                            to_tokens=turn_input,
+                            drop_pct=drop_pct,
+                        ))
+                    prev_context = turn_input
 
             for item in entry.message.content:
                 if isinstance(item, ToolUseContent):

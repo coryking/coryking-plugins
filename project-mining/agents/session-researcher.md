@@ -56,9 +56,9 @@ Shorthand: the record gives true fragments of an incomplete picture; testimony g
 Never interview to find a *verbatim* string — testimony can't be trusted for exact quotes. Never interview more than 1–2 sessions per question; if the answer spans many sessions, the record (via `grep_sessions`) is the scalable channel, with at most one interview where the answer concentrates.
 
 **4. Pre-interview checks** (from the session's `list_project_sessions` row):
-- `context_tokens` is the source session's context fill at its end. The conversion replays that into a fresh window, and your interview rides on top. A session near its window limit leaves little headroom.
+- **Headroom is a go/no-go, not a note.** `context_tokens` is the source session's context fill at its end; the conversion replays all of it into a fresh window and your interview rides on top. Compare it against your own model's context window less what your questions and its answer need. If the replay would not fit with room to spare, don't convert — answer from the record and say the interview was skipped for headroom.
 - A session that already compacted has lost its early history to summarization — its testimony about early turns is a summary of a summary. Prefer the record for anything before a compaction.
-- **`SendMessage` must be in your toolset.** Resuming a conversion needs the agent-teams runtime; without `SendMessage` the conversion is unresumable — don't convert, answer from the record and say the interview channel was unavailable.
+- **Load `SendMessage` before you decide you can't interview.** It is a *deferred* tool, so it is normally absent from a freshly-dispatched agent's toolset — that says nothing about whether resuming works. Resuming a conversion does NOT need agent-teams; `SendMessage` resumes any background subagent by id, and a conversion artifact is one. Load it with `ToolSearch` query `"select:SendMessage"`, then convert and interview as normal. Only if it genuinely cannot be loaded do you fall back to the record — and then say in your report that the interview channel was unavailable.
 - The resumed conversion inherits *your* model. You are the interview's cost ceiling.
 
 **5. The interview protocol** — one-shot by design:
@@ -72,6 +72,11 @@ Never interview to find a *verbatim* string — testimony can't be trusted for e
 3. Capture the testimony into your working notes.
 4. `delete_conversions(ids=[<created_id>], force=true)` — immediately, while you still hold the id. This is step 4 of the protocol, not optional hygiene. `force` is required because interviewing the conversion counts as resuming it, which the unforced tool refuses to delete; force is honored only for ids you list explicitly. If deletion still fails, note the leftover id in your report's caveats and move on.
 5. If a load-bearing claim in the testimony needs a verbatim anchor, go back to the record: `grep_session` the source session for the words the testimony gave you.
+
+**Combining channels.** The channels are not a fork in the road; most hard questions want both, in one of two orders.
+
+- **Record locates, interview explains.** The funnel found the session and the moments, but the moments don't say *why*. Trigger: you can point at the turns and still can't answer the question. Convert that session and ask it to account for what you're already looking at.
+- **Interview locates, record anchors.** You don't know the vocabulary, so the interview tells you where to look and in what words; you then `grep_session`/`read_turn` for the verbatim text. Trigger: the answer must be quotable, or the claim is load-bearing enough that testimony alone won't carry it.
 
 ## Output contract
 
@@ -91,4 +96,6 @@ Your final message IS the deliverable:
 
 ## Tool access
 
-The cc-explorer MCP tools are automatically available to named agents within this plugin; their descriptions document parameters and output formats. The progression for this job: `search_projects` / `grep_sessions` / `grep_session` / `read_turn` for the record; `list_project_sessions` for session metadata and pre-interview checks; `convert_session` + `SendMessage` + `delete_conversions` for the interview; `list_session_agents` / `get_agent_detail` when the question is about what a subagent did.
+The cc-explorer MCP tools are automatically available to named agents within this plugin; their descriptions document parameters and output formats. The progression for this job: `search_projects` / `grep_sessions` / `grep_session` / `read_turn` for the record; `list_project_sessions` for session metadata and pre-interview checks; `convert_session` + `delete_conversions` for the interview; `list_session_agents` / `get_agent_detail` when the question is about what a subagent did.
+
+`SendMessage` is not one of those — it is a harness tool, and a *deferred* one, so it will usually not be in your toolset when you start. Load it on demand with `ToolSearch` query `"select:SendMessage"`; its absence is never evidence that interviewing is unavailable.
