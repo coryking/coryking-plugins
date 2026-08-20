@@ -37,7 +37,9 @@ from .corpus import Corpus, ScannerError, SessionRef
 from .models import (
     FailureKind,
     ToolResultContent,
+    canonical_server,
     collect_tool_calls,
+    split_tool_name,
 )
 from .parser import load_transcript
 from .search import session_sources
@@ -83,13 +85,13 @@ class KindTally:
 
 @dataclass
 class ToolTally:
-    """One tool's exposure and failure load, keyed by its FULL name.
+    """One tool's exposure and failure load, accumulated under its FULL name.
 
     Full name, not `short_name`: `mcp__serverA__search` and
     `mcp__serverB__search` are different tools with different failure rates, and
-    17 short names in the live corpus are shared by two or three servers. The
-    display name is resolved at the end (`display`), collapsing to the short
-    form only when it is unambiguous within the scan.
+    29 short names in the live corpus are shared by two or three servers.
+    Spellings of the same tool are reconciled once at the end, by
+    `_resolve_tool_identities`, which also picks each row's `display` name.
     """
 
     name: str
@@ -99,8 +101,25 @@ class ToolTally:
     display: str = ""
 
     @property
+    def server(self) -> Optional[str]:
+        """MCP server this tool belongs to; None when the name carries none."""
+        return split_tool_name(self.name)[0]
+
+    @property
+    def server_key(self) -> Optional[str]:
+        """`server`, folded so its spelling variants compare equal."""
+        server = self.server
+        return canonical_server(server) if server is not None else None
+
+    @property
     def short_name(self) -> str:
-        return self.name.split("__")[-1]
+        return split_tool_name(self.name)[1]
+
+    def absorb(self, other: "ToolTally") -> None:
+        """Fold another recording of the SAME tool into this one."""
+        self.errors += other.errors
+        self.calls += other.calls
+        self.kinds.update(other.kinds)
 
 
 @dataclass
@@ -208,18 +227,67 @@ def _example(
     )
 
 
-def _assign_tool_display_names(tallies: list[ToolTally]) -> None:
-    """Name each tool as briefly as is still unambiguous within this scan.
+def _resolve_tool_identities(tallies: list[ToolTally]) -> list[ToolTally]:
+    """Collapse each tool to ONE row, then name it as briefly as stays unambiguous.
 
-    `Bash` stays `Bash` and a lone MCP tool shows as `grep_session`, but when
-    two servers in scope expose the same short name they keep their full
-    `mcp__server__tool` names — otherwise their rows merge and the `error_rate`
-    denominator, which is the whole point of `by_tool`, becomes a blend of two
-    different tools.
+    A transcript does not name a tool the same way every time, and keyed by the
+    raw name every spelling is its own row — so one tool's failures land in two
+    or three of them. Two spelling drifts are live in the corpus:
+
+    - **Server spelling.** The same server appears as
+      `plugin_project-mining_cc-explorer` and `plugin_project_mining_cc_explorer`
+      (and `claude-in-chrome` / `Claude_in_Chrome`), because the harness
+      sanitizes a configured name differently across versions. `server_key`
+      folds those together; the surviving row keeps the most-called spelling,
+      so the name shown is the one the caller will recognize.
+    - **Missing server.** A model that reached an MCP tool through the
+      deferred-tool path recorded it BARE (`search_projects`) while every other
+      call recorded it qualified. Worse, the stray bare row then looks like a
+      second server exposing that short name, so the display step below expands
+      its qualified twin to the full name while sibling tools stay short — the
+      mixed naming of issue #67. A server-less tally is therefore folded into
+      the qualified one when EXACTLY ONE server in the scan exposes that tool
+      name; with two or more there is nothing to attribute it to, and it stays
+      its own row rather than being assigned to a server by coin flip.
+      Attribution assumes a bare name matching exactly one server's tool IS
+      that tool — in the whole live corpus that is the only bare/qualified name
+      collision, and a built-in allow-list to guard the hypothetical
+      `mcp__x__Bash` would go stale faster than it would help.
+
+    Display then names each surviving row as briefly as is still unambiguous:
+    `Bash` stays `Bash` and a lone MCP tool shows as `grep_session`, but two
+    servers exposing the same short name keep their full `mcp__server__tool`
+    names — otherwise their rows merge and the `error_rate` denominator, which
+    is the whole point of `by_tool`, becomes a blend of two different tools.
     """
-    shared = Counter(t.short_name for t in tallies)
-    for t in tallies:
+    # One row per (server, tool). Most-called spelling first, so it is the one
+    # that survives to name the row.
+    merged: dict[tuple[Optional[str], str], ToolTally] = {}
+    for t in sorted(tallies, key=lambda t: (-t.calls, t.name)):
+        key = (t.server_key, t.short_name)
+        held = merged.get(key)
+        if held is None:
+            merged[key] = t
+        else:
+            held.absorb(t)
+
+    qualified: dict[str, list[ToolTally]] = {}
+    for (server, tool), t in merged.items():
+        if server is not None:
+            qualified.setdefault(tool, []).append(t)
+
+    resolved: list[ToolTally] = []
+    for (server, tool), t in merged.items():
+        twins = qualified.get(tool, []) if server is None else []
+        if len(twins) == 1:
+            twins[0].absorb(t)
+            continue
+        resolved.append(t)
+
+    shared = Counter(t.short_name for t in resolved)
+    for t in resolved:
         t.display = t.short_name if shared[t.short_name] == 1 else t.name
+    return resolved
 
 
 def survey_failures(
@@ -371,10 +439,10 @@ def survey_failures(
     )
     # Resolved over EVERY tool seen, not just the error-bearing rows that get
     # rendered: if two servers expose `search` and only one of them failed,
-    # calling that row `search` reads as "all search calls", which it is not.
-    _assign_tool_display_names(list(tool_tallies.values()))
+    # calling that row `search` reads as "all search calls", which it is not —
+    # and a bare-named alias can only be attributed by looking at the whole scan.
     survey.by_tool = sorted(
-        (t for t in tool_tallies.values() if t.errors),
+        (t for t in _resolve_tool_identities(list(tool_tallies.values())) if t.errors),
         key=lambda t: t.errors,
         reverse=True,
     )

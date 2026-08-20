@@ -1160,7 +1160,7 @@ class FailureKindRow(SparseModel):
 class FailureToolRow(SparseModel):
     """One tool's failure load, with the denominator that makes it mean something."""
 
-    tool: str = Field(description="Tool name — short form (`Bash`, `grep_session`) unless two MCP servers in scope expose the same short name, in which case the full `mcp__server__tool` name is shown so their denominators stay separate.")
+    tool: str = Field(description="Tool name — short form (`Bash`, `grep_session`) unless two MCP servers in scope expose the same short name, in which case the full `mcp__server__tool` name is shown so their denominators stay separate. One tool is always one row: transcripts spell a tool several ways — bare or fully qualified, and with the server name punctuated differently across harness versions — and every spelling of one tool is counted together.")
     errors: int = Field(description="Failed calls in scope.")
     calls: int = Field(description="Invocations of this tool in the transcripts that were SCANNED — the ones carrying at least one flagged error. NOT a corpus-wide denominator: error-free transcripts are never parsed. Use it to compare failure density BETWEEN tools in the same scan, not as an absolute reliability rate.")
     error_rate: float = Field(description="errors / calls, rounded to 3 places. Same scope caveat as `calls`.")

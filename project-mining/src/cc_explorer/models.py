@@ -1078,6 +1078,39 @@ def extract_output_text(entry: "ToolResultEntry") -> str:
 # =============================================================================
 
 
+def split_tool_name(name: str) -> tuple[Optional[str], str]:
+    """Split a recorded tool name into (server, tool).
+
+    An MCP tool is recorded as `mcp__<server>__<tool>`; a built-in tool is
+    recorded bare, and so — occasionally — is an MCP tool, when the model
+    reached it through the deferred-tool path (`search_projects` with no
+    prefix). `server` is None for both bare cases: the name simply carries no
+    server, which is a fact callers have to reconcile, not one this can invent.
+
+    Splits at most twice, so a tool whose own name contains `__` survives whole.
+    """
+    if name.startswith("mcp__"):
+        parts = name.split("__", 2)
+        if len(parts) == 3 and parts[1] and parts[2]:
+            return parts[1], parts[2]
+    return None, name
+
+
+def canonical_server(server: str) -> str:
+    """Fold the spellings the harness gives ONE server into a single key.
+
+    A server's configured name is sanitized into the tool name, and the
+    sanitization has changed: the live corpus holds both
+    `plugin_project-mining_cc-explorer` and `plugin_project_mining_cc_explorer`
+    for the same server, and both `claude-in-chrome` and `Claude_in_Chrome`.
+    Treating those as different servers splits one tool's stats in two. Names
+    that differ only in `-` vs `_` or in case are the same server; a config
+    holding `foo-bar` AND `foo_bar` as genuinely different servers is not a
+    thing anyone does, and would only cost their rows a merge.
+    """
+    return server.replace("-", "_").casefold()
+
+
 @dataclass
 class ToolCall:
     """One tool invocation paired with the result it got back.
@@ -1094,8 +1127,8 @@ class ToolCall:
 
     @property
     def short_name(self) -> str:
-        """Display name — the segment after the last `__` for MCP tools."""
-        return self.name.split("__")[-1]
+        """Display name — the tool half of `mcp__server__tool`, else the name."""
+        return split_tool_name(self.name)[1]
 
     @property
     def has_failure(self) -> bool:
