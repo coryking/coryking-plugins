@@ -16,9 +16,12 @@ Coverage:
   - x-converter-provenance line is the sole trust surface: present at the top of
     agent jsonl (line 1) and session jsonl (after custom-title); meta.json carries
     only the three standard keys
+  - source headroom signals: context fill + compaction count of the SOURCE ride
+    along on the conversion response, in both directions
   - delete_conversions: refuses subagents with no provenance line, refuses grown
     subagents (growth guard), refuses sessions unconditionally (even tagged),
-    deletes ungrown tagged subagents; sweep reports growth-skips
+    deletes ungrown tagged subagents; sweep reports growth-skips; force deletes a
+    named grown conversion but is rejected for the sweep and unlocks nothing else
   - lineage accumulates across two conversions
   - conversion-tagged agents excluded from search corpus but present in
     list_session_agents (labeled)
@@ -185,6 +188,32 @@ def _simple_session_lines() -> list[dict]:
         _user("u1111111-0000-0000-0000-000000000003", "GAMMA followup", parent="a1111111-0000-0000-0000-000000000002"),
         _assistant("a1111111-0000-0000-0000-000000000004", "DELTA reply", parent="u1111111-0000-0000-0000-000000000003"),
     ]
+
+
+def _usage_session_lines(context_sizes: list[int]) -> list[dict]:
+    """A linear session whose assistant turns report the given input-token totals.
+
+    TranscriptStats reads context fill off the LAST assistant turn and counts a
+    compaction whenever a turn drops below 70% of the previous one (above a 10k
+    floor), so the list doubles as a compaction script: [50000, 12000] is one
+    compaction ending at 12000 tokens.
+    """
+    lines: list[dict] = []
+    parent: str | None = None
+    for i, size in enumerate(context_sizes):
+        u = f"u2222222-0000-0000-0000-0000000000{i:02d}"
+        a = f"a2222222-0000-0000-0000-0000000000{i:02d}"
+        lines.append(_user(u, f"ask {i}", parent=parent))
+        turn = _assistant(a, f"answer {i}", parent=u)
+        turn["message"]["usage"] = {
+            "input_tokens": size,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 5,
+        }
+        lines.append(turn)
+        parent = a
+    return lines
 
 
 def _convo_texts(lines: list[dict]) -> list[str]:
@@ -627,6 +656,62 @@ def test_cross_project_src_resolution(fake_claude):
 
 
 # =============================================================================
+# Source headroom signals (pre-interview)
+# =============================================================================
+#
+# A converted conversation is replayed on every resume, so the caller needs the
+# SOURCE's context fill and compaction count at conversion time to decide how to
+# interrogate the copy (one batched question vs. a back-and-forth) and how much
+# of its early memory is a summary rather than the original turns.
+
+
+def test_convert_session_reports_source_headroom(fake_claude):
+    """session_to_subagent carries the source's context fill and compaction count."""
+    fake_claude.write_session(SID_A, _usage_session_lines([50000, 12000]))
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+
+    resp = srv.convert_session(
+        direction="session_to_subagent",
+        src_id=SID_A, src_project=PROJECT, dest_parent_session=SID_PARENT,
+    )
+    # Last assistant turn's input tokens — what a resume replays.
+    assert resp.source_context_tokens == 12000
+    # 50000 → 12000 is a >30% drop: one compaction.
+    assert resp.source_compactions == 1
+
+
+def test_convert_session_source_compactions_absent_when_none(fake_claude):
+    """No compaction in the source → the field is omitted, not reported as 0."""
+    fake_claude.write_session(SID_A, _usage_session_lines([8000, 9000]))
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+
+    resp = srv.convert_session(
+        direction="session_to_subagent",
+        src_id=SID_A, src_project=PROJECT, dest_parent_session=SID_PARENT,
+    )
+    assert resp.source_context_tokens == 9000
+    assert resp.source_compactions is None
+    assert "source_compactions" not in resp.model_dump()
+
+
+def test_subagent_to_session_reports_source_headroom(fake_claude):
+    """The signals are direction-agnostic — a subagent source reports them too."""
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    agent_id = "a" + "8" * 16
+    body = _usage_session_lines([40000, 11000])
+    for l in body:
+        l["agentId"] = agent_id
+        l["isSidechain"] = True
+    _lay_down_subagent(fake_claude, agent_id, lines=body)
+
+    resp = srv.convert_session(
+        direction="subagent_to_session", src_id=agent_id, src_project=PROJECT,
+    )
+    assert resp.source_context_tokens == 11000
+    assert resp.source_compactions == 1
+
+
+# =============================================================================
 # delete_conversions
 # =============================================================================
 
@@ -697,7 +782,52 @@ def test_delete_conversions_refuses_grown_subagent(fake_claude):
     assert not resp.deleted
     assert len(resp.refused) == 1
     assert "resumed or built upon" in resp.refused[0].reason
+    # The refusal teaches the escape hatch — otherwise callers shell out to `rm`.
+    assert "force=true" in resp.refused[0].reason
     assert path.exists()  # untouched — someone may depend on it
+
+
+def test_delete_conversions_force_removes_resumed_conversion(fake_claude):
+    """force + an explicit id deletes a resumed conversion (the interview cleanup)."""
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    resumed = "a" + "b" * 16
+    path = _lay_down_subagent(fake_claude, resumed, is_conversion_artifact=True, extra_lines=3)
+
+    resp = srv.delete_conversions(ids=[resumed], force=True)
+    assert len(resp.deleted) == 1
+    assert resp.deleted[0].kind == "subagent"
+    assert not resp.refused
+    assert not path.exists()
+    assert not path.with_suffix(".meta.json").exists()
+
+
+def test_delete_conversions_force_without_ids_rejected(fake_claude, monkeypatch):
+    """force is per-artifact, never a mode: the sweep form is an error, not a silent apply."""
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    grown = "a" + "f" * 16
+    path = _lay_down_subagent(fake_claude, grown, is_conversion_artifact=True, extra_lines=2)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID_PARENT)
+
+    with pytest.raises(ToolError) as exc:
+        srv.delete_conversions(force=True)
+    assert "explicit ids" in str(exc.value)
+    assert path.exists()  # nothing was swept
+
+
+def test_delete_conversions_force_does_not_unlock_non_conversions(fake_claude):
+    """force only escapes the growth guard — provenance and session guards still hold."""
+    fake_claude.write_session(SID_A, _simple_session_lines())
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    real_agent = "a" + "3" * 16
+    agent_path = _lay_down_subagent(fake_claude, real_agent, is_conversion_artifact=False)
+
+    resp = srv.delete_conversions(ids=[real_agent, SID_A], force=True)
+    assert not resp.deleted
+    reasons = {r.id: r.reason for r in resp.refused}
+    assert "not a conversion artifact" in reasons[real_agent]
+    assert "converted sessions are for humans to manage" in reasons[SID_A]
+    assert agent_path.exists()
+    assert (fake_claude.project_dir(PROJECT) / f"{SID_A}.jsonl").exists()
 
 
 def test_delete_conversions_deletes_subagent_when_growth_guard_passes(fake_claude):
