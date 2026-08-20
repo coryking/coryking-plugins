@@ -19,7 +19,11 @@ from typing import Annotated, Literal, Optional
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools.base import ToolResult
+from mcp.types import CallToolRequestParams
 from pydantic import Field
+from pydantic import ValidationError as PydanticValidationError
 
 from ._claude_paths import _get_projects_dir
 from .activity import build_activity_timeline
@@ -45,6 +49,7 @@ from .corpus import (
 from .failures import narrow_to_error_sessions, survey_failures as run_failure_survey
 from .formatting import matches_id
 from .models import FailureKind, parse_hide, parse_kinds
+from .param_repair import argument_error_message, repair_arguments
 from .parser import load_conversations
 from .resolve import (
     resolve_artifacts,
@@ -286,6 +291,82 @@ mcp = FastMCP(
     instructions=_INSTRUCTIONS,
     lifespan=_conversion_reaper_lifespan,
 )
+
+
+# =============================================================================
+# Parameter repair (forgive the wrong guess, teach the right name)
+# =============================================================================
+
+
+class ParameterRepairMiddleware(Middleware):
+    """Rewrite unambiguous wrong parameter names, and teach the rest.
+
+    Sits at the tools/call boundary — one mechanism for every tool, present and
+    future — and reads each tool's own JSON schema, so it needs no per-tool
+    table. The pure logic lives in param_repair.py (schema in, arguments out);
+    this class is just the FastMCP wiring.
+
+    Both halves run before/after `call_next`:
+
+    * BEFORE: aliases (`query` -> `patterns`, `project` -> `projects`, ...) are
+      resolved and bare strings are wrapped for list parameters, so the call
+      validates instead of erroring. The advertised schema is untouched — the
+      client never sees an alias, and the repair leaves no trace in the result.
+    * AFTER: a pydantic argument-validation error is re-raised as a ToolError
+      whose message names the likely intended parameter and lists the tool's
+      real ones. Errors raised INSIDE the tool body (transcript models, etc.)
+      are not argument errors and pass through untouched — the pydantic title
+      of a function-call validation is `call[...]`, which is the gate.
+    """
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[CallToolRequestParams],
+        call_next: CallNext[CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        schema = await self._tool_schema(context)
+        arguments = context.message.arguments
+        if schema and arguments:
+            repaired = repair_arguments(arguments, schema)
+            if repaired != arguments:
+                # Mutate in place: call_next reads `context.message.arguments`.
+                arguments.clear()
+                arguments.update(repaired)
+        try:
+            return await call_next(context)
+        except PydanticValidationError as exc:
+            if schema is None or not exc.title.startswith("call["):
+                raise
+            raise ToolError(
+                argument_error_message(
+                    context.message.name,
+                    schema,
+                    context.message.arguments or {},
+                    exc.errors(include_url=False),
+                )
+            ) from exc
+
+    @staticmethod
+    async def _tool_schema(
+        context: MiddlewareContext[CallToolRequestParams],
+    ) -> dict | None:
+        """The called tool's input schema, or None if it can't be resolved.
+
+        An unknown/disabled tool name resolves to nothing; that failure mode
+        (stale tool names) belongs to call_tool, not here, so we get out of the
+        way and let it raise its own error.
+        """
+        server = getattr(context.fastmcp_context, "fastmcp", None)
+        if server is None:
+            return None
+        try:
+            tool = await server.get_tool(context.message.name)
+        except Exception:
+            return None
+        return getattr(tool, "parameters", None)
+
+
+mcp.add_middleware(ParameterRepairMiddleware())
 
 _TOOL_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": False}
 
