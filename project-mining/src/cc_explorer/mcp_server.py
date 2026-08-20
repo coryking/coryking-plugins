@@ -19,7 +19,11 @@ from typing import Annotated, Literal, Optional
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools.base import ToolResult
+from mcp.types import CallToolRequestParams
 from pydantic import Field
+from pydantic import ValidationError as PydanticValidationError
 
 from ._claude_paths import _get_projects_dir
 from .activity import build_activity_timeline
@@ -44,8 +48,9 @@ from .corpus import (
 )
 from .failures import narrow_to_error_sessions, survey_failures as run_failure_survey
 from .formatting import matches_id
-from .models import FailureKind, parse_hide, parse_kinds
-from .parser import load_conversations
+from .models import FailureKind, TranscriptStats, parse_hide, parse_kinds
+from .param_repair import argument_error_message, repair_arguments
+from .parser import load_conversations, load_transcript
 from .resolve import (
     resolve_artifacts,
     resolve_unique_ref,
@@ -134,6 +139,15 @@ the main transcript, so an agent's own tool calls / thinking are searchable too
    into a turn-count grid plus pre-computed attention rollups (sessions running
    at once, peaks, hands-on vs autonomous time). Session ids and projects it
    returns pass straight back to the tools above.
+
+5. Interview — ask a past session what it meant, when grep can't answer.
+   convert_session copies the session into a resumable subagent; SendMessage
+   resumes it (no agent-teams needed — if SendMessage is not in your toolset it
+   is deferred, so load it with ToolSearch query "select:SendMessage"); send ONE
+   batched message with every question (splitting re-bills the replayed
+   context); then delete_conversions(ids=[created_id], force=true).
+   For a question-shaped investigation rather than a single lookup, dispatch the
+   session-researcher agent and let it drive this loop in its own context.
 """
 
 # =============================================================================
@@ -286,6 +300,82 @@ mcp = FastMCP(
     instructions=_INSTRUCTIONS,
     lifespan=_conversion_reaper_lifespan,
 )
+
+
+# =============================================================================
+# Parameter repair (forgive the wrong guess, teach the right name)
+# =============================================================================
+
+
+class ParameterRepairMiddleware(Middleware):
+    """Rewrite unambiguous wrong parameter names, and teach the rest.
+
+    Sits at the tools/call boundary — one mechanism for every tool, present and
+    future — and reads each tool's own JSON schema, so it needs no per-tool
+    table. The pure logic lives in param_repair.py (schema in, arguments out);
+    this class is just the FastMCP wiring.
+
+    Both halves run before/after `call_next`:
+
+    * BEFORE: aliases (`query` -> `patterns`, `project` -> `projects`, ...) are
+      resolved and bare strings are wrapped for list parameters, so the call
+      validates instead of erroring. The advertised schema is untouched — the
+      client never sees an alias, and the repair leaves no trace in the result.
+    * AFTER: a pydantic argument-validation error is re-raised as a ToolError
+      whose message names the likely intended parameter and lists the tool's
+      real ones. Errors raised INSIDE the tool body (transcript models, etc.)
+      are not argument errors and pass through untouched — the pydantic title
+      of a function-call validation is `call[...]`, which is the gate.
+    """
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[CallToolRequestParams],
+        call_next: CallNext[CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        schema = await self._tool_schema(context)
+        arguments = context.message.arguments
+        if schema and arguments:
+            repaired = repair_arguments(arguments, schema)
+            if repaired != arguments:
+                # Mutate in place: call_next reads `context.message.arguments`.
+                arguments.clear()
+                arguments.update(repaired)
+        try:
+            return await call_next(context)
+        except PydanticValidationError as exc:
+            if schema is None or not exc.title.startswith("call["):
+                raise
+            raise ToolError(
+                argument_error_message(
+                    context.message.name,
+                    schema,
+                    context.message.arguments or {},
+                    exc.errors(include_url=False),
+                )
+            ) from exc
+
+    @staticmethod
+    async def _tool_schema(
+        context: MiddlewareContext[CallToolRequestParams],
+    ) -> dict | None:
+        """The called tool's input schema, or None if it can't be resolved.
+
+        An unknown/disabled tool name resolves to nothing; that failure mode
+        (stale tool names) belongs to call_tool, not here, so we get out of the
+        way and let it raise its own error.
+        """
+        server = getattr(context.fastmcp_context, "fastmcp", None)
+        if server is None:
+            return None
+        try:
+            tool = await server.get_tool(context.message.name)
+        except Exception:
+            return None
+        return getattr(tool, "parameters", None)
+
+
+mcp.add_middleware(ParameterRepairMiddleware())
 
 _TOOL_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": False}
 
@@ -1494,6 +1584,19 @@ def _resolve_session_ref_for_convert(
     return resolve_unique_ref(corpus.refs, src_id)
 
 
+def _source_stats(path: Path) -> TranscriptStats:
+    """Token/compaction stats for a conversion SOURCE transcript.
+
+    Conversion operates on raw JSONL and never parses the source typed, but the
+    caller of a conversion needs the source's headroom facts (context fill,
+    compactions) to plan how it interrogates the copy. Reads through the shared
+    transcript cache, so a source already listed or searched this session costs
+    nothing extra. Works for either direction — sessions and subagent files share
+    the transcript format.
+    """
+    return TranscriptStats.from_entries(load_transcript(path))
+
+
 def _resolve_agent_for_convert(src_id: str, src_project: str | None):
     """Resolve an agent id/prefix to (AgentFile, holding SessionRef), or raise.
 
@@ -1571,7 +1674,7 @@ def convert_session(
 
     direction='subagent_to_session': copy a subagent out to a top-level session a human can open — the response carries the exact `claude -r` command. Use when the user wants to read or continue an agent's run interactively.
 
-    The response includes what you need to compose the first message: suggested_handoff (a converted conversation has no way to know its interlocutor changed — message senders are not labeled on the wire), the original environment (cwd and whether it still exists, git branch, Claude Code version, age), model history, turn count, and tail state. Conversion artifacts carry lineage, are excluded from search, and are labeled in agent listings; remove them with delete_conversions."""
+    The response includes what you need to compose the first message: suggested_handoff (a converted conversation has no way to know its interlocutor changed — message senders are not labeled on the wire), the original environment (cwd and whether it still exists, git branch, Claude Code version, age), model history, turn count, and tail state. It also carries the source's headroom facts — source_context_tokens (how full its window already was, i.e. what each resume replays and how little room is left) and source_compactions (how much of its early memory is a summary rather than the original turns) — so you can size the interview before you start it. Conversion artifacts carry lineage, are excluded from search, and are labeled in agent listings; remove them with delete_conversions."""
     if direction == "session_to_subagent":
         src = _resolve_session_ref_for_convert(src_id, src_project)
 
@@ -1597,6 +1700,11 @@ def convert_session(
             if not sa.is_conversion_artifact
         )
 
+        # Read the source's headroom facts BEFORE writing anything: a stats
+        # failure after the write would strand an artifact whose created_id the
+        # caller never receives, and so can never delete.
+        src_stats = _source_stats(src.path)
+
         result = convert_session_to_subagent(
             src_session_id=src.session_id.full,
             src_path=src.path,
@@ -1605,7 +1713,7 @@ def convert_session(
             dest_parent_session_dir=parent_session_dir,
             nested_agents=nested,
         )
-        return ConvertSessionResponse.from_result(result)
+        return ConvertSessionResponse.from_result(result, src_stats)
 
     # subagent_to_session
     af, holding = _resolve_agent_for_convert(src_id, src_project)
@@ -1641,6 +1749,10 @@ def convert_session(
     # destination project (set on ConversionResult.project via the caller below).
     src_proj_path = holding.project_path or ""
 
+    # Same ordering rule as the other direction: stats before the write, so a
+    # stats failure can't leave a written session the caller was never told about.
+    src_stats = _source_stats(af.path)
+
     try:
         result = convert_subagent_to_session(
             src_agent_id=agent_full,
@@ -1654,7 +1766,7 @@ def convert_session(
     # Override result.project to the destination (conversion.py sets it to
     # src_project_path; callers expect response.project == destination project).
     result.project = dest_proj_path
-    return ConvertSessionResponse.from_result(result)
+    return ConvertSessionResponse.from_result(result, src_stats)
 
 
 def _dest_project_dir(project_path: str) -> Path:
@@ -1759,8 +1871,8 @@ _REFUSE_NOT_CONVERSION = (
 )
 _REFUSE_GROWTH = (
     "conversion has been resumed or built upon since creation; someone may depend "
-    "on it — confirm with the user before removing. The user can remove the files "
-    "manually if confirmed."
+    "on it — confirm with the user before removing. Pass force=true with this id if "
+    "you created this conversion and have captured what you need from it."
 )
 _REFUSE_SESSION = (
     "converted sessions are for humans to manage; delete_conversions only removes "
@@ -1774,16 +1886,31 @@ def delete_conversions(
         Optional[list[str]],
         Field(description="Conversion artifact ids (agent ids, prefixes accepted) to delete. Omit to delete ALL conversion-tagged SUBAGENTS under the calling session. Converted SESSIONS are never deletable by this tool (even by explicit id) — remove those files manually."),
     ] = None,
+    force: Annotated[
+        bool,
+        Field(description="Delete a listed conversion even though it has been resumed since creation. Honored ONLY for ids you name in `ids` — force with `ids` omitted is an error, so the sweep stays conservative and keeps reporting resumed artifacts in `refused`. This is the escape hatch for the interview pattern: converting a session, asking it one batched question (which IS a resume), then removing the copy you just made. It does not weaken any other guard — a real session, a normally-dispatched subagent, and a converted session are still refused."),
+    ] = False,
 ) -> DeleteConversionsResponse:
     """Delete SUBAGENT conversion artifacts created by convert_session — and ONLY those.
 
-    Each subagent id is verified to carry a valid x-converter-provenance line (the sole trust surface — meta.json is rewritten on resume and isn't trusted) before anything is removed. Two guards protect a tagged artifact from deletion: if its line count has grown past `lines_at_creation`, it was resumed or built upon and is refused (someone may now depend on it); ids that resolve to a real but NON-conversion artifact (or don't resolve at all) are refused with a per-id reason. This tool can never delete a genuine session or a normally-dispatched subagent.
+    Each subagent id is verified to carry a valid x-converter-provenance line (the sole trust surface — meta.json is rewritten on resume and isn't trusted) before anything is removed. Two guards protect a tagged artifact from deletion: if its line count has grown past `lines_at_creation`, it was resumed or built upon and is refused (someone may now depend on it); ids that resolve to a real but NON-conversion artifact (or don't resolve at all) are refused with a per-id reason. Only the growth guard is escapable, and only for explicitly listed ids, with `force` — use it on a conversion you created and are done interrogating. This tool can never delete a genuine session or a normally-dispatched subagent.
 
-    Converted SESSIONS are refused unconditionally — even when tagged and passed by explicit id — because a session is for a human to open and manage; remove its file manually if you mean to. There is no force flag.
+    Converted SESSIONS are refused unconditionally — even when tagged, passed by explicit id, and forced — because a session is for a human to open and manage; remove its file manually if you mean to.
 
     Omit `ids` to sweep every conversion-tagged subagent under the calling session that passes the growth guard (a cleanup-after-yourself default); grown ones are reported in `refused`, not silently skipped."""
     deleted: list[DeletedConversion] = []
     refused: list[RefusedDeletion] = []
+
+    if force and ids is None:
+        # force is a per-artifact judgment ("I made this one and I'm done with
+        # it"), not a mode. Blanket-forcing a sweep would delete conversions the
+        # caller never created, so the sweep never honors it.
+        raise ToolError(
+            "force=true requires explicit ids: it is only honored for conversions you "
+            "name. A sweep (ids omitted) stays conservative — resumed conversions under "
+            "the calling session are reported in `refused`. Re-call with the ids you "
+            "want removed."
+        )
 
     if ids is None:
         # Sweep mode: every conversion subagent under the calling session only.
@@ -1835,7 +1962,9 @@ def delete_conversions(
         if not is_conversion_artifact(path):
             refused.append(RefusedDeletion(id=raw_id, reason=_REFUSE_NOT_CONVERSION))
             continue
-        if growth_exceeded(path):
+        # force overrides the growth guard, and only here — the caller named this
+        # exact artifact, so "someone may depend on it" is their call to make.
+        if not force and growth_exceeded(path):
             refused.append(RefusedDeletion(id=raw_id, reason=_REFUSE_GROWTH))
             continue
         delete_agent_conversion(path)

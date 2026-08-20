@@ -848,6 +848,11 @@ class TranscriptStats:
     duration_ms: Optional[int] = None
     compaction_events: list[CompactionEvent] = field(default_factory=list)
 
+    @property
+    def compaction_count(self) -> int:
+        """How many compactions this transcript went through."""
+        return len(self.compaction_events)
+
     @classmethod
     def from_entries(cls, entries: list[TranscriptEntry]) -> TranscriptStats:
         stats = cls()
@@ -879,18 +884,24 @@ class TranscriptStats:
                 stats.input_tokens += turn_input
                 stats.output_tokens += usage.output_tokens
 
-                # Compaction detection: context drops >30% from peak
+                # Compaction detection: context drops >30% from peak.
+                # Zero-usage turns are excluded, same as for context_tokens above:
+                # a `<synthetic>` placeholder (API error, interrupt) reports an
+                # all-zero usage block, which is not a context drop. Left
+                # unguarded such a turn both fabricates a 100% "compaction" and
+                # zeroes the baseline, masking the next real one.
                 if turn_input > peak_context:
                     peak_context = turn_input
-                if prev_context > 10000 and turn_input < prev_context * 0.7:
-                    drop_pct = (1 - turn_input / prev_context) * 100
-                    stats.compaction_events.append(CompactionEvent(
-                        turn=turn_num,
-                        from_tokens=prev_context,
-                        to_tokens=turn_input,
-                        drop_pct=drop_pct,
-                    ))
-                prev_context = turn_input
+                if turn_input > 0:
+                    if prev_context > 10000 and turn_input < prev_context * 0.7:
+                        drop_pct = (1 - turn_input / prev_context) * 100
+                        stats.compaction_events.append(CompactionEvent(
+                            turn=turn_num,
+                            from_tokens=prev_context,
+                            to_tokens=turn_input,
+                            drop_pct=drop_pct,
+                        ))
+                    prev_context = turn_input
 
             for item in entry.message.content:
                 if isinstance(item, ToolUseContent):
@@ -1078,6 +1089,39 @@ def extract_output_text(entry: "ToolResultEntry") -> str:
 # =============================================================================
 
 
+def split_tool_name(name: str) -> tuple[Optional[str], str]:
+    """Split a recorded tool name into (server, tool).
+
+    An MCP tool is recorded as `mcp__<server>__<tool>`; a built-in tool is
+    recorded bare, and so — occasionally — is an MCP tool, when the model
+    reached it through the deferred-tool path (`search_projects` with no
+    prefix). `server` is None for both bare cases: the name simply carries no
+    server, which is a fact callers have to reconcile, not one this can invent.
+
+    Splits at most twice, so a tool whose own name contains `__` survives whole.
+    """
+    if name.startswith("mcp__"):
+        parts = name.split("__", 2)
+        if len(parts) == 3 and parts[1] and parts[2]:
+            return parts[1], parts[2]
+    return None, name
+
+
+def canonical_server(server: str) -> str:
+    """Fold the spellings the harness gives ONE server into a single key.
+
+    A server's configured name is sanitized into the tool name, and the
+    sanitization has changed: the live corpus holds both
+    `plugin_project-mining_cc-explorer` and `plugin_project_mining_cc_explorer`
+    for the same server, and both `claude-in-chrome` and `Claude_in_Chrome`.
+    Treating those as different servers splits one tool's stats in two. Names
+    that differ only in `-` vs `_` or in case are the same server; a config
+    holding `foo-bar` AND `foo_bar` as genuinely different servers is not a
+    thing anyone does, and would only cost their rows a merge.
+    """
+    return server.replace("-", "_").casefold()
+
+
 @dataclass
 class ToolCall:
     """One tool invocation paired with the result it got back.
@@ -1094,8 +1138,8 @@ class ToolCall:
 
     @property
     def short_name(self) -> str:
-        """Display name — the segment after the last `__` for MCP tools."""
-        return self.name.split("__")[-1]
+        """Display name — the tool half of `mcp__server__tool`, else the name."""
+        return split_tool_name(self.name)[1]
 
     @property
     def has_failure(self) -> bool:

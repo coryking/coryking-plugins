@@ -22,6 +22,7 @@ from .utils import PrefixId
 if TYPE_CHECKING:
     from .corpus import ProjectInfo
     from .failures import FailureSurvey
+    from .models import TranscriptStats
     from .search import MatchHit, PatternTriageResults, SessionInfo
     from .subagents import SubagentInfo
 
@@ -63,6 +64,10 @@ class SessionSummary(SparseModel):
     agents: int = Field(description="Subagents dispatched directly by the parent transcript (Task/Agent/TaskCreate blocks). Top-down view — does NOT count workflow-orchestrated agents.")
     agents_present: int = Field(description="Full discovered subagent population — direct dispatches plus on-disk orphans (notably workflow-orchestrated agents). Matches list_session_agents' total_agents. When this exceeds `agents`, the session ran workflows. The min_agents filter matches on this number.")
     context_tokens: int = Field(description="Last assistant turn's input tokens (context window size).")
+    compactions: int | None = Field(
+        default=None,
+        description="Context compactions detected in this session (a >30% drop from peak input tokens). Absent when there were none. A nonzero count means the early conversation was summarized away: the session can no longer quote its own beginning, so anything it says about how it started is reconstruction, not recall — verify that part against the transcript rather than asking the session.",
+    )
     output_tokens: int = Field(description="Total output tokens across all turns.")
     tools: int = Field(description="Total tool_use invocations.")
     is_current: bool | None = Field(
@@ -89,6 +94,7 @@ class SessionSummary(SparseModel):
             agents=s.stats.agent_count,
             agents_present=s.agents_present,
             context_tokens=s.stats.context_tokens,
+            compactions=s.stats.compaction_count or None,
             output_tokens=s.stats.output_tokens,
             tools=s.stats.tool_use_count,
             is_current=is_current or None,
@@ -987,6 +993,13 @@ class ConvertSessionResponse(SparseModel):
         description="session_to_subagent only: subagents the SOURCE session ran. They are NOT copied — their results already appear inline in the conversation. Absent/0 for subagent sources.",
     )
     models: ConversionModels = Field(description="Assistant model history of the copy.")
+    source_context_tokens: int = Field(
+        description="How full the source's context window already was at its last turn, in tokens. The copy inherits it: this is roughly what resuming the conversion re-reads before it answers anything, and how little headroom is left for your questions. A source near the ceiling can compact mid-interview — ask everything in one batched message rather than a back-and-forth.",
+    )
+    source_compactions: int | None = Field(
+        default=None,
+        description="Context compactions the source went through (absent when none). The copy inherits them: that much of its early conversation is a summary, not the original turns, so its recollection of how things started is lossy. Verify claims about the early history against the transcript (grep_session on the source) instead of trusting the answer.",
+    )
     environment: ConversionEnvironment = Field(description="The source's original cwd/branch/version/age.")
     suggested_handoff: str | None = Field(
         default=None,
@@ -997,7 +1010,14 @@ class ConvertSessionResponse(SparseModel):
     )
 
     @classmethod
-    def from_result(cls, r) -> "ConvertSessionResponse":
+    def from_result(cls, r, source_stats: TranscriptStats) -> "ConvertSessionResponse":
+        """Build the response from the conversion result plus the SOURCE's stats.
+
+        Conversion itself works on raw JSONL dicts and never parses the source
+        typed, so the headroom signals (`source_context_tokens`,
+        `source_compactions`) are read off the typed layer by the caller and
+        handed in here rather than carried on ConversionResult.
+        """
         if r.direction == "session_to_subagent":
             invocation = f'SendMessage(to: "{r.created_id}")'
         else:
@@ -1019,6 +1039,8 @@ class ConvertSessionResponse(SparseModel):
             tail_state=r.tail_state,
             nested_agents=(r.nested_agents or None) if r.direction == "session_to_subagent" else None,
             models=ConversionModels(**r.models),
+            source_context_tokens=source_stats.context_tokens,
+            source_compactions=source_stats.compaction_count or None,
             environment=ConversionEnvironment(**r.environment),
             suggested_handoff=r.suggested_handoff,
             lineage=r.lineage,
@@ -1099,15 +1121,17 @@ class RefusedDeletion(SparseModel):
     """One id that was NOT deleted, with the reason."""
 
     id: str = Field(description="The id that was refused.")
-    reason: str = Field(description="Why it wasn't deleted: not found, not a conversion artifact (no provenance line), grown since creation (resumed/built upon), or a converted session (humans manage those).")
+    reason: str = Field(description="Why it wasn't deleted: not found, not a conversion artifact (no provenance line), grown since creation (resumed/built upon — the one refusal `force` can override, on an explicit id), or a converted session (humans manage those).")
 
 
 class DeleteConversionsResponse(SparseModel):
     """Result of delete_conversions: what was removed and what was refused.
 
-    Only SUBAGENT artifacts carrying a valid x-converter-provenance line AND
-    unchanged since creation are deletable. Grown artifacts, converted sessions,
-    and non-conversion files are refused with a per-id reason rather than touched.
+    Only SUBAGENT artifacts carrying a valid x-converter-provenance line are
+    deletable, and by default only while unchanged since creation. Grown
+    (resumed) artifacts are refused unless the caller names them explicitly and
+    passes force; converted sessions and non-conversion files are refused with a
+    per-id reason rather than touched, force or not.
     """
 
     deleted: list[DeletedConversion] = Field(
@@ -1160,7 +1184,7 @@ class FailureKindRow(SparseModel):
 class FailureToolRow(SparseModel):
     """One tool's failure load, with the denominator that makes it mean something."""
 
-    tool: str = Field(description="Tool name — short form (`Bash`, `grep_session`) unless two MCP servers in scope expose the same short name, in which case the full `mcp__server__tool` name is shown so their denominators stay separate.")
+    tool: str = Field(description="Tool name — short form (`Bash`, `grep_session`) unless two MCP servers in scope expose the same short name, in which case the full `mcp__server__tool` name is shown so their denominators stay separate. One tool is always one row: transcripts spell a tool several ways — bare or fully qualified, and with the server name punctuated differently across harness versions — and every spelling of one tool is counted together.")
     errors: int = Field(description="Failed calls in scope.")
     calls: int = Field(description="Invocations of this tool in the transcripts that were SCANNED — the ones carrying at least one flagged error. NOT a corpus-wide denominator: error-free transcripts are never parsed. Use it to compare failure density BETWEEN tools in the same scan, not as an absolute reliability rate.")
     error_rate: float = Field(description="errors / calls, rounded to 3 places. Same scope caveat as `calls`.")

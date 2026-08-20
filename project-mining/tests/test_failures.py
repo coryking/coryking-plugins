@@ -582,6 +582,98 @@ def test_by_tool_does_not_merge_same_named_tools_from_different_servers(
     assert rows["Bash"].display == "Bash"
 
 
+def test_by_tool_folds_bare_and_qualified_recordings_of_one_tool(
+    tmp_path, corpus_of
+):
+    """A transcript names the same MCP tool two ways: qualified on nearly every
+    call, bare when the model reached it through the deferred-tool path. Keyed
+    by the raw name that split one tool's stats across two rows — and the stray
+    bare row made its qualified twin look like a cross-server collision, so it
+    rendered fully qualified while sibling tools rendered short (issue #67)."""
+    server = "mcp__plugin_project-mining_cc-explorer__"
+    corpus_of([
+        _write(
+            tmp_path / "enc",
+            SID_A,
+            _call(f"{server}search_projects", "t1", "Exit code 1", is_error=True)
+            + _call(f"{server}search_projects", "t2", "fine")
+            + _call("search_projects", "t3", "Exit code 1", is_error=True)
+            + _call(f"{server}grep_session", "t4", "Exit code 1", is_error=True),
+        )
+    ])
+
+    rows = {t.display: t for t in survey_failures().by_tool}
+    assert set(rows) == {"search_projects", "grep_session"}, "one tool, one row"
+    assert (rows["search_projects"].errors, rows["search_projects"].calls) == (2, 3)
+    # ...and the alias no longer drags its neighbours into full-name display.
+    assert rows["grep_session"].display == "grep_session"
+
+
+def test_by_tool_folds_spelling_variants_of_one_server(tmp_path, corpus_of):
+    """The harness sanitizes a server's configured name into the tool name, and
+    has changed how: the corpus holds `plugin_project-mining_cc-explorer` and
+    `plugin_project_mining_cc_explorer` for the same server. Punctuation drift
+    is not a second server."""
+    hyphen = "mcp__plugin_project-mining_cc-explorer__list_project_sessions"
+    under = "mcp__plugin_project_mining_cc_explorer__list_project_sessions"
+    corpus_of([
+        _write(
+            tmp_path / "enc",
+            SID_A,
+            _call(hyphen, "t1", "Exit code 1", is_error=True)
+            + _call(hyphen, "t2", "fine")
+            + _call(under, "t3", "Exit code 1", is_error=True),
+        )
+    ])
+
+    rows = survey_failures().by_tool
+    assert [r.display for r in rows] == ["list_project_sessions"]
+    assert (rows[0].errors, rows[0].calls) == (2, 3)
+
+
+def test_bare_name_stays_its_own_row_when_two_servers_could_claim_it(
+    tmp_path, corpus_of
+):
+    """Folding is attribution, and attribution needs one candidate. With two
+    servers exposing `search`, a bare `search` belongs to neither by evidence,
+    so it stays separate rather than inflating one server's denominator."""
+    corpus_of([
+        _write(
+            tmp_path / "enc",
+            SID_A,
+            _call("mcp__serverA__search", "t1", "Exit code 1", is_error=True)
+            + _call("mcp__serverB__search", "t2", "Exit code 1", is_error=True)
+            + _call("search", "t3", "Exit code 1", is_error=True),
+        )
+    ])
+
+    rows = {t.display: t for t in survey_failures().by_tool}
+    assert set(rows) == {"mcp__serverA__search", "mcp__serverB__search", "search"}
+    assert all(r.errors == 1 and r.calls == 1 for r in rows.values())
+
+
+def test_folding_never_merges_two_servers_exposing_the_same_tool(
+    tmp_path, corpus_of
+):
+    """The fold must not become a prefix strip: same tool name, two servers,
+    two rows — with a bare alias present to prove it does not act as a bridge
+    that merges them."""
+    corpus_of([
+        _write(
+            tmp_path / "enc",
+            SID_A,
+            _call("mcp__serverA__search", "t1", "Exit code 1", is_error=True)
+            + _call("mcp__serverA__search", "t2", "fine")
+            + _call("mcp__serverB__search", "t3", "Exit code 1", is_error=True)
+            + _call("search", "t4", "fine"),
+        )
+    ])
+
+    rows = {t.display: t for t in survey_failures().by_tool}
+    assert (rows["mcp__serverA__search"].errors, rows["mcp__serverA__search"].calls) == (1, 2)
+    assert (rows["mcp__serverB__search"].errors, rows["mcp__serverB__search"].calls) == (1, 1)
+
+
 def test_survey_total_equals_the_failed_result_blocks_in_the_corpus(
     tmp_path, corpus_of
 ):

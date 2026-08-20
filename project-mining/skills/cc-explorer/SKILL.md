@@ -6,12 +6,23 @@ description: >
   Triggers on: "search my chats", "what did that agent do", "trace that session", "look at my
   conversations", "check my chat history", "find where we talked about X", "which sessions used
   agents", "ask a past session", "convert a session into a subagent", "question that old conversation".
-  Do NOT use for behavioral evidence mining or evidence-document work — that's the project-mining skill.
+  Covers both direct tool use and dispatching the session-researcher agent for question-shaped
+  investigations. Do NOT use for behavioral evidence mining or evidence-document work — that's the
+  project-mining skill.
 ---
 
 # cc-explorer
 
 Explores Claude Code chat history stored as JSONL transcripts. MCP tools handle all interaction — call them directly, no CLI commands needed.
+
+## Delegate or DIY
+
+Two ways to use this toolset:
+
+- **Dispatch the `session-researcher` agent** (Agent tool, `subagent_type: "project-mining:session-researcher"`) when the ask is a *question* about past sessions — what happened, what was decided, why — and answering it means an investigation rather than a single lookup. The agent owns the full retrieval craft, including the decision this skill's tools make hard to get right inline: when to stop grepping and instead convert the source session and interview it. The investigation burns the agent's context; you get back a cited answer. Dispatch with the question, any known scope (project, session, timeframe), and the answer shape you need — nothing else; it finds its own way.
+- **Call the tools directly** (everything below) when you know where the answer lives and need one or two calls — a quick grep, reading a specific turn, listing sessions — or when you're the session-researcher.
+
+If you catch yourself three pattern-batches deep with nothing landing, that's the tell you're in investigation territory: hand the question to the agent instead of guessing more vocabulary.
 
 ## The conversation exploration tools
 
@@ -82,15 +93,17 @@ Read `by_tool.calls` as relative failure density between tools, not as an absolu
 
 Tools that create, mutate, or remove transcripts — the one mutating axis in the toolset. `convert_session` only ever copies; `rewind_transcript` and `delete_conversions` mutate or delete, but **only conversion artifacts** (files carrying the `x-converter-provenance` line) — a real session or dispatched subagent is never touched.
 
-> **Prerequisite for `session_to_subagent` + `SendMessage`:** resuming a converted subagent uses the agent-teams runtime, which exists only when the calling session was started with `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` in `settings.json` (env block) followed by a Claude Code restart. Without it the conversion still writes a correct file, but nothing can resume it — `SendMessage` returns *"no transcript to resume"*. Quick check: if `SendMessage` is not in your toolset, agent-teams is off — don't convert; use `grep_session`/`read_turn` on the source instead. (`subagent_to_session` → `claude -r` needs no env var.)
+> **Resuming a `session_to_subagent` conversion needs `SendMessage` — and nothing else.** No agent-teams runtime, no env var: `SendMessage` resumes any background subagent by id, and a conversion artifact is one. If `SendMessage` is not in your toolset it is *deferred*, not absent — load it with `ToolSearch` query `"select:SendMessage"`, then convert and resume as normal. Only if it still can't be loaded should you stay on `grep_session`/`read_turn` against the source. (`subagent_to_session` → `claude -r` needs nothing at all.)
 
 - **`convert_session`** — copy a session into a subagent under the calling session (direction `session_to_subagent`), or a subagent out to a top-level session (direction `subagent_to_session`).
 - **`rewind_transcript`** — truncate a conversion artifact (session or subagent) **in place** at a chosen turn, discarding everything after, so it resumes from that earlier point. Eligible only for conversion artifacts — a real session or dispatched subagent is refused untouched. Destructive (the cut tail is gone); use `convert_session` first if you want to keep the original.
 - **`delete_conversions`** — remove subagent artifacts the converter created. Refuses everything else, including converted sessions. Permanent — no undo.
 
-> Cleanup has two paths. `delete_conversions` is the explicit one — call it when you're **done** interrogating to drop a fork *now* (by id, or omit ids to sweep this session's forks). It's the only way to remove a *fresh* fork you're finished with. As a safety net, any pristine (never-resumed) `session_to_subagent` fork that gets left behind is auto-reaped once it's older than ~24h, swept whenever a cc-explorer server in that project starts or stops — so an un-cleaned fork is a tidiness lag, not a permanent leak. Resumed forks are kept by both paths (they hold unique conversation that exists nowhere else).
+> Cleanup has two paths. `delete_conversions` is the explicit one — call it when you're **done** interrogating to drop a fork *now* (by id, or omit ids to sweep this session's forks). It's the only way to remove a *fresh* fork you're finished with. As a safety net, any **pristine** (never-resumed) `session_to_subagent` fork that gets left behind is auto-reaped once it's older than ~24h, swept whenever a cc-explorer server in that project starts or stops — so an un-cleaned *pristine* fork is a tidiness lag, not a permanent leak. **A fork you interviewed is not covered by that.** Interviewing counts as resuming, and both cleanup paths keep resumed forks by default — they hold unique conversation that exists nowhere else — so an interviewed fork you don't delete is a permanent leak. The escape hatch is the one you're expected to use: `delete_conversions(ids=[<id>], force=true)` on the explicitly listed id, right after the interview. `force` is rejected on the sweep form, so it can never blanket-delete work someone else may depend on.
 
-Convert a session to a subagent when the question needs the session itself, not excerpts from it: the reasoning behind a decision, a synthesis of the whole arc, a judgment call on evidence it hasn't seen, or a domain expert whose built-up context would be expensive to rebuild. Resume the new agent with `SendMessage(to: <created_id>)`; its reply is its final message; message it again to follow up. For facts, quotes, locations, and tool-call ground truth, stay on the read tools.
+Convert a session to a subagent when the question needs the session itself, not excerpts from it: the reasoning behind a decision, a synthesis of the whole arc, a judgment call on evidence it hasn't seen, or a domain expert whose built-up context would be expensive to rebuild. For facts, quotes, locations, and tool-call ground truth, stay on the read tools.
+
+An **interview** is one-shot: batch every question you have into a single `SendMessage(to: <created_id>)` — each message replays the whole converted context, so splitting questions across messages re-bills it — take the reply, then `delete_conversions(ids=[<created_id>], force=true)`. Keeping a conversion alive for follow-ups is a different intent: *resuming the work* rather than questioning the record, which is a human-driven flow where nothing gets deleted.
 
 Convert a subagent to a session when the user wants to read or continue an agent's run themselves — hand them the `claude -r` command from the response.
 
@@ -124,7 +137,9 @@ Each session carries a `worktree` field (absent for the main worktree, set to th
 
 **"What broke?" / "catalog every X failure"** → `survey_failures` for the shape of it, then `grep_session`/`grep_sessions` with `errors_only=true` to read the actual calls. Do **not** brainstorm candidate error strings and search for them — that guessing is exactly what this axis removes.
 
-**"Why did that session decide X? What did it learn?"** → `convert_session`, then `SendMessage` (needs `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` — see the conversion-tools prerequisite above). Grep finds what was said; a converted session can answer for what it meant.
+**"Why did that session decide X? What did it learn?"** → `convert_session`, then `SendMessage` (deferred tool — load it with `ToolSearch` query `"select:SendMessage"` if it isn't in your toolset; see the conversion-tools note above). Grep finds what was said; a converted session can answer for what it meant. Interview one-shot: batch every question into a single message (splitting re-bills the replayed context), then `delete_conversions(ids=[...], force=true)`.
+
+**Any of the above, but it's an investigation** → dispatch `session-researcher` (see "Delegate or DIY" at the top) and let it drive the tools.
 
 ## Key workflows
 
