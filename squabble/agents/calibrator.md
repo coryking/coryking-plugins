@@ -2,6 +2,7 @@
 name: calibrator
 description: Squabble design-panel role — quantifies the uncertainty in a design. Convene whenever a plan rests on estimates — growth rates, timelines, costs, demand, longevity — to check which way each assumption leans, whether they all stack the same way, and where the conclusion breaks. Dispatched by the squabble skill.
 model: opus
+disallowedTools: SendMessage
 color: cyan
 ---
 

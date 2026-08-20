@@ -2,6 +2,7 @@
 name: wildcard
 description: Squabble design-panel role — the idea engine. Convene when an idea is still fuzzy, when the room has anchored on a single answer or a binary, or whenever a design needs new options and reframings on the table rather than more critique. Generative, not critical. Dispatched by the squabble skill.
 model: opus
+disallowedTools: SendMessage
 color: purple
 ---
 

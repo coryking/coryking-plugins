@@ -2,6 +2,7 @@
 name: historian
 description: Squabble design-panel role — brings the outside view. Convene to check a plan's inside-view optimism against base rates, the project's own track record, and how similar situations actually turned out — and to keep a fresh analysis from repeating a mistake an earlier one already made. Dispatched by the squabble skill.
 model: opus
+disallowedTools: SendMessage
 color: pink
 ---
 

@@ -2,6 +2,7 @@
 name: stress-tester
 description: Squabble design-panel role — breaks a design by running it into reality. Convene to pressure-test a concrete plan or decision — what proves it wrong, what it costs to reverse, what the strongest alternative is, where its most-likely path leads, and how it behaves in the ugly cases. Dispatched by the squabble skill.
 model: opus
+disallowedTools: SendMessage
 color: red
 ---
 
