@@ -19,6 +19,11 @@
       "name": "engineering-loop",
       "source": "./engineering-loop",
       "description": "Slim parallel-review and curated research agents for solo development. The parts of compound-engineering's workflow that actually compound for a single operator, without the team-scale scaffolding."
+    },
+    {
+      "name": "squabble",
+      "source": "./squabble",
+      "description": "A panel of expert reviewers that argues over the design of a tool, model, spec, plan, or decision while it is still cheap to change — and hands back one record of what the panel agreed on, disputed, and withdrew."
     }
   ]
 }

@@ -26,6 +26,7 @@ That registers the marketplace. Then enable whichever plugins you want (`/plugin
 |---|---|---|
 | **project-mining** | Read your own history back | **`cc-explorer`** (the star) + an evidence-mining orchestrator + an attention-reflection report |
 | **engineering-loop** | Review code before you ship it | Parallel multi-persona code review, slimmed down for solo work |
+| **squabble** | Argue over a design before you build it | An eight-role review panel with a debate loop that provably ends |
 | **mcp-authoring** | Write MCP tools the model actually picks up | An opinionated reference on tool descriptions |
 
 > cc-explorer ships *inside* the project-mining plugin, but it's the headliner — enable that plugin for cc-explorer alone and ignore the rest if that's all you want.
@@ -81,6 +82,16 @@ What's left is the stuff that actually earns its weight:
 - **Curated research agents** — single-purpose system prompts for "scan the prior art before deciding" and "what are the current best practices for X," with the right epistemics baked in.
 
 See [engineering-loop/README.md](engineering-loop/README.md) for the full persona roster and the slimming ledger (what got dropped, demoted, or freed up vs. upstream), and [engineering-loop/NOTICE](engineering-loop/NOTICE) for provenance.
+
+---
+
+## squabble
+
+Code review has `/el:review`; **`/squabble`** is the same move one step earlier — before the thing exists, while a wrong choice is still cheap to change. Point it at a design: a tool you're about to build, a data model, a spec, a plan, a decision with real money on it.
+
+A moderator agent convenes a panel from eight roles — framer (is this even the right question?), skeptic (what's silently missing?), engineer (can this structure represent reality?), auditor (where did every number come from?), calibrator (which way do the estimates lean?), stress-tester (what breaks it?), wildcard (what option did nobody name?), historian (what does the track record say?). Each reviews independently, then they rebut each other in short bounded rounds until nobody has anything left to withdraw, dispute, or update.
+
+What you get back is a record, not a ruling: the panel's answer to *your question as you asked it*, findings grouped by how the panel left them (seconded / standing / disputed / withdrawn), disagreements presented as disagreements, and every report appended verbatim. The panel advises; you decide. Three design commitments keep it honest: your question is the scope boundary and topics you rule out stay out; the moderator is a relay and note-taker that never editorializes; and the debate terminates — rebuttal rounds allow no new topics, so the disagreement can only shrink, with a hard cap behind it.
 
 ---
 
