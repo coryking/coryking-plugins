@@ -6,12 +6,23 @@ description: >
   Triggers on: "search my chats", "what did that agent do", "trace that session", "look at my
   conversations", "check my chat history", "find where we talked about X", "which sessions used
   agents", "ask a past session", "convert a session into a subagent", "question that old conversation".
-  Do NOT use for behavioral evidence mining or evidence-document work — that's the project-mining skill.
+  Covers both direct tool use and dispatching the session-researcher agent for question-shaped
+  investigations. Do NOT use for behavioral evidence mining or evidence-document work — that's the
+  project-mining skill.
 ---
 
 # cc-explorer
 
 Explores Claude Code chat history stored as JSONL transcripts. MCP tools handle all interaction — call them directly, no CLI commands needed.
+
+## Delegate or DIY
+
+Two ways to use this toolset:
+
+- **Dispatch the `session-researcher` agent** (Agent tool, `subagent_type: "project-mining:session-researcher"`) when the ask is a *question* about past sessions — what happened, what was decided, why — and answering it means an investigation rather than a single lookup. The agent owns the full retrieval craft, including the decision this skill's tools make hard to get right inline: when to stop grepping and instead convert the source session and interview it. The investigation burns the agent's context; you get back a cited answer. Dispatch with the question, any known scope (project, session, timeframe), and the answer shape you need — nothing else; it finds its own way.
+- **Call the tools directly** (everything below) when you know where the answer lives and need one or two calls — a quick grep, reading a specific turn, listing sessions — or when you're the session-researcher.
+
+If you catch yourself three pattern-batches deep with nothing landing, that's the tell you're in investigation territory: hand the question to the agent instead of guessing more vocabulary.
 
 ## The conversation exploration tools
 
@@ -88,7 +99,7 @@ Tools that create, mutate, or remove transcripts — the one mutating axis in th
 - **`rewind_transcript`** — truncate a conversion artifact (session or subagent) **in place** at a chosen turn, discarding everything after, so it resumes from that earlier point. Eligible only for conversion artifacts — a real session or dispatched subagent is refused untouched. Destructive (the cut tail is gone); use `convert_session` first if you want to keep the original.
 - **`delete_conversions`** — remove subagent artifacts the converter created. Refuses everything else, including converted sessions. Permanent — no undo.
 
-> Cleanup has two paths. `delete_conversions` is the explicit one — call it when you're **done** interrogating to drop a fork *now* (by id, or omit ids to sweep this session's forks). It's the only way to remove a *fresh* fork you're finished with. As a safety net, any pristine (never-resumed) `session_to_subagent` fork that gets left behind is auto-reaped once it's older than ~24h, swept whenever a cc-explorer server in that project starts or stops — so an un-cleaned fork is a tidiness lag, not a permanent leak. Resumed forks are kept by both paths (they hold unique conversation that exists nowhere else).
+> Cleanup has two paths. `delete_conversions` is the explicit one — call it when you're **done** interrogating to drop a fork *now* (by id, or omit ids to sweep this session's forks). It's the only way to remove a *fresh* fork you're finished with. As a safety net, any pristine (never-resumed) `session_to_subagent` fork that gets left behind is auto-reaped once it's older than ~24h, swept whenever a cc-explorer server in that project starts or stops — so an un-cleaned fork is a tidiness lag, not a permanent leak. Resumed forks are kept by both paths — they hold unique conversation that exists nowhere else — with one escape hatch: `force=true` on an explicitly listed id deletes a resumed fork anyway, for the case where you made the fork, interviewed it (which counts as resuming it), and are done. `force` is rejected on the sweep form, so it can never blanket-delete work someone else may depend on.
 
 Convert a session to a subagent when the question needs the session itself, not excerpts from it: the reasoning behind a decision, a synthesis of the whole arc, a judgment call on evidence it hasn't seen, or a domain expert whose built-up context would be expensive to rebuild. Resume the new agent with `SendMessage(to: <created_id>)`; its reply is its final message; message it again to follow up. For facts, quotes, locations, and tool-call ground truth, stay on the read tools.
 
@@ -124,7 +135,9 @@ Each session carries a `worktree` field (absent for the main worktree, set to th
 
 **"What broke?" / "catalog every X failure"** → `survey_failures` for the shape of it, then `grep_session`/`grep_sessions` with `errors_only=true` to read the actual calls. Do **not** brainstorm candidate error strings and search for them — that guessing is exactly what this axis removes.
 
-**"Why did that session decide X? What did it learn?"** → `convert_session`, then `SendMessage` (needs `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` — see the conversion-tools prerequisite above). Grep finds what was said; a converted session can answer for what it meant.
+**"Why did that session decide X? What did it learn?"** → `convert_session`, then `SendMessage` (needs `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` — see the conversion-tools prerequisite above). Grep finds what was said; a converted session can answer for what it meant. Interview one-shot: batch every question into a single message (splitting re-bills the replayed context), then `delete_conversions` the artifact.
+
+**Any of the above, but it's an investigation** → dispatch `session-researcher` (see "Delegate or DIY" at the top) and let it drive the tools.
 
 ## Key workflows
 

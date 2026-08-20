@@ -17,7 +17,8 @@
     "./agents/output-analyst.md",
     "./agents/process-analyst.md",
     "./agents/mining-researcher.md",
-    "./agents/activity-analyst.md"
+    "./agents/activity-analyst.md",
+    "./agents/session-researcher.md"
   ],
   "skills": ["./skills/cc-explorer", "./skills/project-mining", "./skills/activity-reflection"],
   "mcpServers": {
