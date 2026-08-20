@@ -1,0 +1,26 @@
+{
+  "name": "squabble",
+  "version": "0.1.0",
+  "description": "Convene a panel of expert reviewers to argue over the design of a tool, model, spec, plan, or decision while it is still cheap to change. Each reviewer attacks from its own angle — the question itself, what's missing, whether it can be built, where the numbers came from — and you get back one synthesized set of findings and tradeoffs to decide with.",
+  "author": {
+    "name": "Cory King",
+    "email": "me@coryk.ing",
+    "url": "https://github.com/coryking"
+  },
+  "homepage": "https://github.com/coryking/coryking-plugins",
+  "repository": "https://github.com/coryking/coryking-plugins",
+  "license": "MIT",
+  "keywords": ["design-review", "adversarial-review", "premise-challenge", "subagents", "claude-code"],
+  "agents": [
+    "./agents/moderator.md",
+    "./agents/framer.md",
+    "./agents/skeptic.md",
+    "./agents/engineer.md",
+    "./agents/wildcard.md",
+    "./agents/auditor.md",
+    "./agents/calibrator.md",
+    "./agents/stress-tester.md",
+    "./agents/historian.md"
+  ],
+  "skills": ["./skills/squabble"]
+}
