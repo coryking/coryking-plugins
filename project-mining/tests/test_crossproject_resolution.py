@@ -16,6 +16,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 import cc_explorer.corpus as corpus_mod
+import cc_explorer.providers.claude as claude_provider_mod
 from cc_explorer.corpus import Corpus, SessionRef
 from cc_explorer.parser import ConversationRef
 from cc_explorer.resolve import resolve_unique_ref, resolve_unique_ref_or_none
@@ -126,7 +127,7 @@ def test_discover_dedups_by_session_id(monkeypatch):
         corpus_mod, "resolve_projects", lambda projects=None: ["/repo", "/repo/wt"]
     )
     monkeypatch.setattr(
-        corpus_mod,
+        claude_provider_mod,
         "load_conversations",
         lambda p: {PrefixId(ID_A): ConversationRef(path=Path(f"/tmp/{ID_A}.jsonl"), worktree=None)},
     )
@@ -146,7 +147,7 @@ def test_narrow_to_ids_locates_holding_session(monkeypatch):
         "/a": {PrefixId(ID_A): ConversationRef(path=Path(f"/tmp/{ID_A}.jsonl"), worktree=None)},
         "/b": {PrefixId(ID_B): ConversationRef(path=Path(f"/tmp/{ID_B}.jsonl"), worktree=None)},
     }
-    monkeypatch.setattr(corpus_mod, "load_conversations", lambda p: convs[p])
+    monkeypatch.setattr(claude_provider_mod, "load_conversations", lambda p: convs[p])
 
     corpus = Corpus.discover(None)
     # Query by 8-char prefix of ID_A → only /a's session matches.

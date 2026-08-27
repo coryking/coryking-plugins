@@ -61,7 +61,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
 # patterns that happen to parse as JSON, and unwrapping them silently searches
 # for something the caller never asked for. A regex string is ALWAYS one pattern.
 ID_LIST_PARAMS: frozenset[str] = frozenset(
-    {"projects", "sessions", "ids", "agent_ids"}
+    {"projects", "sessions", "ids", "agent_ids", "harnesses"}
 )
 
 

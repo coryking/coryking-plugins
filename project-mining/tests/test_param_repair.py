@@ -277,6 +277,7 @@ class TestNoAliasLeakage:
         assert set(SCHEMAS["search_projects"]["properties"]) == {
             "patterns",
             "projects",
+            "harnesses",
             "role",
             "after",
             "before",
@@ -289,6 +290,7 @@ class TestNoAliasLeakage:
             "session",
             "patterns",
             "projects",
+            "harnesses",
             "context",
             "role",
             "limit",

@@ -1,6 +1,6 @@
 """MCP server wrapping the cc_explorer library.
 
-Exposes Claude Code chat log exploration as MCP tools via FastMCP.
+Exposes Claude Code and Codex transcript exploration as MCP tools via FastMCP.
 Most tools are read-only and return typed Pydantic response models; the
 conversion tools (convert_session, rewind_transcript, delete_conversions)
 write/mutate/delete transcript copies. FastMCP auto-generates output schemas from
@@ -51,6 +51,7 @@ from .formatting import matches_id
 from .models import FailureKind, TranscriptStats, parse_hide, parse_kinds
 from .param_repair import argument_error_message, repair_arguments
 from .parser import load_conversations, load_transcript
+from .providers import Harness
 from .resolve import (
     resolve_artifacts,
     resolve_unique_ref,
@@ -101,14 +102,14 @@ from .subagents import (
 )
 
 _INSTRUCTIONS = """\
-cc-explorer explores Claude Code chat history — your past conversations and the
-subagents they spawned — stored as per-project JSONL transcripts. All tools are
-read-only. Projects are selected with `projects` (paths or bare names; git
+cc-explorer explores Claude Code and Codex transcript history stored as local
+JSONL files. Search/list/read tools span both harnesses by default; pass
+`harnesses=["claude"]` or `harnesses=["codex"]` to narrow them. Projects are
+selected with `projects` (paths or bare names; git
 worktrees are flattened into one project). Omit `projects` to search across ALL
 projects — the recall path when you remember a conversation but not where it
-happened. The search corpus is complete: it includes subagent bodies, not just
-the main transcript, so an agent's own tool calls / thinking are searchable too
-(matches name the `agent` they came from).
+happened. Every result names its harness. Claude search includes nested subagent
+bodies; Codex subagents are independent rollout sessions linked by metadata.
 
 1. Conversations — find and read what was discussed.
    When you don't know the project, start with search_projects (omit `projects`)
@@ -120,7 +121,7 @@ the main transcript, so an agent's own tool calls / thinking are searchable too
    that is a teammate DM (orchestration, not the human) renders labeled as
    `[teammate: sender -> recipient] ...` rather than raw <teammate-message> XML.
 
-2. Agent forensics — see what a session's subagents actually did.
+2. Claude agent forensics — see what a session's subagents actually did.
    Start from list_project_sessions(min_agents=1) to find sessions that spawned
    agents, then list_session_agents to see every agent the session ran (workflow
    ones included), get_agent_detail for one agent's prompt / result / tool-trace,
@@ -420,9 +421,20 @@ ProjectsParam = Annotated[
     ),
 ]
 
+HarnessesParam = Annotated[
+    list[str] | None,
+    Field(
+        description=(
+            "Transcript harnesses to include: 'claude' and/or 'codex'. "
+            "Omit to search every supported harness."
+        )
+    ),
+]
+
 
 def _load_all_sessions(
     projects: list[str] | None,
+    harnesses: list[str] | None = None,
 ) -> tuple[list[SessionInfo], list[str]]:
     """Load sessions across the selected projects (omit/empty ⇒ all projects).
 
@@ -433,19 +445,23 @@ def _load_all_sessions(
     narrow to refs first and promote only what they need.
     """
     proj_paths = resolve_projects(projects)
-    sessions = promote_refs(Corpus.discover(proj_paths).refs)
+    sessions = promote_refs(Corpus.discover(proj_paths, harnesses=harnesses).refs)
     sort_sessions_newest_first(sessions)
     return sessions, proj_paths
 
 
-def _resolve_session(session: str, projects: list[str] | None) -> SessionInfo:
+def _resolve_session(
+    session: str,
+    projects: list[str] | None,
+    harnesses: list[str] | None = None,
+) -> SessionInfo:
     """Resolve a session id/prefix and promote exactly that one session.
 
     The common path for session-keyed tools: discovery is filename-only
     (Corpus.discover + narrow_to_ids — no transcript parse), ambiguity raises
     with the candidate projects listed, and only the resolved ref is parsed.
     """
-    corpus = Corpus.discover(projects).narrow_to_ids([session])
+    corpus = Corpus.discover(projects, harnesses=harnesses).narrow_to_ids([session])
     ref = resolve_unique_ref(corpus.refs, session)
     info = SessionInfo.load(ref)
     if info is None:
@@ -507,7 +523,7 @@ def _filter_by_date(
 
 
 def _current_session_id() -> str | None:
-    """The Claude Code session that launched THIS MCP server, if known.
+    """The Claude Code or Codex session that launched this MCP server, if known.
 
     Claude Code spawns a dedicated stdio MCP server per session and injects
     CLAUDE_CODE_SESSION_ID into that process's environment — undocumented but
@@ -523,6 +539,16 @@ def _current_session_id() -> str | None:
     in-process session switch (`/clear`, resume) — a low-harm miss, never a
     wrong result.
     """
+    return (
+        os.environ.get("CLAUDE_CODE_SESSION_ID")
+        or os.environ.get("CODEX_THREAD_ID")
+        or os.environ.get("CODEX_SESSION_ID")
+        or None
+    )
+
+
+def _current_claude_session_id() -> str | None:
+    """Claude caller identity for Claude-only conversion lifecycle tools."""
     return os.environ.get("CLAUDE_CODE_SESSION_ID") or None
 
 
@@ -616,7 +642,7 @@ def _validate_turn_id(turn: str) -> None:
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
-def list_projects() -> ProjectListResponse:
+def list_projects(harnesses: HarnessesParam = None) -> ProjectListResponse:
     """List every project cc-explorer can see, one row per repo (worktrees flattened).
 
     The cross-project orientation step — like `ls` over `~/.claude/projects`, but
@@ -626,9 +652,9 @@ def list_projects() -> ProjectListResponse:
     first. Use this when you're not sure which project holds a conversation, then
     search_projects to find the phrase or list_project_sessions to drill in.
     """
-    projects = discover_projects()
+    projects = discover_projects(harnesses)
     if not projects:
-        raise ToolError("No projects found under ~/.claude/projects")
+        raise ToolError("No Claude Code or Codex transcript projects found")
     return ProjectListResponse.from_projects(projects)
 
 
@@ -640,6 +666,7 @@ def list_project_sessions(
             description="Projects to list sessions for — paths or bare names (worktrees flattened). Omit for the CURRENT project (CWD); pass projects to list those instead. (To enumerate projects themselves, use list_projects.)"
         ),
     ] = None,
+    harnesses: HarnessesParam = None,
     min_messages: Annotated[
         int,
         Field(description="Only sessions with at least N messages."),
@@ -670,7 +697,7 @@ def list_project_sessions(
     Defaults to the CURRENT project (CWD). Pass `projects` to list one or more named projects instead; to enumerate the projects themselves use list_projects, and to find a conversation when you don't know its project use search_projects.
     """
     proj_sel = projects if projects else [resolve_project(None)]
-    sessions, _ = _load_all_sessions(proj_sel)
+    sessions, _ = _load_all_sessions(proj_sel, harnesses)
     if not sessions:
         raise ToolError(f"No conversations found for {', '.join(proj_sel)}")
 
@@ -694,6 +721,7 @@ def search_projects(
         ),
     ],
     projects: ProjectsParam = None,
+    harnesses: HarnessesParam = None,
     role: Annotated[
         ConversationRole,
         Field(
@@ -734,7 +762,7 @@ def search_projects(
     Set errors_only=true to search only FAILED tool calls — the pattern then narrows the topic instead of having to guess the error's wording.
     """
     proj_paths = resolve_projects(projects)
-    corpus = Corpus.discover(proj_paths)
+    corpus = Corpus.discover(proj_paths, harnesses=harnesses)
     if not corpus.refs:
         raise ToolError(f"No conversations found for: {', '.join(proj_paths) or '(no projects)'}")
 
@@ -810,6 +838,7 @@ def grep_session(
         ),
     ],
     projects: ProjectsParam = None,
+    harnesses: HarnessesParam = None,
     context: Annotated[
         int,
         Field(
@@ -862,7 +891,7 @@ def grep_session(
 
     hide_set = _parse_hide_or_raise(hide)
     _check_errors_only(errors_only, hide_set)
-    target = _resolve_session(session, projects)
+    target = _resolve_session(session, projects, harnesses)
 
     base_types = ENTRY_TYPE_MAP[role]
 
@@ -894,6 +923,7 @@ def grep_session(
         hide=hide_set,
         worktree=target.worktree,
         project=target.project_path,
+        harness=target.harness,
     )
 
 
@@ -912,6 +942,7 @@ def grep_sessions(
         ),
     ],
     projects: ProjectsParam = None,
+    harnesses: HarnessesParam = None,
     context: Annotated[
         int,
         Field(
@@ -964,7 +995,7 @@ def grep_sessions(
 
     hide_set = _parse_hide_or_raise(hide)
     _check_errors_only(errors_only, hide_set)
-    corpus = Corpus.discover(projects).narrow_to_ids(sessions)
+    corpus = Corpus.discover(projects, harnesses=harnesses).narrow_to_ids(sessions)
 
     # Resolve each session prefix to a ref, preserving input order, and promote
     # only the resolved refs. Ambiguous prefixes (matching >1 distinct session
@@ -1009,6 +1040,7 @@ def grep_sessions(
                 hide=hide_set,
                 worktree=sess.worktree,
                 project=sess.project_path,
+                harness=sess.harness,
             )
         )
 
@@ -1053,6 +1085,7 @@ def read_turn(
         ),
     ] = None,
     projects: ProjectsParam = None,
+    harnesses: HarnessesParam = None,
     context: Annotated[
         int,
         Field(
@@ -1086,7 +1119,7 @@ def read_turn(
     target_session_id: str | None = None
     if session:
         # Session known → resolve and promote just that session.
-        target = _resolve_session(session, projects)
+        target = _resolve_session(session, projects, harnesses)
         sessions = [target]
         target_session_id = target.session_id
     else:
@@ -1094,10 +1127,20 @@ def read_turn(
         # file(s) that contain the turn, so the prefilter finds the holding
         # session(s) without parsing the corpus. Turn ids are hex+hyphens; the
         # escaped literal is always prefilter-safe.
-        corpus = Corpus.discover(projects)
+        corpus = Corpus.discover(projects, harnesses=harnesses)
         if not corpus.refs:
             raise ToolError("No conversations found")
         candidates = corpus.candidate_refs([re.escape(turn)])
+        # Codex response items do not carry UUID turn ids.  The provider creates
+        # stable UUIDv5 ids from their item identity, so those ids cannot hit the
+        # raw-byte prefilter; include Codex refs for the typed matcher to resolve.
+        candidate_keys = {(ref.harness, ref.session_id.full) for ref in candidates}
+        candidates.extend(
+            ref
+            for ref in corpus.refs
+            if ref.harness is Harness.codex
+            and (ref.harness, ref.session_id.full) not in candidate_keys
+        )
         sessions = promote_refs(candidates)
         if not sessions:
             raise ToolError(f"Turn {turn} not found")
@@ -1123,6 +1166,7 @@ def browse_session(
         ),
     ],
     projects: ProjectsParam = None,
+    harnesses: HarnessesParam = None,
     position: Annotated[
         str,
         Field(
@@ -1178,22 +1222,26 @@ def browse_session(
     # (rewind_transcript points users here to read its cut turn). Both paths
     # are filename-only — browsing needs the transcript path and identity
     # fields, never a promoted SessionInfo.
-    corpus = Corpus.discover(projects)
+    corpus = Corpus.discover(projects, harnesses=harnesses)
     ref = resolve_unique_ref_or_none(corpus.narrow_to_ids([session]).refs, session)
     if ref is not None:
         browse_id, browse_path = ref.session_id, ref.path
         project_path, worktree = ref.project_path, ref.worktree
+        browse_source = ref
+        browse_harness = ref.harness
     else:
         artifact = _resolve_browsable_artifact(session, corpus)
         if artifact is None:
             raise ToolError(f"No session matching: {session}")
         browse_id, browse_path, project_path, worktree = artifact
+        browse_source = browse_path
+        browse_harness = Harness.claude
 
     base_types = ENTRY_TYPE_MAP[role]
     entry_types = conversation_types_for(hide_set, base_types)
 
     entries, total = browse_session_turns(
-        browse_path, position, turns, anchor_turn=turn, entry_types=entry_types
+        browse_source, position, turns, anchor_turn=turn, entry_types=entry_types
     )
 
     if not entries:
@@ -1211,6 +1259,7 @@ def browse_session(
         hide=hide_set,
         worktree=worktree,
         project=project_path,
+        harness=browse_harness,
     )
 
 
@@ -1678,7 +1727,7 @@ def convert_session(
     if direction == "session_to_subagent":
         src = _resolve_session_ref_for_convert(src_id, src_project)
 
-        parent_id = dest_parent_session or _current_session_id()
+        parent_id = dest_parent_session or _current_claude_session_id()
         if not parent_id:
             raise ToolError(
                 "dest_parent_session is required: the calling session is unknown "
@@ -1914,7 +1963,7 @@ def delete_conversions(
 
     if ids is None:
         # Sweep mode: every conversion subagent under the calling session only.
-        current = _current_session_id()
+        current = _current_claude_session_id()
         if not current:
             raise ToolError(
                 "Cannot sweep: the calling session is unknown (CLAUDE_CODE_SESSION_ID "

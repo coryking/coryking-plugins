@@ -1,7 +1,7 @@
 ---
 name: cc-explorer
 description: >
-  Explore Claude Code chat history via MCP tools. Use when the user wants to search conversations,
+  Explore Claude Code and Codex transcript history via MCP tools. Use when the user wants to search conversations,
   find what was discussed, trace subagent execution, inspect what an agent did, or browse chat logs.
   Triggers on: "search my chats", "what did that agent do", "trace that session", "look at my
   conversations", "check my chat history", "find where we talked about X", "which sessions used
@@ -13,7 +13,7 @@ description: >
 
 # cc-explorer
 
-Explores Claude Code chat history stored as JSONL transcripts. MCP tools handle all interaction — call them directly, no CLI commands needed.
+Explores Claude Code and Codex history stored as local JSONL transcripts. MCP tools handle all interaction — call them directly, no CLI commands needed. Search/list/read tools span both harnesses by default; pass `harnesses=["claude"]` or `harnesses=["codex"]` to narrow them. Conversion and agent-forensics tools remain Claude-specific.
 
 ## Delegate or DIY
 
@@ -38,7 +38,7 @@ Tools for exploring chat content, each operating at a different scope — like `
 | `read_turn` | turn | Read — full fidelity text around a specific moment |
 | `get_activity_timeline` | projects (all by default) | Reconstruct — cross-project attention over a time window (a bucket_minutes-grain grid, default 5 min, of turn counts + pre-computed rollups) |
 
-Project selection is uniform: every tool takes a `projects` list (paths or bare names). Omit it and the search/locate tools sweep **all** projects — the recall path when you remember a conversation but not where it happened. `list_project_sessions` is the exception: it defaults to the current project (use `list_projects` for the cross-project overview). Each result carries its `project`, so pass that back to scope follow-ups.
+Project selection is uniform: every tool takes a `projects` list (paths or bare names). Omit it and the search/locate tools sweep **all** projects — the recall path when you remember a conversation but not where it happened. `list_project_sessions` is the exception: it defaults to the current project (use `list_projects` for the cross-project overview). Each result carries its `project` and `harness`, so pass those back to scope follow-ups when useful.
 
 **The search corpus is complete.** Search reads subagent transcripts too — `<sessionId>/subagents/agent-*.jsonl`, including workflow-orchestrated orphans — not just the main session. A subagent's own tool calls, thinking, and Bash are searchable, and any match that came from a subagent body names the `agent` it lives in (drill in with `get_agent_detail`).
 

@@ -38,7 +38,8 @@ from typing import Optional, Protocol, Sequence
 
 import orjson
 
-from .parser import load_conversations
+from .providers import Harness, parse_harnesses, providers_for
+from .providers.codex import CodexProvider
 from .subagents import resolve_subagents_dir
 from .utils import PrefixId
 
@@ -180,7 +181,7 @@ def _cwd_from_transcripts(jsonls: list[Path], scan_lines: int = 20) -> Optional[
     return None
 
 
-def discover_projects() -> list[ProjectInfo]:
+def discover_projects(harnesses: Optional[list[str]] = None) -> list[ProjectInfo]:
     """Enumerate every project under ~/.claude/projects, flattening worktrees.
 
     Each encoded dir is mapped to its real cwd (read from a transcript), then
@@ -198,11 +199,15 @@ def discover_projects() -> list[ProjectInfo]:
         _get_worktree_paths,
     )
 
+    enabled = parse_harnesses(harnesses)
     projects_dir = _get_projects_dir()
-    try:
-        encoded_dirs = [d for d in projects_dir.iterdir() if d.is_dir()]
-    except OSError:
-        return []
+    if Harness.claude in enabled:
+        try:
+            encoded_dirs = [d for d in projects_dir.iterdir() if d.is_dir()]
+        except OSError:
+            encoded_dirs = []
+    else:
+        encoded_dirs = []
 
     # cwd → main-worktree path, cached. Siblings from one `git worktree list`
     # are prepopulated so each repo shells out at most once.
@@ -256,6 +261,23 @@ def discover_projects() -> list[ProjectInfo]:
             if proj.last_active is None or mtime > proj.last_active:
                 proj.last_active = mtime
 
+    # Codex stores rollouts in one date-partitioned tree rather than one encoded
+    # directory per project.  Its session metadata carries the authoritative cwd.
+    codex_refs = CodexProvider().discover_sessions() if Harness.codex in enabled else []
+    for ref in codex_refs:
+        repo = main_worktree(ref.project_path)
+        proj = pooled.get(repo)
+        if proj is None:
+            proj = ProjectInfo(path=repo, name=Path(repo).name)
+            pooled[repo] = proj
+        proj.session_count += 1
+        try:
+            mtime = datetime.fromtimestamp(ref.path.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            continue
+        if proj.last_active is None or mtime > proj.last_active:
+            proj.last_active = mtime
+
     result = list(pooled.values())
     result.sort(key=lambda p: p.last_active or EPOCH, reverse=True)
     return result
@@ -276,6 +298,8 @@ class TranscriptSource:
 
     agent_id: Optional[PrefixId]
     path: Path
+    harness: Harness = Harness.claude
+    paths: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -292,6 +316,8 @@ class SessionRef:
     path: Path
     project_path: str
     worktree: Optional[str] = None
+    harness: Harness = Harness.claude
+    paths: tuple[Path, ...] = ()
 
     def transcript_files(self) -> list[Path]:
         """The main transcript plus every on-disk subagent transcript.
@@ -300,6 +326,8 @@ class SessionRef:
         raw-byte prefilter, which may over-include; conversion artifacts are
         excluded later by the matcher of record, not here).
         """
+        if self.harness is Harness.codex:
+            return list(self.paths or (self.path,))
         files = [self.path]
         subdir = resolve_subagents_dir(self.path)
         if subdir.is_dir():
@@ -314,7 +342,11 @@ class Corpus:
     refs: list[SessionRef]
 
     @classmethod
-    def discover(cls, projects: Optional[list[str]] = None) -> "Corpus":
+    def discover(
+        cls,
+        projects: Optional[list[str]] = None,
+        harnesses: Optional[list[str]] = None,
+    ) -> "Corpus":
         """Every session across the selected projects (omit/empty ⇒ all projects).
 
         Pools across git worktrees per project (load_conversations) and
@@ -322,19 +354,22 @@ class Corpus:
         where an explicit `projects` list names two worktrees of the same repo.
         """
         refs: list[SessionRef] = []
-        seen: set[str] = set()
-        for proj in resolve_projects(projects):
-            for sid, cref in load_conversations(proj).items():
-                sid = sid if isinstance(sid, PrefixId) else PrefixId(sid)
-                if sid.full in seen:
+        selected_projects = resolve_projects(projects)
+        seen: set[tuple[Harness, str]] = set()
+        for provider in providers_for(harnesses):
+            for provider_ref in provider.discover_sessions(selected_projects):
+                key = (provider.harness, provider_ref.session_id.full)
+                if key in seen:
                     continue
-                seen.add(sid.full)
+                seen.add(key)
                 refs.append(
                     SessionRef(
-                        session_id=sid,
-                        path=cref.path,
-                        project_path=proj,
-                        worktree=cref.worktree,
+                        session_id=provider_ref.session_id,
+                        path=provider_ref.path,
+                        paths=provider_ref.paths,
+                        project_path=provider_ref.project_path,
+                        worktree=provider_ref.worktree,
+                        harness=provider.harness,
                     )
                 )
         return cls(refs)

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from .formatting import format_entry_line, format_session_date, render_trace
+from .providers import Harness
 from .utils import PrefixId
 
 if TYPE_CHECKING:
@@ -50,6 +51,7 @@ class SessionSummary(SparseModel):
     """Summary of a single conversation session."""
 
     session: PrefixId = Field(description="Session identifier — pass this back as the `session` param to other tools.")
+    harness: Harness = Field(description="Harness that wrote this transcript: claude or codex.")
     project: str | None = Field(default=None, description="Project this session belongs to — pass to the `projects` param to scope other tools to it. Useful when results span projects.")
     date: datetime | None = Field(default=None, description="Timestamp of first message.")
     title: str | None = Field(default=None, description="Auto-generated title from first human message.")
@@ -83,6 +85,7 @@ class SessionSummary(SparseModel):
     def from_session_info(cls, s: SessionInfo, is_current: bool = False) -> SessionSummary:
         return cls(
             session=s.session_id,
+            harness=s.harness,
             project=s.project_path,
             date=s.first_timestamp,
             title=s.title,
@@ -184,6 +187,7 @@ class SearchHitExample(SparseModel):
     """
 
     project: str = Field(description="Project the hit lives in — pass to the `projects` param of other tools to scope to it.")
+    harness: Harness = Field(description="Harness that wrote the matching transcript.")
     session: PrefixId = Field(description="Session containing the hit.")
     date: str | None = Field(default=None, description="Session date (YYYY-MM-DD).")
     agent: PrefixId | None = Field(
@@ -253,6 +257,7 @@ class SearchProjectsResponse(SparseModel):
             examples = [
                 SearchHitExample(
                     project=r.session.project_path or "",
+                    harness=r.session.harness,
                     session=PrefixId(r.session.session_id),
                     date=format_session_date(r.session.first_timestamp) or None,
                     agent=r.agent_id,
@@ -342,6 +347,7 @@ class GrepSessionResponse(SparseModel):
     """
 
     session: PrefixId = Field(description="Session identifier.")
+    harness: Harness = Field(description="Harness that wrote this transcript.")
     project: str | None = Field(
         default=None,
         description="Project this session belongs to. Present when the session was located across projects.",
@@ -363,6 +369,7 @@ class GrepSessionResponse(SparseModel):
         hide: frozenset[str] = frozenset(),
         worktree: str | None = None,
         project: str | None = None,
+        harness: Harness = Harness.claude,
     ) -> GrepSessionResponse:
         """Build response from a list of (pattern, matches, total_hits) tuples."""
 
@@ -408,6 +415,7 @@ class GrepSessionResponse(SparseModel):
         pattern_results.sort(key=lambda p: p.hits, reverse=True)
         return cls(
             session=PrefixId(session_id),
+            harness=harness,
             project=project,
             worktree=worktree,
             patterns=pattern_results,
@@ -442,6 +450,7 @@ class ReadTurnResponse(SparseModel):
     """A specific moment in a conversation at full fidelity."""
 
     session: PrefixId | None = Field(default=None, description="Session identifier.")
+    harness: Harness | None = Field(default=None, description="Harness that wrote this transcript.")
     project: str | None = Field(
         default=None,
         description="Project this session belongs to. Present when the turn was located across projects.",
@@ -474,6 +483,7 @@ class ReadTurnResponse(SparseModel):
 
         return cls(
             session=PrefixId(session_info.session_id) if session_info else None,
+            harness=session_info.harness if session_info else None,
             project=session_info.project_path if session_info else None,
             worktree=session_info.worktree if session_info else None,
             agent=agent_id,
@@ -491,6 +501,7 @@ class BrowseSessionResponse(SparseModel):
     """First or last N conversation turns from a session."""
 
     session: PrefixId = Field(description="Session identifier.")
+    harness: Harness = Field(description="Harness that wrote this transcript.")
     project: str | None = Field(
         default=None,
         description="Project this session belongs to. Present when the session was located across projects.",
@@ -519,10 +530,12 @@ class BrowseSessionResponse(SparseModel):
         hide: frozenset[str] = frozenset(),
         worktree: str | None = None,
         project: str | None = None,
+        harness: Harness = Harness.claude,
     ) -> BrowseSessionResponse:
         chats = [format_entry_line(e, truncate=truncate, hide=hide) for e in entries]
         return cls(
             session=PrefixId(session_id),
+            harness=harness,
             project=project,
             worktree=worktree,
             position=position,

@@ -5,6 +5,8 @@ interface uses session IDs (UUID from filename) and turn UUIDs (the uuid
 field on each entry).
 """
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -31,6 +33,7 @@ from .corpus import EPOCH as _EPOCH, Corpus, SessionRef, TranscriptSource
 from .formatting import _match_example
 from .conversion import read_provenance
 from .parser import load_transcript
+from .providers import Harness, provider_for
 from .subagents import collect_agent_files, discover_subagents, resolve_subagents_dir
 from .utils import PrefixId, smart_truncate
 
@@ -57,7 +60,9 @@ def sort_sessions_newest_first(sessions: list["SessionInfo"]) -> None:
 # =============================================================================
 
 
-def session_sources(transcript_path: Path) -> list["TranscriptSource"]:
+def session_sources(
+    session: Path | SessionInfo | SessionRef,
+) -> list["TranscriptSource"]:
     """Expand a session's transcript path into its whole searchable corpus.
 
     Takes a bare path, not a SessionInfo: the expansion is a pure filesystem
@@ -79,9 +84,22 @@ def session_sources(transcript_path: Path) -> list["TranscriptSource"]:
     them would double-count and surface synthetic copies. They remain visible in
     list_session_agents (labeled), just not searched.
     """
-    sources: list[TranscriptSource] = [
-        TranscriptSource(agent_id=None, path=transcript_path)
-    ]
+    if isinstance(session, Path):
+        transcript_path = session
+        harness = Harness.claude
+        paths = (session,)
+    else:
+        transcript_path = session.path
+        harness = session.harness
+        paths = session.paths or (session.path,)
+    sources: list[TranscriptSource] = [TranscriptSource(
+        agent_id=None,
+        path=transcript_path,
+        harness=harness,
+        paths=paths,
+    )]
+    if harness is Harness.codex:
+        return sources
     for af in collect_agent_files(resolve_subagents_dir(transcript_path)):
         if af.is_conversion_artifact:
             continue
@@ -92,6 +110,13 @@ def session_sources(transcript_path: Path) -> list["TranscriptSource"]:
             )
         )
     return sources
+
+
+def load_source_transcript(source: TranscriptSource) -> list[TranscriptEntry]:
+    """Parse one logical source through the harness that owns its wire format."""
+    return provider_for(source.harness).load_transcript(
+        source.paths or (source.path,)
+    )
 
 
 
@@ -179,6 +204,9 @@ class SessionInfo:
     # artifacts from search/triage (same rationale as agent-shaped skip) while
     # still listing them in session list responses (labeled).
     is_conversion_artifact: bool = False
+    # Harness provenance and the physical files composing this logical session.
+    harness: Harness = Harness.claude
+    paths: tuple[Path, ...] = ()
 
     @cached_property
     def agents_present(self) -> int:
@@ -191,6 +219,10 @@ class SessionInfo:
         (list_project_sessions) ever pay for it. Conversion artifacts are
         excluded — they are copies, not dispatched runs.
         """
+        if self.harness is Harness.codex:
+            # Codex child sessions are independent rollouts linked by metadata,
+            # not Claude-style nested transcript files.
+            return 0
         try:
             return sum(
                 1
@@ -212,7 +244,9 @@ class SessionInfo:
         explicit id selected.
         """
         try:
-            entries = load_transcript(ref.path)
+            entries = provider_for(ref.harness).load_transcript(
+                ref.paths or (ref.path,)
+            )
         except OSError:
             return None
         if not entries:
@@ -274,6 +308,8 @@ class SessionInfo:
             project_path=ref.project_path,
             # Cheap head-scan: is this session a conversion artifact?
             is_conversion_artifact=read_provenance(ref.path) is not None,
+            harness=ref.harness,
+            paths=ref.paths or (ref.path,),
         )
 
 
@@ -584,8 +620,8 @@ def triage(
         count = 0
         first_example = ""
         first_agent_id: Optional[PrefixId] = None
-        for source in session_sources(session.path):
-            entries = load_transcript(source.path)
+        for source in session_sources(session):
+            entries = load_source_transcript(source)
             for entry in entries:
                 if not _is_searchable(entry, search_types):
                     continue
@@ -636,8 +672,8 @@ def triage_multi(
         if session.is_conversion_artifact:
             continue
         # Search the whole corpus: main transcript + every subagent body (#22).
-        for source in session_sources(session.path):
-            entries = load_transcript(source.path)
+        for source in session_sources(session):
+            entries = load_source_transcript(source)
             for entry in entries:
                 if not _is_searchable(entry, search_types):
                     continue
@@ -706,8 +742,8 @@ def search_multi(
 
         # Walk the whole corpus: main transcript + every subagent body (#22).
         # Context is drawn from within the same source the match came from.
-        for source in session_sources(session.path):
-            entries = load_transcript(source.path)
+        for source in session_sources(session):
+            entries = load_source_transcript(source)
             for idx, entry in enumerate(entries):
                 if not _is_searchable(entry, search_types):
                     continue
@@ -771,8 +807,8 @@ def search(
             continue
         session_matches: list[MatchHit] = []
 
-        for source in session_sources(session.path):
-            entries = load_transcript(source.path)
+        for source in session_sources(session):
+            entries = load_source_transcript(source)
             for idx, entry in enumerate(entries):
                 if not _is_searchable(entry, search_types):
                     continue
@@ -855,8 +891,8 @@ def get_turn_context(
         target_sessions = [s for s in sessions if s.session_id == session_id]
 
     for session in target_sessions:
-        for source in session_sources(session.path):
-            entries = load_transcript(source.path)
+        for source in session_sources(session):
+            entries = load_source_transcript(source)
             for idx, entry in enumerate(entries):
                 if not isinstance(entry, BaseTranscriptEntry):
                     continue
@@ -893,7 +929,7 @@ def get_turn_context(
 
 
 def browse_session_turns(
-    transcript_path: Path,
+    transcript: Path | SessionRef | SessionInfo,
     position: str,
     turns: int = 10,
     anchor_turn: str | None = None,
@@ -907,7 +943,10 @@ def browse_session_turns(
     If anchor_turn is set, tail reads forward from anchor, head reads up to anchor.
     Returns (sliced_entries, total_conversation_turns).
     """
-    entries = load_transcript(transcript_path)
+    if isinstance(transcript, Path):
+        entries = load_transcript(transcript)
+    else:
+        entries = load_source_transcript(session_sources(transcript)[0])
     conversation = [e for e in entries if isinstance(e, entry_types)]
     total = len(conversation)
 

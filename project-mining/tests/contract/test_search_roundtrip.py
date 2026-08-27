@@ -75,7 +75,7 @@ class TestSearchToReadTurnContract:
     @pytest.fixture(autouse=True)
     def _patch_load(self):
         entries = _make_entries()
-        with patch("cc_explorer.search.load_transcript", return_value=entries):
+        with patch("cc_explorer.providers.claude.load_transcript", return_value=entries):
             yield
 
     @pytest.fixture

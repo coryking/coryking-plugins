@@ -61,7 +61,7 @@ ENTRIES_B = [_human("comment_count shows zero for all posts", uuid="22222222-aaa
 
 def _patch_entries(mapping):
     return patch(
-        "cc_explorer.search.load_transcript",
+        "cc_explorer.providers.claude.load_transcript",
         side_effect=lambda path: mapping.get(str(path), []),
     )
 

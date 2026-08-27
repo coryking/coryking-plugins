@@ -70,7 +70,9 @@ def patch_session_corpus(sessions):
     by_path = {s.path: s for s in sessions}
 
     with patch.object(
-        Corpus, "discover", classmethod(lambda cls, projects=None: Corpus(list(refs)))
+        Corpus,
+        "discover",
+        classmethod(lambda cls, projects=None, harnesses=None: Corpus(list(refs))),
     ), patch.object(
         SessionInfo, "load", classmethod(lambda cls, ref: by_path.get(ref.path))
     ):

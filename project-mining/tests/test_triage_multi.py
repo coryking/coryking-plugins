@@ -82,7 +82,7 @@ class TestTriageMulti:
             "a.jsonl": ENTRIES_A,
             "b.jsonl": ENTRIES_B,
         })
-        with patch("cc_explorer.search.load_transcript", side_effect=side_effect):
+        with patch("cc_explorer.providers.claude.load_transcript", side_effect=side_effect):
             yield
 
     @pytest.fixture
@@ -144,7 +144,7 @@ class TestTriageMulti:
 
     def test_loads_transcript_once_per_session(self, two_sessions):
         """With N patterns and M sessions, load_transcript is called M times, not N*M."""
-        with patch("cc_explorer.search.load_transcript") as mock_load:
+        with patch("cc_explorer.providers.claude.load_transcript") as mock_load:
             mock_load.side_effect = _load_transcript_side_effect({
                 "a.jsonl": ENTRIES_A,
                 "b.jsonl": ENTRIES_B,

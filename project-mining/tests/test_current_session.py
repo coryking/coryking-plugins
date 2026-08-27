@@ -46,11 +46,15 @@ def test_current_session_id_reads_env(monkeypatch):
 
 def test_current_session_id_absent_is_none(monkeypatch):
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.delenv("CODEX_SESSION_ID", raising=False)
     assert _current_session_id() is None
 
 
 def test_current_session_id_empty_is_none(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "")
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.delenv("CODEX_SESSION_ID", raising=False)
     assert _current_session_id() is None
 
 

@@ -104,7 +104,7 @@ def _human(text: str) -> HumanEntry:
 
 def _patch_entries(entries):
     return patch(
-        "cc_explorer.search.load_transcript",
+        "cc_explorer.providers.claude.load_transcript",
         side_effect=lambda path: entries if str(path) == "a.jsonl" else [],
     )
 

@@ -69,8 +69,8 @@ def _patch_conversations_and_transcripts(sessions: dict[str, list]):
         return sessions.get(sid, [])
 
     return [
-        patch("cc_explorer.corpus.load_conversations", return_value=conversations),
-        patch("cc_explorer.search.load_transcript", side_effect=_load_transcript),
+        patch("cc_explorer.providers.claude.load_conversations", return_value=conversations),
+        patch("cc_explorer.providers.claude.load_transcript", side_effect=_load_transcript),
     ]
 
 

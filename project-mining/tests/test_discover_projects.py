@@ -10,11 +10,18 @@ _canonicalize_path) are patched so behavior can be verified without a real
 """
 
 import json
+import pytest
 from pathlib import Path
 from unittest.mock import patch
 
 import cc_explorer._claude_paths as paths
 from cc_explorer.corpus import discover_projects, resolve_projects
+
+
+@pytest.fixture(autouse=True)
+def _no_live_codex_corpus():
+    with patch("cc_explorer.corpus.CodexProvider.discover_sessions", return_value=[]):
+        yield
 
 
 def _write_jsonl(path: Path, lines: list[dict]) -> None:
