@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "cc-explorer": {
+      "command": "uv",
+      "args": ["run", "--project", ".", "cc-explorer"],
+      "cwd": "."
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "project-mining",
+  "version": "2.50.0",
+  "description": "Mine project histories for behavioral evidence. Search chat logs, git history, docs, and code for concrete examples of specific patterns, values, or skills.",
+  "author": {
+    "name": "Cory King",
+    "email": "me@coryk.ing",
+    "url": "https://github.com/coryking"
+  },
+  "homepage": "https://github.com/coryking/coryking-plugins",
+  "repository": "https://github.com/coryking/coryking-plugins",
+  "license": "MIT",
+  "keywords": ["chat-history", "evidence-mining", "project-mining", "cc-explorer", "mcp"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Project Mining",
+    "shortDescription": "Mine project history for grounded evidence",
+    "longDescription": "Search project artifacts and Claude Code chat history for concrete evidence of behaviors, skills, decisions, and patterns.",
+    "developerName": "Cory King",
+    "category": "Developer Tools",
+    "capabilities": ["Read"],
+    "defaultPrompt": [
+      "Mine this project for evidence of a specific behavior or skill.",
+      "Find where we discussed a decision in Claude Code chats."
+    ]
+  }
+}
