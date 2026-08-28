@@ -23,5 +23,9 @@ def test_codex_plugin_launches_cc_explorer_from_plugin_root():
         "command": "uv",
         "args": ["run", "--project", ".", "cc-explorer"],
         "cwd": ".",
+        "env": {
+            "UV_CACHE_DIR": "${CLAUDE_PLUGIN_DATA}/uv-cache",
+            "UV_PROJECT_ENVIRONMENT": "${CLAUDE_PLUGIN_DATA}/.venv",
+        },
         "startup_timeout_sec": 30,
     }
