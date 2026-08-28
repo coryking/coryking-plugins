@@ -20,12 +20,15 @@ def test_codex_plugin_launches_cc_explorer_from_plugin_root():
     assert manifest["skills"] == "./skills/"
     assert manifest["mcpServers"] == "./.mcp.json"
     assert server == {
-        "command": "uv",
-        "args": ["run", "--project", ".", "cc-explorer"],
+        "command": "/bin/sh",
+        "args": [
+            "-c",
+            (
+                'exec env UV_CACHE_DIR="${TMPDIR:-/tmp}/cc-explorer/uv-cache" '
+                'UV_PROJECT_ENVIRONMENT="${TMPDIR:-/tmp}/cc-explorer/.venv" '
+                "uv run --project . cc-explorer"
+            ),
+        ],
         "cwd": ".",
-        "env": {
-            "UV_CACHE_DIR": "${CLAUDE_PLUGIN_DATA}/uv-cache",
-            "UV_PROJECT_ENVIRONMENT": "${CLAUDE_PLUGIN_DATA}/.venv",
-        },
         "startup_timeout_sec": 30,
     }

@@ -1,13 +1,12 @@
 {
   "mcpServers": {
     "cc-explorer": {
-      "command": "uv",
-      "args": ["run", "--project", ".", "cc-explorer"],
+      "command": "/bin/sh",
+      "args": [
+        "-c",
+        "exec env UV_CACHE_DIR=\"${TMPDIR:-/tmp}/cc-explorer/uv-cache\" UV_PROJECT_ENVIRONMENT=\"${TMPDIR:-/tmp}/cc-explorer/.venv\" uv run --project . cc-explorer"
+      ],
       "cwd": ".",
-      "env": {
-        "UV_CACHE_DIR": "${CLAUDE_PLUGIN_DATA}/uv-cache",
-        "UV_PROJECT_ENVIRONMENT": "${CLAUDE_PLUGIN_DATA}/.venv"
-      },
       "startup_timeout_sec": 30
     }
   }
