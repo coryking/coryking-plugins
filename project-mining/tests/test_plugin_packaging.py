@@ -23,4 +23,5 @@ def test_codex_plugin_launches_cc_explorer_from_plugin_root():
         "command": "uv",
         "args": ["run", "--project", ".", "cc-explorer"],
         "cwd": ".",
+        "startup_timeout_sec": 30,
     }

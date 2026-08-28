@@ -3,7 +3,8 @@
     "cc-explorer": {
       "command": "uv",
       "args": ["run", "--project", ".", "cc-explorer"],
-      "cwd": "."
+      "cwd": ".",
+      "startup_timeout_sec": 30
     }
   }
 }
