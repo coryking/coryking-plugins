@@ -22,7 +22,6 @@ from cc_explorer.models import (
     UserMessageModel,
 )
 from cc_explorer.search import SessionInfo, triage, triage_multi
-from cc_explorer.utils import PrefixId
 
 
 SESSION_ID = "aaaaaaaa-1111-2222-3333-444444444444"
@@ -48,7 +47,7 @@ def _assistant_with_bash(command: str, text: str = "") -> AssistantTranscriptEnt
     content.append(
         ToolUseContent(
             type="tool_use",
-            id=PrefixId("tool-0001-2222-3333-444444444444"),
+            id="tool-0001-2222-3333-444444444444",
             name="Bash",
             input={"command": command, "description": "run command"},
         )
@@ -83,7 +82,7 @@ def _assistant_with_grep(pattern: str, path: str) -> AssistantTranscriptEntry:
             content=[
                 ToolUseContent(
                     type="tool_use",
-                    id=PrefixId("tool-0002-2222-3333-444444444444"),
+                    id="tool-0002-2222-3333-444444444444",
                     name="Grep",
                     input={"pattern": pattern, "path": path},
                 )

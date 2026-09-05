@@ -25,7 +25,6 @@ from ..models import (
     TranscriptEntry,
     UserMessageModel,
 )
-from ..utils import PrefixId
 from .base import Harness, ProviderSession
 
 
@@ -124,7 +123,7 @@ class CodexProvider:
 
         refs = [
             ProviderSession(
-                session_id=PrefixId(meta.thread_id),
+                session_id=meta.thread_id,
                 paths=lineage(meta),
                 project_path=project_identity(meta.cwd)[0],
                 worktree=project_identity(meta.cwd)[1],
@@ -216,10 +215,10 @@ class CodexProvider:
         )
 
     @staticmethod
-    def _uuid(thread_id: str, data: dict[str, Any]) -> PrefixId:
+    def _uuid(thread_id: str, data: dict[str, Any]) -> str:
         payload = data.get("payload") or {}
         identity = payload.get("id") or payload.get("call_id") or data.get("ordinal")
-        return PrefixId(str(uuid.uuid5(uuid.NAMESPACE_URL, f"codex:{thread_id}:{identity}")))
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"codex:{thread_id}:{identity}"))
 
     @staticmethod
     def _tool_input(value: Any) -> dict[str, Any]:
@@ -306,7 +305,7 @@ class CodexProvider:
             raw_input = payload.get("arguments", payload.get("input", payload.get("action", {})))
             return self._assistant(base, [ToolUseContent(
                 type="tool_use",
-                id=PrefixId(str(payload.get("call_id") or base["uuid"].full)),
+                id=str(payload.get("call_id") or base["uuid"]),
                 name=str(name),
                 input=self._tool_input(raw_input),
             )])
@@ -321,7 +320,7 @@ class CodexProvider:
                 type="user",
                 message=UserMessageModel(role="user", content=[ToolResultContent(
                     type="tool_result",
-                    tool_use_id=PrefixId(str(payload.get("call_id") or "")),
+                    tool_use_id=str(payload.get("call_id") or ""),
                     content=output,
                     is_error=bool(is_error),
                 )]),
@@ -335,7 +334,7 @@ class CodexProvider:
             **base,
             type="assistant",
             message=AssistantMessageModel(
-                id=base["uuid"].full,
+                id=base["uuid"],
                 type="message",
                 role="assistant",
                 model="codex",

@@ -39,7 +39,6 @@ import cc_explorer._claude_paths as paths
 import cc_explorer.mcp_server as srv
 from cc_explorer.search import SessionInfo, session_sources, triage_multi
 from cc_explorer.subagents import collect_agent_files, resolve_subagents_dir
-from cc_explorer.utils import PrefixId
 
 TS = "2026-03-15T10:30:00.000Z"
 CWD = "/Users/test/projects/demo"
@@ -284,7 +283,7 @@ def test_session_to_subagent_basic(fake_claude):
     meta = json.loads(meta_file.read_text())
     assert set(meta.keys()) == {"agentType", "description", "toolUseId"}
     assert meta["agentType"] == "general-purpose"
-    assert meta["description"] == f"converted from session {SID_A[:8]} (demo)"
+    assert meta["description"] == f"converted from session {SID_A} (demo)"
     assert meta["toolUseId"].startswith("toolu_")
 
 
@@ -639,6 +638,7 @@ def test_prefix_ambiguity_raises(fake_claude):
             direction="session_to_subagent", src_id="dddddddd", src_project=PROJECT, dest_parent_session=SID_PARENT,
         )
     assert "ambiguous" in str(exc.value).lower()
+    assert s1 in str(exc.value) and s2 in str(exc.value)
 
 
 def test_cross_project_src_resolution(fake_claude):
@@ -883,7 +883,7 @@ def test_conversion_agent_excluded_from_search_corpus(fake_claude):
     )
 
     session = SessionInfo(
-        session_id=PrefixId(SID_PARENT), path=session_path, title="t",
+        session_id=SID_PARENT, path=session_path, title="t",
         first_timestamp=None, message_count=1, project_path=PROJECT,
     )
 
@@ -906,7 +906,7 @@ def test_list_session_agents_shows_conversion_labeled(fake_claude):
     _lay_down_subagent(fake_claude, conv_agent, is_conversion_artifact=True)
 
     resp = srv.list_session_agents(session=SID_PARENT, projects=[PROJECT])
-    ids = {a.agent_id.full: a for a in resp.agents}
+    ids = {a.agent_id: a for a in resp.agents}
     assert conv_agent in ids
     assert ids[conv_agent].is_conversion_artifact is True
 
@@ -1196,6 +1196,7 @@ def test_delete_conversions_ambiguous_prefix_raises(fake_claude):
     with pytest.raises(ToolError) as exc:
         srv.delete_conversions(ids=["eeeeeeee"])
     assert "ambiguous" in str(exc.value).lower()
+    assert s1 in str(exc.value) and s2 in str(exc.value)
 
 
 # =============================================================================
@@ -1229,7 +1230,7 @@ def test_agents_present_excludes_conversion_artifacts(fake_claude):
     _lay_down_subagent(fake_claude, conv_agent, is_conversion_artifact=True)
 
     sessions, _ = srv._load_all_sessions([PROJECT])
-    parent_session = next(s for s in sessions if str(s.session_id) == SID_PARENT[:8] or s.session_id.full == SID_PARENT)
+    parent_session = next(s for s in sessions if str(s.session_id) == SID_PARENT[:8] or s.session_id == SID_PARENT)
     assert parent_session.agents_present == 0
 
 
@@ -1249,7 +1250,7 @@ def test_min_agents_filter_excludes_conversion_only_sessions(fake_claude):
 
     # With min_agents=0, the session is present (no filtering on agents).
     resp = srv.list_project_sessions(projects=[PROJECT], min_agents=0, min_messages=1)
-    session_ids = {s.session.full for s in resp.sessions}
+    session_ids = {s.session for s in resp.sessions}
     assert SID_PARENT in session_ids
 
 
@@ -1677,7 +1678,7 @@ def test_browse_session_accepts_converted_subagent_id(fake_claude):
 
     resp = srv.browse_session(session=RW_AGENT, position="head", turns=10)
 
-    assert PrefixId(resp.session) == RW_AGENT
+    assert resp.session == RW_AGENT
     assert resp.total_turns == 4
     # The four body turns are browsable (ONE/TWO/THREE/FOUR live in the display).
     joined = " ".join(resp.chats)
@@ -1831,3 +1832,14 @@ def test_reaper_age_zero_or_negative_falls_back_to_default(fake_claude, monkeypa
     )
     srv._run_reaper("startup")
     assert path.exists()
+
+
+def test_rewind_ambiguous_turn_preserves_artifact(fake_claude):
+    path = _lay_rw_subagent(fake_claude)
+    before = path.read_bytes()
+    # The synthetic rewind turns share a leading prefix.
+    with pytest.raises(ToolError) as exc:
+        srv.rewind_transcript(src_id=RW_AGENT, turn=RW_T1[:8], cut="after")
+    assert "ambiguous" in str(exc.value)
+    assert RW_T1 in str(exc.value) and RW_A1 in str(exc.value)
+    assert path.read_bytes() == before

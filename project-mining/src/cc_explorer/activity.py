@@ -272,7 +272,7 @@ def build_activity_timeline(
 
     # ------------------------------------------------------------------ scan
     proj_paths = resolve_projects(projects)
-    # Per-session record built up during the walk. sid (8-char) -> record dict.
+    # Full session identity keys every aggregate and output reference.
     records: dict[str, dict[str, Any]] = {}
     grid: dict[str, dict[int, list[int]]] = {}  # sid -> {bucket: [human, agent]}
     seen: set[str] = set()
@@ -294,7 +294,7 @@ def build_activity_timeline(
     for proj_path in proj_paths:
         proj_name = Path(proj_path).name
         for full_uuid, ref in load_conversations(proj_path).items():
-            uuid = full_uuid.full
+            uuid = full_uuid
             if uuid in seen:
                 continue
 
@@ -338,14 +338,14 @@ def build_activity_timeline(
                 for b, reqs in cs.agent_req.items():
                     scan.agent_req[b] |= reqs
                 for b, n in cs.human.items():
-                    scan.agent_req[b].add(f"subh_{af.agent_id[:8]}_{b}")
+                    scan.agent_req[b].add(f"subh_{af.agent_id}_{b}")
                 scan.turn_ms += cs.turn_ms
 
             active = sorted(set(scan.human) | set(scan.agent_req))
             if not active:
                 continue
             seen.add(uuid)
-            sid = uuid[:8]
+            sid = uuid
 
             grid[sid] = {
                 b: [scan.human.get(b, 0), len(scan.agent_req.get(b, ()))]

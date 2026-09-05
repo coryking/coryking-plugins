@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Protocol, Sequence
 
 from ..models import TranscriptEntry
-from ..utils import PrefixId
 
 
 class Harness(str, Enum):
@@ -18,7 +17,7 @@ class Harness(str, Enum):
 
 @dataclass(frozen=True)
 class ProviderSession:
-    session_id: PrefixId
+    session_id: str
     paths: tuple[Path, ...]
     project_path: str
     harness: Harness

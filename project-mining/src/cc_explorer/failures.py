@@ -43,7 +43,7 @@ from .models import (
 )
 from .parser import load_transcript
 from .search import session_sources
-from .utils import PrefixId, collapse_ws
+from .utils import collapse_ws
 
 
 # The raw-JSONL literal that names every transcript file able to contribute a
@@ -70,9 +70,9 @@ class FailureExample:
 
     text: str
     tool: str
-    session: PrefixId
+    session: str
     project: str
-    agent: Optional[PrefixId] = None
+    agent: Optional[str] = None
 
 
 @dataclass
@@ -124,7 +124,7 @@ class ToolTally:
 
 @dataclass
 class SessionTally:
-    session: PrefixId
+    session: str
     project: str
     errors: int = 0
     kinds: Counter[FailureKind] = field(default_factory=Counter)
@@ -213,7 +213,7 @@ def _example(
     tool: str,
     ref: SessionRef,
     project: str,
-    agent_id: Optional[PrefixId],
+    agent_id: Optional[str],
 ) -> FailureExample:
     """Build a representative failure. Excerpting error text is the expensive
     part of a survey, so this is called only where a tally has no example yet —
@@ -337,7 +337,7 @@ def survey_failures(
         if read_provenance(ref.path) is not None:
             continue
 
-        sid = ref.session_id.full
+        sid = ref.session_id
         project = ref.project_path or ""
         touched = False
 

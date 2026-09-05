@@ -81,8 +81,8 @@ def test_examples_preserve_session_provenance(two_project_response):
     examples = two_project_response.matches[0].examples
     # Assert the association as well as field presence; swapped metadata is wrong.
     assert {(ex.project, str(ex.session), ex.date, ex.agent) for ex in examples} == {
-        (PROJECT_A, "aaaaaaaa", "2026-03-15", None),
-        (PROJECT_B, "bbbbbbbb", "2026-03-22", None),
+        (PROJECT_A, SESSION_A_ID, "2026-03-15", None),
+        (PROJECT_B, SESSION_B_ID, "2026-03-22", None),
     }
     assert all("comment_count" in ex.excerpt for ex in examples)
 

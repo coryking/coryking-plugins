@@ -22,7 +22,6 @@ import orjson
 from cachetools import LRUCache
 from pydantic import BaseModel
 
-from .utils import PrefixId
 from .models import (
     AssistantTranscriptEntry,
     ContentItem,
@@ -457,7 +456,7 @@ class ConversationRef:
     worktree: Optional[str]
 
 
-def load_conversations(project_path: str) -> dict[PrefixId, ConversationRef]:
+def load_conversations(project_path: str) -> dict[str, ConversationRef]:
     """Find all JSONL conversation files for a project, pooled across worktrees.
 
     Returns {session_id: ConversationRef} where session_id is the UUID from
@@ -495,11 +494,11 @@ def load_conversations(project_path: str) -> dict[PrefixId, ConversationRef]:
         if claude_dir is None or not claude_dir.exists():
             return {}
         return {
-            PrefixId(jsonl.stem): ConversationRef(path=jsonl, worktree=None)
+            jsonl.stem: ConversationRef(path=jsonl, worktree=None)
             for jsonl in claude_dir.glob("*.jsonl")
         }
 
-    result: dict[PrefixId, ConversationRef] = {}
+    result: dict[str, ConversationRef] = {}
     seen_dirs: set[Path] = set()
     for i, wt_path in enumerate(worktree_paths):
         claude_dir = _find_project_dir(wt_path)
@@ -508,7 +507,7 @@ def load_conversations(project_path: str) -> dict[PrefixId, ConversationRef]:
         seen_dirs.add(claude_dir)
         label: Optional[str] = None if i == 0 else Path(wt_path).name
         for jsonl in claude_dir.glob("*.jsonl"):
-            session_id = PrefixId(jsonl.stem)
+            session_id = jsonl.stem
             # First-wins on dupes. A session UUID should only exist in one
             # worktree's project dir, but if the same file somehow appears
             # in multiple (shared cache, weird symlink), keep the earlier
@@ -523,7 +522,7 @@ def load_conversations(project_path: str) -> dict[PrefixId, ConversationRef]:
     # activity) sees the full session population, not just live worktrees.
     for enc_dir, _wt_cwd, wt_name in _orphan_worktree_dirs(canonical, seen_dirs):
         for jsonl in enc_dir.glob("*.jsonl"):
-            session_id = PrefixId(jsonl.stem)
+            session_id = jsonl.stem
             if session_id not in result:
                 result[session_id] = ConversationRef(path=jsonl, worktree=wt_name)
     return result

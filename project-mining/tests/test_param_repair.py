@@ -37,13 +37,12 @@ from cc_explorer.param_repair import (
     repair_arguments,
 )
 from cc_explorer.search import MatchHit, SessionInfo
-from cc_explorer.utils import PrefixId
 
 from tests.conftest import patch_session_corpus
 
 TS = datetime(2026, 3, 15, 10, 30, 0, tzinfo=timezone.utc)
 SESSION_ID = "aaaaaaaa-1111-2222-3333-444444444444"
-TURN_UUID = PrefixId("11111111-aaaa-bbbb-cccc-dddddddddddd")
+TURN_UUID = "11111111-aaaa-bbbb-cccc-dddddddddddd"
 
 
 # =============================================================================
@@ -67,7 +66,7 @@ def _call(name: str, arguments: dict):
 
 def _build_session(sid: str = SESSION_ID) -> SessionInfo:
     return SessionInfo(
-        session_id=PrefixId(sid),
+        session_id=sid,
         path=Path("/fake/one.jsonl"),
         title="t",
         first_timestamp=TS,
@@ -80,7 +79,7 @@ def _hit_multi(sid: str, pattern: str = "TARGET"):
     entry = AssistantTranscriptEntry(
         uuid=TURN_UUID,
         timestamp=TS,
-        sessionId=PrefixId(sid),
+        sessionId=sid,
         type="assistant",
         message=AssistantMessageModel(
             id="m1",
@@ -91,7 +90,7 @@ def _hit_multi(sid: str, pattern: str = "TARGET"):
         ),
     )
     hit = MatchHit(
-        session_id=PrefixId(sid),
+        session_id=sid,
         turn_uuid=TURN_UUID,
         entry=entry,
         context_before=[],
@@ -390,8 +389,8 @@ class TestForgivenessEndToEnd:
             # This boundary double must reject a corrupted query, rather than
             # manufacture TARGET results regardless of what the tool forwards.
             assert patterns == ["TARGET"]
-            assert [s.session_id.full for s in target_sessions] == [SESSION_ID]
-            return {s.session_id: _hit_multi(s.session_id.full, patterns[0]) for s in target_sessions}
+            assert [s.session_id for s in target_sessions] == [SESSION_ID]
+            return {s.session_id: _hit_multi(s.session_id, patterns[0]) for s in target_sessions}
 
         with patch_session_corpus(sessions), patch(
             "cc_explorer.mcp_server.search_multi", side_effect=fake_search_multi

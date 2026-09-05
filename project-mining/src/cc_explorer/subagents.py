@@ -44,15 +44,15 @@ from .models import (
 )
 from .conversion import read_provenance
 from .parser import load_transcript
-from .utils import PrefixId, collapse_ws
+from .utils import collapse_ws
 
 
 @dataclass
 class SubagentInfo:
     """Metadata about a single subagent spawned during a session."""
 
-    tool_use_id: PrefixId
-    agent_id: PrefixId = PrefixId("")
+    tool_use_id: str
+    agent_id: str = ""
     subagent_type: str = ""
     description: str = ""
     prompt: str = ""
@@ -114,7 +114,7 @@ def _parse_agent_spawn(
     """
     if tool_name == "TaskCreate":
         return SubagentInfo(
-            tool_use_id=PrefixId(tool_id),
+            tool_use_id=tool_id,
             subagent_type="background",
             description=inp.get("subject", inp.get("description", "")),
             prompt=inp.get("description", ""),
@@ -122,7 +122,7 @@ def _parse_agent_spawn(
         )
     # Agent or Task — same shape
     return SubagentInfo(
-        tool_use_id=PrefixId(tool_id),
+        tool_use_id=tool_id,
         subagent_type=inp.get("subagent_type", ""),
         description=inp.get("description", ""),
         prompt=inp.get("prompt", ""),
@@ -180,7 +180,7 @@ def extract_subagents_from_entries(
                 matched_id = _find_tool_use_id(content_items, spawns)
                 if matched_id:
                     info = spawns[matched_id]
-                    info.agent_id = PrefixId(tur.get("agentId", ""))
+                    info.agent_id = str(tur.get("agentId", ""))
                     info.status = tur.get("status", "unknown")
                     info.output_file = tur.get("outputFile", "")
 
@@ -202,7 +202,7 @@ def extract_subagents_from_entries(
                 if matched_id:
                     task_info = tur["task"]
                     info = spawns[matched_id]
-                    info.agent_id = PrefixId(str(task_info.get("id", "")))
+                    info.agent_id = str(task_info.get("id", ""))
                     info.status = "background"
                     # Build reverse lookup using task ID
                     if info.agent_id:
@@ -391,9 +391,9 @@ def discover_subagents(
     by_agent_id: dict[str, SubagentInfo] = {}
     for sa in dispatched:
         if sa.tool_use_id:
-            by_tool_use[sa.tool_use_id.full] = sa
+            by_tool_use[sa.tool_use_id] = sa
         if sa.agent_id:
-            by_agent_id[sa.agent_id.full] = sa
+            by_agent_id[sa.agent_id] = sa
 
     matched: set[int] = set()
     orphans: list[SubagentInfo] = []
@@ -407,7 +407,7 @@ def discover_subagents(
 
         if target is not None:
             if not target.agent_id:
-                target.agent_id = PrefixId(af.agent_id)
+                target.agent_id = af.agent_id
             target.workflow_run_id = af.workflow_run_id
             target.source = "dispatched"
             target.is_conversion_artifact = af.is_conversion_artifact
@@ -415,8 +415,8 @@ def discover_subagents(
             matched.add(id(target))
         else:
             info = SubagentInfo(
-                tool_use_id=PrefixId(af.tool_use_id),
-                agent_id=PrefixId(af.agent_id),
+                tool_use_id=af.tool_use_id,
+                agent_id=af.agent_id,
                 subagent_type=af.agent_type,
                 description=af.description,
                 workflow_run_id=af.workflow_run_id,

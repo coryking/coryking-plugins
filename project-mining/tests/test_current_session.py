@@ -18,7 +18,6 @@ import pytest
 from cc_explorer.mcp_server import _current_session_id, _exclude_current_session
 from cc_explorer.responses import SearchProjectsResponse, SessionListResponse
 from cc_explorer.search import SessionInfo, TriageResult
-from cc_explorer.utils import PrefixId
 
 
 TS = datetime(2026, 6, 3, 9, 0, 0, tzinfo=timezone.utc)
@@ -28,7 +27,7 @@ OTHER_ID = "bbbbbbbb-1111-2222-3333-444444444444"
 
 def _session(session_id: str) -> SessionInfo:
     return SessionInfo(
-        session_id=PrefixId(session_id),
+        session_id=session_id,
         path=Path(f"/tmp/{session_id}.jsonl"),
         title="test",
         first_timestamp=TS,
@@ -65,8 +64,8 @@ def test_exclude_drops_caller_and_reports_it(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", CALLER_ID)
     sessions = [_session(CALLER_ID), _session(OTHER_ID)]
     kept, excluded = _exclude_current_session(sessions, include_current=False)
-    assert [s.session_id for s in kept] == [PrefixId(OTHER_ID)]
-    assert excluded == PrefixId(CALLER_ID)
+    assert [s.session_id for s in kept] == [OTHER_ID]
+    assert excluded == CALLER_ID
 
 
 def test_exclude_opt_out_keeps_everything(monkeypatch):
@@ -101,8 +100,8 @@ def test_session_list_marks_only_current_row():
     resp = SessionListResponse.from_sessions(sessions, current_session=CALLER_ID)
     assert resp.total == 2  # nothing dropped
     by_id = {s.session: s for s in resp.sessions}
-    assert by_id[PrefixId(CALLER_ID)].is_current is True
-    assert by_id[PrefixId(OTHER_ID)].is_current is None
+    assert by_id[CALLER_ID].is_current is True
+    assert by_id[OTHER_ID].is_current is None
 
 
 def test_session_list_marks_nothing_without_current():
@@ -126,11 +125,11 @@ def test_search_response_surfaces_excluded():
     other = _session(OTHER_ID)
     triage = [("foo", [TriageResult(session=other, count=3, first_match_example="foo bar")])]
     resp = SearchProjectsResponse.from_triage(
-        triage, projects_searched=1, excluded_current_session=PrefixId(CALLER_ID)
+        triage, projects_searched=1, excluded_current_session=CALLER_ID
     )
-    assert resp.excluded_current_session == PrefixId(CALLER_ID)
-    # serializes to the short form
-    assert resp.model_dump()["excluded_current_session"] == "afcc2acb"
+    assert resp.excluded_current_session == CALLER_ID
+    # serializes the complete identity
+    assert resp.model_dump()["excluded_current_session"] == CALLER_ID
 
 
 def test_search_response_omits_marker_when_nothing_excluded():

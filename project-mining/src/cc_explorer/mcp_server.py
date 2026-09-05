@@ -47,7 +47,7 @@ from .corpus import (
     resolve_projects,
 )
 from .failures import narrow_to_error_sessions, survey_failures as run_failure_survey
-from .formatting import matches_id
+from .identifiers import ambiguous_id, matching_ids
 from .models import FailureKind, TranscriptStats, parse_hide, parse_kinds
 from .param_repair import argument_error_message, repair_arguments
 from .parser import collect_parser_diagnostics, load_conversations, load_transcript
@@ -57,7 +57,6 @@ from .resolve import (
     resolve_unique_ref,
     resolve_unique_ref_or_none,
 )
-from .utils import PrefixId
 from .responses import (
     ActivityTimelineResponse,
     AgentDetailResponse,
@@ -93,6 +92,7 @@ from .search import (
     triage_multi,
 )
 from .subagents import (
+    SubagentInfo,
     collect_agent_files,
     discover_subagents,
     extract_agent_tool_audit,
@@ -103,7 +103,9 @@ from .subagents import (
 
 _INSTRUCTIONS = """\
 cc-explorer explores Claude Code and Codex transcript history stored as local
-JSONL files. Search/list/read tools span both harnesses by default; pass
+JSONL files. Output IDs are complete: copy them unchanged into calls and saved
+citations. Unique legacy prefixes resolve to full IDs; ambiguous references
+return candidates to disambiguate using the citation context, never by guessing. Search/list/read tools span both harnesses by default; pass
 `harnesses=["claude"]` or `harnesses=["codex"]` to narrow them. Projects are
 selected with `projects` (paths or bare names; git
 worktrees are flattened into one project). Omit `projects` to search across ALL
@@ -484,7 +486,7 @@ def _resolve_session(
 
 def _resolve_browsable_artifact(
     session: str, corpus: Corpus
-) -> tuple[PrefixId, Path, str | None, str | None] | None:
+) -> tuple[str, Path, str | None, str | None] | None:
     """Resolve an agent id to (id, transcript path, project, worktree).
 
     `browse_session` resolves real SESSIONS by ref, but a convert_session
@@ -511,7 +513,7 @@ def _resolve_browsable_artifact(
         (r for r in narrowed.refs if r.path.with_suffix("") in path.parents), None
     )
     return (
-        PrefixId(full_id),
+        full_id,
         path,
         holding.project_path if holding else None,
         holding.worktree if holding else None,
@@ -567,7 +569,7 @@ def _current_claude_session_id() -> str | None:
 
 def _exclude_current_session(
     sessions: list[SessionInfo], include_current: bool
-) -> tuple[list[SessionInfo], PrefixId | None]:
+) -> tuple[list[SessionInfo], str | None]:
     """Drop the calling session from a list unless the caller opted to keep it.
 
     Returns (kept_sessions, excluded_id). excluded_id is set only when a
@@ -582,7 +584,7 @@ def _exclude_current_session(
     kept = [s for s in sessions if s.session_id != current]
     if len(kept) == len(sessions):
         return sessions, None  # calling session wasn't in this list anyway
-    return kept, PrefixId(current)
+    return kept, current
 
 
 # Shared description for the errors_only filter. One wording, three tools.
@@ -625,23 +627,17 @@ def _check_errors_only(errors_only: bool, hide: frozenset[str]) -> None:
         )
 
 
-# UUIDs use hex digits and hyphens. The first 8 chars (the prefix form returned
-# by grep_session) are pure hex. Anything else is a hallucination — usually a
-# unix timestamp or a random word the model grabbed from a pipe-delimited line.
-_TURN_ID_PATTERN = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4,12})*$")
+_TURN_ID_TEMPLATE = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 
 
 def _validate_turn_id(turn: str) -> None:
-    """Reject empty or obviously-not-a-UUID turn values at the MCP boundary.
-
-    Catches two real bugs from production: agents passing turn="" and agents
-    passing the unix-timestamp field (e.g. "1775406360") instead of the
-    actual turn UUID. The first 8 chars of a UUID are hex; a 10-digit
-    decimal timestamp fails this regex on the very first character.
-    """
+    """Accept every canonical UUID prefix of at least eight characters."""
     if not turn:
         raise ToolError("turn must be a non-empty UUID or 8+ char prefix")
-    if not _TURN_ID_PATTERN.match(turn):
+    if not (8 <= len(turn) <= len(_TURN_ID_TEMPLATE)) or any(
+        char != "-" if marker == "-" else char not in "0123456789abcdef"
+        for char, marker in zip(turn, _TURN_ID_TEMPLATE)
+    ):
         raise ToolError(
             f"turn {turn!r} is not a valid UUID or prefix — expected hex digits "
             f"(e.g. 'a1b2c3d4'), not a timestamp or arbitrary string. "
@@ -1147,26 +1143,28 @@ def read_turn(
         # Codex response items do not carry UUID turn ids.  The provider creates
         # stable UUIDv5 ids from their item identity, so those ids cannot hit the
         # raw-byte prefilter; include Codex refs for the typed matcher to resolve.
-        candidate_keys = {(ref.harness, ref.session_id.full) for ref in candidates}
+        candidate_keys = {(ref.harness, ref.session_id) for ref in candidates}
         candidates.extend(
             ref
             for ref in corpus.refs
             if ref.harness is Harness.codex
-            and (ref.harness, ref.session_id.full) not in candidate_keys
+            and (ref.harness, ref.session_id) not in candidate_keys
         )
         sessions = promote_refs(candidates)
         if not sessions:
             raise ToolError(f"Turn {turn} not found")
 
-    session_info, entries, agent_id = get_turn_context(
-        sessions, turn, context, hide=hide_set, session_id=target_session_id
-    )
-
-    if not entries:
+    try:
+        resolved = get_turn_context(
+            sessions, turn, context, hide=hide_set, session_id=target_session_id
+        )
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+    if resolved is None:
         raise ToolError(f"Turn {turn} not found")
-
     return ReadTurnResponse.from_entries(
-        session_info, turn, entries, truncate=truncate, hide=hide_set, agent_id=agent_id
+        resolved.session, resolved.turn, resolved.entries,
+        truncate=truncate, hide=hide_set, agent_id=resolved.agent_id,
     )
 
 
@@ -1253,9 +1251,13 @@ def browse_session(
     base_types = ENTRY_TYPE_MAP[role]
     entry_types = conversation_types_for(hide_set, base_types)
 
-    entries, total = browse_session_turns(
-        browse_source, position, turns, anchor_turn=turn, entry_types=entry_types
-    )
+    try:
+        window = browse_session_turns(
+            browse_source, position, turns, anchor_turn=turn, entry_types=entry_types
+        )
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+    entries, total = window.entries, window.total
 
     if not entries:
         if turn:
@@ -1268,7 +1270,7 @@ def browse_session(
         entries=entries,
         total=total,
         truncate=truncate,
-        anchor=turn,
+        anchor=window.anchor,
         hide=hide_set,
         worktree=worktree,
         project=project_path,
@@ -1311,7 +1313,7 @@ def list_session_agents(
 def get_agent_detail(
     agent_ids: Annotated[
         list[str],
-        Field(description="Agent ID(s) or prefixes to inspect."),
+        Field(description="Agent ID(s), dispatch tool-use ID(s), or unique prefixes to inspect."),
     ],
     projects: ProjectsParam = None,
     session: Annotated[
@@ -1357,8 +1359,16 @@ def get_agent_detail(
                 f"pass at least {MIN_ID_LEN} chars, or scope with `session` to "
                 f"search within one session."
             )
-        corpus = Corpus.discover(projects).narrow_to_artifact_ids(agent_ids)
-        sessions = promote_refs(corpus.refs)
+        corpus = Corpus.discover(projects)
+        refs = corpus.narrow_to_artifact_ids(agent_ids).refs
+        # Claude dispatch tool ids have no agent filename (including a spawn
+        # with no body yet). Locate their literal ids before parsing candidates.
+        dispatch_ids = [aid for aid in agent_ids if aid.startswith("toolu_")]
+        if dispatch_ids:
+            seen = set(refs)
+            refs.extend(ref for ref in corpus.candidate_refs([re.escape(aid) for aid in dispatch_ids])
+                        if ref not in seen)
+        sessions = promote_refs(refs)
         if not sessions:
             raise ToolError(f"Agent(s) not found: {', '.join(agent_ids)}")
 
@@ -1394,14 +1404,18 @@ def get_agent_detail(
     return AgentListResponse(agents=details)
 
 
-def _find_agent(sessions, agent_id: str):
+def _find_agent(
+    sessions: list[SessionInfo], agent_id: str
+) -> tuple[SubagentInfo | None, SessionInfo | None]:
     """Search for an agent across sessions by ID prefix."""
-    for s in sessions:
-        agents = discover_subagents(s.path)
-        for sa in agents:
-            if matches_id(sa, agent_id):
-                return sa, s
-    return None, None
+    candidates = [(sa, session) for session in sessions for sa in discover_subagents(session.path)]
+    matches = matching_ids(candidates, agent_id, lambda pair: (pair[0].agent_id, pair[0].tool_use_id))
+    if len(matches) > 1:
+        raise ToolError(str(ambiguous_id(agent_id, "Agent", (
+            f"{sa.agent_id or sa.tool_use_id} in session {session.session_id} ({session.project_path})"
+            for sa, session in matches
+        ))))
+    return matches[0] if matches else (None, None)
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -1488,7 +1502,7 @@ def audit_session_tools(
     # isn't anything to report on.
 
     return SessionToolAuditResponse(
-        session=PrefixId(target.session_id),
+        session=target.session_id,
         project=target.project_path,
         worktree=target.worktree,
         title=target.title,
@@ -1671,21 +1685,16 @@ def _resolve_agent_for_convert(src_id: str, src_project: str | None):
     proj_sel = [src_project] if src_project else None
     corpus = Corpus.discover(proj_sel).narrow_to_artifact_ids([src_id])
 
-    matches: list[tuple] = []  # (AgentFile, SessionRef)
-    for r in corpus.refs:
-        for af in collect_agent_files(resolve_subagents_dir(r.path)):
-            if af.agent_id and PrefixId(af.agent_id) == src_id:
-                matches.append((af, r))
-
+    candidates = [(af, ref) for ref in corpus.refs
+                  for af in collect_agent_files(resolve_subagents_dir(ref.path))]
+    matches = matching_ids(candidates, src_id, lambda pair: (pair[0].agent_id,))
     if not matches:
         raise ToolError(f"No subagent matching: {src_id}")
-    distinct = {af.agent_id for af, _ in matches}
-    if len(distinct) > 1:
-        where = ", ".join(sorted({r.project_path or "?" for _, r in matches}))
-        raise ToolError(
-            f"Agent prefix {src_id!r} is ambiguous — it matches {len(distinct)} "
-            f"distinct agents (in: {where}). Pass a longer id or scope with src_project."
-        )
+    if len(matches) > 1:
+        raise ToolError(str(ambiguous_id(src_id, "Agent", (
+            f"{af.agent_id} in session {ref.session_id} ({ref.project_path})"
+            for af, ref in matches
+        ))))
     return matches[0]
 
 
@@ -1768,10 +1777,10 @@ def convert_session(
         src_stats = _source_stats(src.path)
 
         result = convert_session_to_subagent(
-            src_session_id=src.session_id.full,
+            src_session_id=src.session_id,
             src_path=src.path,
             src_project_path=src.project_path or "",
-            dest_parent_session_id=parent.session_id.full,
+            dest_parent_session_id=parent.session_id,
             dest_parent_session_dir=parent_session_dir,
             nested_agents=nested,
         )
@@ -1906,7 +1915,7 @@ def rewind_transcript(
 
     if not is_conversion_artifact(path):
         raise ToolError(
-            f"{kind} {full_id[:12]} is not a conversion artifact (no "
+            f"{kind} {full_id} is not a conversion artifact (no "
             f"x-converter-provenance line) — refusing to rewind a transcript we "
             f"didn't write. Convert it first with convert_session if you want a "
             f"mutable copy."
