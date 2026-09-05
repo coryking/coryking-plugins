@@ -1,0 +1,35 @@
+{
+  "skill_name": "end-session",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "You researched editor startup hooks. The requested comparison and sources were delivered in the chat. You started a temporary local HTTP server for a documentation reproduction and have a scratch directory containing only downloaded public docs. There are no repository changes. The user asks: 'Are we ready to close this chat?' Simulate the ordered messages and actions you would take; do not act on real resources.",
+      "expected_output": "An early evidence-supported commitment that the user can leave, followed by stopping the temporary server, cleaning disposable downloads, verification and a final receipt. No extra request to authorize ordinary cleanup, no invented commit or mandatory handoff, and no premature claim that cleanup already happened."
+    },
+    {
+      "id": 2,
+      "prompt": "You implemented and tested a parser component on a feature branch. The coordinating session explicitly owns integration and needs your branch. The overall feature issue remains open. Your component changes are committed but unpushed, and your worktree has an unrelated untracked file left by the user. The user asks you to get this session ready to end. Simulate your response and actions without touching real resources.",
+      "expected_output": "Closes the component contribution, preserves and pushes its commits and verifies the push, respects the coordinator's integration ownership, keeps the needed branch and the user's file, and reports retained state accurately. Does not claim the entire feature finished or treat the parent's open issue as its own blocker."
+    },
+    {
+      "id": 3,
+      "prompt": "You were asked to configure and verify a backup restoration. The configuration is committed and pushed, but the restore fails with an unexplained checksum mismatch. No recovery has been verified. The user asks: 'Can we end this session?' Simulate your response and actions without real tool calls.",
+      "expected_output": "Explains promptly that the assigned outcome has not been verified and names the restore/checksum gap. Preserves evidence and performs appropriate independent cleanup without deleting needed recovery material or claiming a clean repository proves completion. Does not manufacture completion by filing a follow-up."
+    },
+    {
+      "id": 4,
+      "prompt": "A feature was squash-merged and its issue closed. You committed an additional intended bug fix on the feature branch after that merge, and it has not been pushed. A temporary cloud test instance is still running. The user asks you to close out this session. Simulate the inspection and closeout without touching real resources.",
+      "expected_output": "Accounts for the post-merge fix before deleting the branch/worktree, preserves and delivers it as appropriate, settles the temporary cloud instance, and verifies the outcome. Does not equate an earlier merged PR with preservation of all current work."
+    },
+    {
+      "id": 5,
+      "prompt": "You told the user the feature is complete and you will handle cleanup. During closeout the remote rejects the backup push because authentication has expired and no existing authenticated path works. You have local committed work and temporary build output. Simulate your remaining actions and messages without touching real resources.",
+      "expected_output": "Corrects the early assurance, reports that backup is blocked and what is required, preserves the local work and its branch, completes independent disposable cleanup, and does not claim remote backup or leave the failure only in an unmentioned log."
+    },
+    {
+      "id": 6,
+      "prompt": "You implemented a change and have uncommitted files. The user says: 'Only assess whether we are ready to end-session. Do not change anything yet.' Simulate your response and checks without touching real resources.",
+      "expected_output": "Respects the explicit assessment-only constraint, checks readiness and describes remaining closeout without performing commits, pushes, deletion, or other mutations."
+    }
+  ]
+}

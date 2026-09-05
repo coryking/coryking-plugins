@@ -21,6 +21,14 @@ See [NOTICE](NOTICE) for the upstream provenance and the slimming ledger (which 
 
 ## Status
 
+### End-session
+
+`/engineering-loop:end-session` in Claude Code, or `$engineering-loop:end-session` in Codex,
+closes out an individual conversation. Natural requests about whether the session
+is ready to close also select the skill. Its intent and closeout obligations live
+in [the end-session skill](skills/end-session/SKILL.md). Both harnesses load that
+same source. Behavioral scenarios live alongside it in `evals/evals.json`.
+
 **v0.6.0** — research agents + parallel-review skill (`/el:review`) + a reviewer-persona roster (including an original `design-intent` reviewer that judges changes against the human's intent, not just engineering quality) + per-project reviewer extensibility (a repo's own `.claude/agents/` reviewers opt in via `el-review: true`) + `/el:claude-md-doctor` (Variant D — diagnose-only instruction-surface auditor).
 
 ### `/el:claude-md-doctor`

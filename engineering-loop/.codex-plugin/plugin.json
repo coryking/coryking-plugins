@@ -1,0 +1,25 @@
+{
+  "name": "engineering-loop",
+  "version": "0.9.0+codex.20260905180103",
+  "description": "Code review, instruction maintenance, research agents, and session closeout for solo development.",
+  "author": {
+    "name": "Cory King"
+  },
+  "repository": "https://github.com/coryking/coryking-plugins",
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Engineering Loop",
+    "shortDescription": "Review work and close sessions cleanly",
+    "longDescription": "Review changes, maintain agent instructions, and close individual sessions with their work preserved and temporary state cleaned up.",
+    "developerName": "Cory King",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Get this session ready to close out."
+    ]
+  }
+}
