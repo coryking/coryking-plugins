@@ -52,23 +52,15 @@ class TestMatchExampleWordBoundaries:
 
     def test_no_leading_word_fragment(self):
         """The excerpt should not start with a partial word."""
-        text = "the transactions and the database comment_count field is important for tracking"
+        text = "the transactions and the database important comment_count field is important for tracking"
         pattern = re.compile("comment_count", re.IGNORECASE)
-        # Width chosen so naive slicing would cut "transactions" or "database"
+        # The naive window starts at the final "ns" of "transactions".
         result = _match_example(text, pattern, width=50)
-        assert "comment_count" in result
-        # After the leading '...', the first char should be a word start (letter after space or start)
-        if result.startswith("..."):
-            after_ellipsis = result[3:]
-            # Should not start with a lowercase letter fragment (like 'ts ' or 'se ')
-            assert after_ellipsis[0] == " " or after_ellipsis.lstrip()[0].isupper() or after_ellipsis.startswith(" ") or not after_ellipsis[0].isalpha() or after_ellipsis[0] == result[3]
+        assert result == "...and the database important comment_count field..."
 
     def test_no_trailing_word_fragment(self):
         """The excerpt should not end with a partial word before '...'."""
         text = "comment_count field is important for tracking all the transactions in the database system"
         pattern = re.compile("comment_count", re.IGNORECASE)
         result = _match_example(text, pattern, width=60)
-        if result.endswith("..."):
-            before_ellipsis = result[:-3]
-            # Should end at a word boundary — last char is space or end of a complete word
-            assert before_ellipsis[-1] == " " or before_ellipsis.endswith((".", ",", ";", ":", ")", "]", "}")) or before_ellipsis[-1].isalnum()
+        assert result == "comment_count field is important for tracking all the..."

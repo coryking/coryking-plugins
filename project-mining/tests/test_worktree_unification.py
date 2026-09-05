@@ -53,15 +53,16 @@ def _patch(worktree_paths, find_map):
 
 class TestWorktreePooling:
 
-    def test_no_git_falls_back_to_single_dir(self):
+    def test_no_git_falls_back_to_single_dir(self, tmp_path):
         """Empty worktree list → single-dir scan, all sessions get worktree=None."""
         fake = _FakeDir(["/claude/-proj/aaaa1111.jsonl", "/claude/-proj/bbbb2222.jsonl"])
+        project = str(tmp_path.resolve())
         patches = _patch(
             worktree_paths=[],
-            find_map={"/home/me/proj": fake},
+            find_map={project: fake},
         )
         with patches[0], patches[1], patches[2]:
-            result = load_conversations("/home/me/proj")
+            result = load_conversations(project)
 
         assert len(result) == 2
         for ref in result.values():

@@ -23,6 +23,7 @@ from cc_explorer.failures import survey_failures
 from cc_explorer.models import (
     _FAILURE_CATEGORIES,
     _FAILURE_RULES,
+    FAILURE_SCAN_CHARS,
     FailureCategory,
     FailureKind,
     ToolResultContent,
@@ -193,9 +194,9 @@ def test_every_kind_has_a_category():
     assert FailureKind.unclassified.category is FailureCategory.unknown
 
 
-def test_every_kind_is_producible_by_a_rule():
-    """A kind with no rule is a name nothing can ever be classified as — dead
-    schema documentation that a caller will waste a `kinds=` filter on."""
+def test_every_classified_kind_has_a_declared_rule():
+    """Detect kinds absent from the rule table. This checks membership, not
+    reachability: earlier rules can still shadow a later rule's examples."""
     ruled = {kind for kind, _ in _FAILURE_RULES}
     assert ruled == set(FailureKind) - {FailureKind.unclassified}
 
@@ -255,19 +256,26 @@ def test_tightened_rules_still_classify_the_real_thing(text, expected):
 
 
 def test_classification_cost_is_bounded_by_the_window_not_the_input():
-    """`" ".join(text.split())[:LIMIT]` normalizes the WHOLE string to read a
-    1000-char window — ~96x slower on a 540 KB result, and tool results are
-    exactly where 540 KB strings live."""
-    import time
+    """Reject normalize-before-slicing without a hardware timing threshold.
 
-    huge = "Exit code 1 " + ("some output line here " * 30_000)
+    The string probe bounds materialized slices and split input. The allowance
+    permits normalization slack without freezing its exact factor.
+    """
+    budget = FAILURE_SCAN_CHARS * 16
+
+    class BoundedText(str):
+        def __getitem__(self, key):
+            if isinstance(key, slice):
+                assert len(range(*key.indices(len(self)))) <= budget
+            return BoundedText(super().__getitem__(key))
+
+        def split(self, *args, **kwargs):
+            assert len(self) <= budget, "normalization scanned the entire tool result"
+            return super().split(*args, **kwargs)
+
+    huge = BoundedText("Exit code 1 " + ("some output line here " * 30_000))
     assert len(huge) > 500_000
-    start = time.perf_counter()
-    for _ in range(20):
-        classify_failure(huge)
-    elapsed = time.perf_counter() - start
-    # Whole-text normalization measures ~7.3 ms per call here; bounded is ~0.08.
-    assert elapsed / 20 < 0.002, f"{elapsed / 20 * 1000:.2f} ms per classify"
+    assert classify_failure(huge) is FailureKind.exit_code
 
 
 def test_parse_kinds():

@@ -66,70 +66,33 @@ def _patch_entries(mapping):
     )
 
 
-class TestExampleFormat:
-    """Examples should be structured SearchHitExample objects."""
-
-    @pytest.fixture
-    def two_sessions(self):
-        return [
-            _session(SESSION_A_ID, "a.jsonl", TS_A, project=PROJECT_A),
-            _session(SESSION_B_ID, "b.jsonl", TS_B, project=PROJECT_B),
-        ]
-
-    def _get_pattern_match(self, two_sessions, pattern="comment_count"):
-        with _patch_entries({"a.jsonl": ENTRIES_A, "b.jsonl": ENTRIES_B}):
-            results = triage_multi(two_sessions, [pattern])
-            response = SearchProjectsResponse.from_triage(results, projects_searched=2)
-        return response.matches[0]
-
-    def test_example_names_project(self, two_sessions):
-        match = self._get_pattern_match(two_sessions)
-        assert match.examples
-        projects = {ex.project for ex in match.examples}
-        assert projects == {PROJECT_A, PROJECT_B}
-
-    def test_example_session_is_short_prefix(self, two_sessions):
-        match = self._get_pattern_match(two_sessions)
-        for ex in match.examples:
-            assert len(str(ex.session)) == 8
-
-    def test_example_has_date(self, two_sessions):
-        match = self._get_pattern_match(two_sessions)
-        for ex in match.examples:
-            parsed = datetime.strptime(ex.date, "%Y-%m-%d")
-            assert parsed is not None
-
-    def test_example_excerpt_contains_match(self, two_sessions):
-        match = self._get_pattern_match(two_sessions)
-        for ex in match.examples:
-            assert "comment_count" in ex.excerpt
-
-    def test_example_agent_absent_for_main_transcript(self, two_sessions):
-        # Hits in the main transcript have no agent provenance.
-        match = self._get_pattern_match(two_sessions)
-        for ex in match.examples:
-            assert ex.agent is None
+@pytest.fixture
+def two_project_response():
+    sessions = [
+        _session(SESSION_A_ID, "a.jsonl", TS_A, project=PROJECT_A),
+        _session(SESSION_B_ID, "b.jsonl", TS_B, project=PROJECT_B),
+    ]
+    with _patch_entries({"a.jsonl": ENTRIES_A, "b.jsonl": ENTRIES_B}):
+        results = triage_multi(sessions, ["comment_count"])
+        return SearchProjectsResponse.from_triage(results, projects_searched=2)
 
 
-class TestCountFields:
-    """sessions / projects / total_hits should be integer counts."""
+def test_examples_preserve_session_provenance(two_project_response):
+    examples = two_project_response.matches[0].examples
+    # Assert the association as well as field presence; swapped metadata is wrong.
+    assert {(ex.project, str(ex.session), ex.date, ex.agent) for ex in examples} == {
+        (PROJECT_A, "aaaaaaaa", "2026-03-15", None),
+        (PROJECT_B, "bbbbbbbb", "2026-03-22", None),
+    }
+    assert all("comment_count" in ex.excerpt for ex in examples)
 
-    @pytest.fixture
-    def two_sessions(self):
-        return [
-            _session(SESSION_A_ID, "a.jsonl", TS_A, project=PROJECT_A),
-            _session(SESSION_B_ID, "b.jsonl", TS_B, project=PROJECT_B),
-        ]
 
-    def test_counts(self, two_sessions):
-        with _patch_entries({"a.jsonl": ENTRIES_A, "b.jsonl": ENTRIES_B}):
-            results = triage_multi(two_sessions, ["comment_count"])
-            response = SearchProjectsResponse.from_triage(results, projects_searched=2)
-        match = response.matches[0]
-        assert isinstance(match.sessions, int) and match.sessions == 2
-        assert isinstance(match.projects, int) and match.projects == 2
-        assert response.total_hits == 2
-        assert response.projects_searched == 2
+def test_counts(two_project_response):
+    match = two_project_response.matches[0]
+    assert isinstance(match.sessions, int) and match.sessions == 2
+    assert isinstance(match.projects, int) and match.projects == 2
+    assert two_project_response.total_hits == 2
+    assert two_project_response.projects_searched == 2
 
 
 class TestNoEscapedNewlines:

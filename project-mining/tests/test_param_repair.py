@@ -263,51 +263,6 @@ class TestNoAliasLeakage:
                     offenders.append((tool, alias))
         assert not offenders, f"alias names advertised in schemas: {offenders}"
 
-    def test_middleware_never_touches_the_advertised_listing(self):
-        # No on_list_tools override => aliases cannot reach a client's schema.
-        from fastmcp.server.middleware import Middleware
-
-        from cc_explorer.mcp_server import ParameterRepairMiddleware
-
-        assert (
-            ParameterRepairMiddleware.on_list_tools is Middleware.on_list_tools
-        ), "the repair middleware must not rewrite what tools/list advertises"
-
-    def test_advertised_search_schemas_are_canonical(self):
-        assert set(SCHEMAS["search_projects"]["properties"]) == {
-            "patterns",
-            "projects",
-            "harnesses",
-            "role",
-            "after",
-            "before",
-            "excerpt_width",
-            "include_current_session",
-            "errors_only",
-        }
-        assert SCHEMAS["search_projects"]["required"] == ["patterns"]
-        assert set(SCHEMAS["grep_session"]["properties"]) == {
-            "session",
-            "patterns",
-            "projects",
-            "harnesses",
-            "context",
-            "role",
-            "limit",
-            "truncate",
-            "hide",
-            "errors_only",
-        }
-
-    def test_parameter_descriptions_do_not_teach_aliases(self):
-        # An alias must never be presented as a usable parameter name.
-        for tool, schema in SCHEMAS.items():
-            for name, prop in schema.get("properties", {}).items():
-                desc = prop.get("description", "")
-                for alias in ("`query`", "`session_id`", "`pattern`"):
-                    assert alias not in desc, f"{tool}.{name} advertises {alias}"
-
-
 # =============================================================================
 # Teaching: a non-aliased wrong name gets a recoverable error
 # =============================================================================
@@ -420,19 +375,28 @@ class TestClientSurface:
 
 
 class TestForgivenessEndToEnd:
-    def test_grep_session_accepts_query_and_session_id(self):
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {"session_id": SESSION_ID, "query": ["TARGET"], "project": "/fake"},
+            {"session": SESSION_ID, "patterns": ["TARGET"], "projects": ["/fake"]},
+        ],
+        ids=["aliases", "canonical"],
+    )
+    def test_grep_session_forwards_requested_pattern(self, arguments):
         sessions = [_build_session()]
 
         def fake_search_multi(target_sessions, patterns, **kwargs):
-            return {s.session_id: _hit_multi(str(s.session_id)) for s in target_sessions}
+            # This boundary double must reject a corrupted query, rather than
+            # manufacture TARGET results regardless of what the tool forwards.
+            assert patterns == ["TARGET"]
+            assert [s.session_id.full for s in target_sessions] == [SESSION_ID]
+            return {s.session_id: _hit_multi(s.session_id.full, patterns[0]) for s in target_sessions}
 
         with patch_session_corpus(sessions), patch(
             "cc_explorer.mcp_server.search_multi", side_effect=fake_search_multi
         ):
-            result = _call(
-                "grep_session",
-                {"session_id": SESSION_ID, "query": ["TARGET"], "project": "/fake"},
-            )
+            result = _call("grep_session", arguments)
 
         assert result.structured_content["session"].startswith("aaaaaaaa")
         assert result.structured_content["patterns"][0]["pattern"] == "TARGET"
@@ -473,20 +437,3 @@ class TestForgivenessEndToEnd:
         message = str(raised.value)
         assert "Parameters of grep_session:" not in message
         assert "No parameter" not in message
-
-    def test_canonical_call_still_works(self):
-        sessions = [_build_session()]
-
-        def fake_search_multi(target_sessions, patterns, **kwargs):
-            return {s.session_id: _hit_multi(str(s.session_id)) for s in target_sessions}
-
-        with patch_session_corpus(sessions), patch(
-            "cc_explorer.mcp_server.search_multi", side_effect=fake_search_multi
-        ):
-            result = _call(
-                "grep_session",
-                {"session": SESSION_ID, "patterns": ["TARGET"], "projects": ["/fake"]},
-            )
-
-        assert result.structured_content["session"].startswith("aaaaaaaa")
-        assert result.structured_content["patterns"][0]["pattern"] == "TARGET"

@@ -1,24 +1,25 @@
 """Tests for PrefixId — UUID value object with prefix matching.
 
-Defines the behavioral contract:
+Characterizes the existing behavior; collision-safe identity and the general
+equality/hash contract are tracked separately in issue #81.
 - str subclass (drop-in compatible)
 - Exact equality for full UUIDs (36 chars)
 - Prefix matching when either side is short
 - != is the inverse of == (not inherited from str's C-level __ne__)
-- Hash on first 8 chars (so dicts work with prefix lookups)
+- Hash on first 8 chars (supports the 8-character lookups tested here)
 - 'in' searches the full UUID (the identity), not the short display form
 - .short property for display (first 8 chars)
 - str() / f-string returns short form (MCP-boundary friendly)
 - .full property for the complete value
-- Works as dict key with prefix lookups
+- Works as dict key with 8-character prefix lookups
 """
 
 import pytest
 
 from cc_explorer.utils import PrefixId
 
-# Two full UUIDs that share an 8-char prefix would be astronomically unlikely,
-# so our test fixtures use distinct prefixes.
+# These fixtures isolate distinct-prefix behavior. Shared prefixes occur in
+# Codex session IDs; they are not ruled out by these tests (see #81).
 FULL_A = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
 FULL_B = PrefixId("b1234567-aaaa-bbbb-cccc-dddddddddddd")
 SHORT_A = PrefixId("a9529cc1")
@@ -214,7 +215,7 @@ class TestContains:
 
 
 # =============================================================================
-# Hashing — must be consistent with equality
+# Hashing — existing full-ID / 8-character-prefix behavior only (see #81)
 # =============================================================================
 
 
@@ -227,14 +228,6 @@ class TestHashing:
         a = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
         b = PrefixId("a9529cc1-b576-5fd3-9f1a-1234567890ab")
         assert hash(a) == hash(b)
-
-    def test_different_prefixes_hash_different(self):
-        """Different 8-char prefixes should (almost certainly) hash differently."""
-        assert hash(SHORT_A) != hash(SHORT_B)
-
-    def test_usable_in_set(self):
-        s = {FULL_A}
-        assert SHORT_A in s
 
     def test_prefix_in_set_finds_full(self):
         """A set containing a full UUID should match a prefix lookup."""
@@ -262,8 +255,8 @@ class TestDictKeys:
         assert SHORT_A in d
 
     def test_plain_str_prefix_in_dict(self):
-        """Plain str DOES match — PrefixId.__eq__ handles the comparison
-        during bucket probing even though hashes differ.
+        """The plain 8-character string has the same hash as the PrefixId key,
+        so bucket probing reaches PrefixId.__eq__.
 
         This means you can do d["a9529cc1"] on a PrefixId-keyed dict.
         """

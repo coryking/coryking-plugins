@@ -112,69 +112,26 @@ def _patch_entries(entries):
 class TestToolContentInExamples:
     """Matches inside tool inputs should surface in triage examples."""
 
-    def test_bash_command_in_example(self):
-        """When a Bash command matches, the example should contain the command text."""
-        entries = [
-            _assistant_with_bash("rg -oP 'comment_count' /tmp/data.jsonl"),
-        ]
-        with _patch_entries(entries):
+    @pytest.mark.parametrize(
+        "entry,pattern",
+        [
+            (_assistant_with_bash("rg -oP 'comment_count' /tmp/data.jsonl"), "comment_count"),
+            (_assistant_with_grep("facebook.*scrape", "/tmp/sessions/"), "facebook"),
+            (_assistant_with_bash("uv run python tools/facebook_scrape.py --test"), "facebook_scrape"),
+            (_assistant_with_bash("rg comment_count /tmp/data", text="Searching for comment_count in the data files."), "comment_count"),
+        ],
+        ids=["bash", "grep", "tool-only", "text-and-tool"],
+    )
+    def test_tool_input_match_is_visible(self, entry, pattern):
+        with _patch_entries([entry]):
             results = triage_multi(
                 [_session()],
-                ["comment_count"],
+                [pattern],
                 base_types=(AssistantTranscriptEntry,),
             )
             _, hits = results[0]
             assert len(hits) == 1
-            assert "comment_count" in hits[0].first_match_example
-
-    def test_grep_pattern_in_example(self):
-        """When a Grep pattern matches, the example should show the pattern."""
-        entries = [
-            _assistant_with_grep("facebook.*scrape", "/tmp/sessions/"),
-        ]
-        with _patch_entries(entries):
-            results = triage_multi(
-                [_session()],
-                ["facebook"],
-                base_types=(AssistantTranscriptEntry,),
-            )
-            _, hits = results[0]
-            assert len(hits) == 1
-            assert "facebook" in hits[0].first_match_example
-
-    def test_tool_only_entry_produces_example(self):
-        """An assistant entry with ONLY tool calls (no text) should still produce an example."""
-        entries = [
-            _assistant_with_bash("uv run python tools/facebook_scrape.py --test", text=""),
-        ]
-        with _patch_entries(entries):
-            results = triage_multi(
-                [_session()],
-                ["facebook_scrape"],
-                base_types=(AssistantTranscriptEntry,),
-            )
-            _, hits = results[0]
-            assert len(hits) == 1
-            assert hits[0].first_match_example  # not empty
-            assert "facebook_scrape" in hits[0].first_match_example
-
-    def test_match_in_text_and_tool_both_surface(self):
-        """When the match appears in both message text and tool text, the example should contain it."""
-        entries = [
-            _assistant_with_bash(
-                "rg comment_count /tmp/data",
-                text="Searching for comment_count in the data files.",
-            ),
-        ]
-        with _patch_entries(entries):
-            results = triage_multi(
-                [_session()],
-                ["comment_count"],
-                base_types=(AssistantTranscriptEntry,),
-            )
-            _, hits = results[0]
-            assert len(hits) == 1
-            assert "comment_count" in hits[0].first_match_example
+            assert pattern in hits[0].first_match_example
 
     def test_triage_single_also_surfaces_tool_match(self):
         """The same behavior on single-pattern triage()."""

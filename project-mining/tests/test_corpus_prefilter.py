@@ -208,7 +208,7 @@ def test_py_scanner_raises_scanner_error_on_permission_denied(tmp_path, monkeypa
 @pytest.mark.skipif(shutil.which("rg") is None, reason="rg not on PATH")
 @pytest.mark.xfail(
     strict=False,
-    reason="rg --ignore-case does not Unicode-case-fold like Python re.IGNORECASE (documented gap)",
+    reason="#82: rg --ignore-case does not fold U+0130 like Python re.IGNORECASE",
 )
 def test_rg_scanner_unicode_case_folding_gap(tmp_path):
     """Pins the documented gap: Python's re.IGNORECASE folds U+0130 İ to 'i',
@@ -217,7 +217,11 @@ def test_rg_scanner_unicode_case_folding_gap(tmp_path):
     with strict=False since rg's exact Unicode behavior may vary by version."""
     rg = shutil.which("rg")
     a = tmp_path / "a.jsonl"
-    a.write_text(json.dumps(_entry("word dİn here")) + "\n")
+    a.write_text(json.dumps(_entry("word dİn here"), ensure_ascii=False) + "\n")
+
+    # A raw JSON Unicode escape would make BOTH scanners miss the word and
+    # confound the folding comparison. Establish the Python oracle first.
+    assert PyScanner().files_with_match(["din"], [a]) == {a}
 
     hits = RgScanner(rg).files_with_match(["din"], [a])
     assert hits == {a}

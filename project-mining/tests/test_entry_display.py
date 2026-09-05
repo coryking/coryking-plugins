@@ -110,10 +110,8 @@ class TestHumanEntryDisplay:
                 content=[TextContent(type="text", text="hello world this is a long message")],
             ),
         )
-        out = e.display(truncate=20)
-        assert out.endswith("...")
-        # Should break at a word boundary, not mid-word
-        assert "worl..." not in out
+        # A hard cut at 16 would return "hello world t...".
+        assert e.display(truncate=16) == "hello world..."
 
 
 class TestAssistantTranscriptEntryDisplay:
@@ -380,46 +378,23 @@ class TestTeammateMessageParsing:
         base.update(extra)
         return create_transcript_entry(base)
 
-    def test_all_attributes(self):
-        e = self._human(
-            '<teammate-message teammate_id="lead" color="blue" summary="review PR">'
-            "the full body {json: 1}</teammate-message>"
-        )
+    @pytest.mark.parametrize(
+        "attributes,teammate_id,color,summary",
+        [
+            ('teammate_id="lead" color="blue" summary="review PR"', "lead", "blue", "review PR"),
+            ('teammate_id="orch"', "orch", None, None),
+            ('teammate_id="peer" color="red"', "peer", "red", None),
+            ('teammate_id="peer" summary="s"', "peer", None, "s"),
+            ('summary="s" color="g" teammate_id="z"', "z", "g", "s"),
+        ],
+        ids=["all", "id-only", "no-summary", "no-color", "reordered"],
+    )
+    def test_xml_attributes(self, attributes, teammate_id, color, summary):
+        e = self._human(f'<teammate-message {attributes}>the full body {{json: 1}}</teammate-message>')
         tm = e.teammate_message
         assert tm is not None
-        assert tm.teammate_id == "lead"
-        assert tm.color == "blue"
-        assert tm.summary == "review PR"
+        assert (tm.teammate_id, tm.color, tm.summary) == (teammate_id, color, summary)
         assert tm.body == "the full body {json: 1}"
-
-    def test_id_only(self):
-        e = self._human('<teammate-message teammate_id="orch">do X</teammate-message>')
-        tm = e.teammate_message
-        assert tm is not None
-        assert tm.teammate_id == "orch"
-        assert tm.color is None
-        assert tm.summary is None
-        assert tm.body == "do X"
-
-    def test_id_and_color_no_summary(self):
-        e = self._human('<teammate-message teammate_id="peer" color="red">hi</teammate-message>')
-        tm = e.teammate_message
-        assert tm.teammate_id == "peer"
-        assert tm.color == "red"
-        assert tm.summary is None
-
-    def test_id_and_summary_no_color(self):
-        e = self._human('<teammate-message teammate_id="peer" summary="s">hi</teammate-message>')
-        tm = e.teammate_message
-        assert tm.color is None
-        assert tm.summary == "s"
-
-    def test_attribute_order_independent(self):
-        e = self._human('<teammate-message summary="s" color="g" teammate_id="z">b</teammate-message>')
-        tm = e.teammate_message
-        assert tm.teammate_id == "z"
-        assert tm.color == "g"
-        assert tm.summary == "s"
 
     def test_missing_close_tag(self):
         e = self._human('<teammate-message teammate_id="orch">unterminated body')

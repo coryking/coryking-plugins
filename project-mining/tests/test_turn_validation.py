@@ -12,27 +12,19 @@ from fastmcp.exceptions import ToolError
 
 
 class TestValidateTurnId:
-    def test_accepts_8char_hex_prefix(self):
-        _validate_turn_id("a1b2c3d4")  # no raise
+    @pytest.mark.parametrize("turn", ["a1b2c3d4", "a9529cc1-b576-5fd3-9f1a-1234567890ab"])
+    def test_accepts_turn_identifier(self, turn):
+        _validate_turn_id(turn)
 
-    def test_accepts_full_uuid(self):
-        _validate_turn_id("a9529cc1-b576-5fd3-9f1a-1234567890ab")  # no raise
-
-    def test_rejects_empty(self):
-        with pytest.raises(ToolError, match="non-empty"):
-            _validate_turn_id("")
-
-    def test_rejects_unix_timestamp(self):
-        # 10-digit decimal — what agents pull from the timestamp field
-        # in the pipe-delimited format when they grab the wrong column.
-        with pytest.raises(ToolError, match="not a valid UUID"):
-            _validate_turn_id("1775406360")
-
-    def test_rejects_word(self):
-        with pytest.raises(ToolError, match="not a valid UUID"):
-            _validate_turn_id("hello")
-
-    def test_rejects_short_prefix(self):
-        # 7 chars is one shy of the canonical 8-char prefix.
-        with pytest.raises(ToolError, match="not a valid UUID"):
-            _validate_turn_id("a1b2c3d")
+    @pytest.mark.parametrize(
+        "turn,message",
+        [
+            ("", "non-empty"),
+            ("1775406360", "not a valid UUID"),  # timestamp column mistaken for ID
+            ("hello", "not a valid UUID"),
+            ("a1b2c3d", "not a valid UUID"),  # one short of the 8-character prefix
+        ],
+    )
+    def test_rejects_invalid_turn_identifier(self, turn, message):
+        with pytest.raises(ToolError, match=message):
+            _validate_turn_id(turn)

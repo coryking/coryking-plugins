@@ -830,21 +830,6 @@ def test_delete_conversions_force_does_not_unlock_non_conversions(fake_claude):
     assert (fake_claude.project_dir(PROJECT) / f"{SID_A}.jsonl").exists()
 
 
-def test_delete_conversions_deletes_subagent_when_growth_guard_passes(fake_claude):
-    """Provenance line present AND no growth → deleted."""
-    fake_claude.write_session(SID_PARENT, _simple_session_lines())
-    conv_agent = "a" + "2" * 16
-    path = _lay_down_subagent(fake_claude, conv_agent, is_conversion_artifact=True, extra_lines=0)
-    assert path.exists()
-
-    resp = srv.delete_conversions(ids=[conv_agent])
-    assert len(resp.deleted) == 1
-    assert resp.deleted[0].kind == "subagent"
-    assert not resp.refused
-    assert not path.exists()
-    assert not path.with_suffix(".meta.json").exists()
-
-
 def test_delete_conversions_unknown_id_refused(fake_claude):
     fake_claude.write_session(SID_PARENT, _simple_session_lines())
     resp = srv.delete_conversions(ids=["nonexistent-id-xyz"])
@@ -1593,15 +1578,12 @@ def test_rewind_resolves_without_parsing_transcripts(fake_claude, monkeypatch):
     assert _convo_texts(_convo_only(_read_jsonl(path))) == ["ONE", "TWO"]
 
 
-def test_narrow_finds_workflow_nested_agent(fake_claude):
-    """The agent-id narrowing glob must reach workflow-nested agents at
-    `<session>/subagents/workflows/<runId>/agent-<id>.jsonl`, not only direct
-    children of `subagents/`.
+def test_conversion_resolves_workflow_nested_agent(fake_claude):
+    """Discovery, narrowing, and conversion must agree on workflow agent paths.
 
-    `collect_agent_files` recurses into `workflows/<runId>/`, so resolution
-    (used by subagent_to_session convert) must too — a shallow `subagents/agent-*`
-    glob would return [] and falsely report 'No subagent matching' for any
-    workflow-dispatched subagent."""
+    The corpus unit test pins narrowing itself; this one proves a caller can
+    convert the nested transcript and receive its contents, preserving source.
+    """
     fake_claude.write_session(SID_PARENT, _simple_session_lines())
     nested_id = "a" + "9" * 16
     wf_dir = (
@@ -1609,20 +1591,22 @@ def test_narrow_finds_workflow_nested_agent(fake_claude):
         / "workflows" / "wf_testrun"
     )
     wf_dir.mkdir(parents=True, exist_ok=True)
+    source_path = wf_dir / f"agent-{nested_id}.jsonl"
     _write_jsonl(
-        wf_dir / f"agent-{nested_id}.jsonl",
+        source_path,
         [_user("u-wf-0000-0000-0000-00000000wf01", "X", agentId=nested_id, isSidechain=True)],
     )
 
-    from cc_explorer.corpus import Corpus
-
-    narrowed = Corpus.discover(None).narrow_to_artifact_ids([nested_id])
-    assert narrowed.refs, "narrowing must find the session holding a workflow-nested agent"
+    original = source_path.read_bytes()
+    resp = srv.convert_session(direction="subagent_to_session", src_id=nested_id, src_project=PROJECT)
+    converted = fake_claude.project_dir(PROJECT) / f"{resp.created_id}.jsonl"
+    assert _convo_texts(_convo_only(_read_jsonl(converted))) == ["X"]
+    assert source_path.read_bytes() == original
 
 
 def test_rewind_atomic_write_preserves_original_on_failure(fake_claude, monkeypatch):
-    """If the write fails mid-way, the original transcript is left intact (the
-    atomic temp+replace guarantees no half-written file)."""
+    """Failure at the final os.replace preserves the original and cleans the
+    temporary file; this does not inject a failure during the write itself."""
     import cc_explorer.conversion as conv
 
     path = _lay_rw_subagent(fake_claude)

@@ -39,6 +39,5 @@ class TestSmartTruncate:
 
     def test_whitespace_collapsed(self):
         """textwrap.shorten collapses whitespace — verify we handle it."""
-        result = smart_truncate("hello    world", 20)
-        # Should still work, whitespace collapsed is fine for display
-        assert "hello" in result
+        result = smart_truncate("hello    world    goodbye", 16)
+        assert result == "hello world..."

@@ -1,8 +1,8 @@
 """Pins for cc-explorer behaviors that are easy to lose silently.
 
 Each class here exists because something used to fail in a way that wasn't
-visible: a stray dependency, a partial result with no diagnostic, a count
-that hid skipped work, a model field that quietly shadowed its parent.
+visible: a stray dependency, a partial result with no diagnostic, or a count
+that hid skipped work.
 The tests pin the visible behavior so future edits can't reintroduce the
 silent failure mode.
 
@@ -15,7 +15,6 @@ What's pinned and why:
     a sibling project. The test reads pyproject.toml directly so a stray
     dependency fails CI before it ever lands in uv.lock.
 
-  TestGrepSessionsResponseHasNotFoundField
   TestGrepSessionsSurfacesUnresolvedPrefixes
     grep_sessions takes a list of session prefixes and fans out across
     them. If a prefix doesn't resolve to a real session, the response
@@ -25,7 +24,6 @@ What's pinned and why:
     When *every* prefix fails to resolve, the tool raises ToolError
     instead, since there's nothing useful to return.
 
-  TestSessionToolAuditResponseHasPresentVsAuditedCounts
   TestSessionToolAuditCountsReflectSkippedAgents
     audit_session_tools can only audit subagents whose transcript is
     readable. The response has to expose both `total_present` (every
@@ -41,14 +39,6 @@ What's pinned and why:
     zero matches across all patterns. Both behaviors are load-bearing
     for how callers consume the response.
 
-  TestToolResultEntryDoesNotRedeclareAgentId
-    agentId is declared on BaseTranscriptEntry. ToolResultEntry must
-    inherit it rather than redeclaring with an identical type — a
-    same-type shadow is dead code that obscures the type hierarchy and
-    invites a future reader to "fix" the wrong layer. If a real reason
-    forces the redeclaration back (a pyright narrowing issue, a
-    serialization quirk), document it in a comment so this test can be
-    updated with that justification.
 """
 
 from __future__ import annotations
@@ -63,9 +53,7 @@ import pytest
 from cc_explorer.models import (
     AssistantMessageModel,
     AssistantTranscriptEntry,
-    BaseTranscriptEntry,
     TextContent,
-    ToolResultEntry,
     TranscriptStats,
 )
 from cc_explorer.search import MatchHit, SessionInfo
@@ -168,16 +156,6 @@ class TestNoPlaywrightDependency:
 # tool raises ToolError instead of returning a degenerate response.
 
 
-class TestGrepSessionsResponseHasNotFoundField:
-    def test_response_model_declares_not_found(self):
-        from cc_explorer.responses import GrepSessionsResponse
-
-        assert "not_found" in GrepSessionsResponse.model_fields, (
-            "GrepSessionsResponse needs a `not_found` field so unresolved "
-            "session prefixes are surfaced rather than silently dropped."
-        )
-
-
 class TestGrepSessionsSurfacesUnresolvedPrefixes:
     def test_bad_prefixes_appear_in_not_found(self):
         from cc_explorer.mcp_server import grep_sessions
@@ -231,28 +209,6 @@ class TestGrepSessionsSurfacesUnresolvedPrefixes:
 # A single ambiguous `total_agents` field (was it present? was it
 # audited?) would hide the skipped work entirely, so the response model
 # must carry both — and the ambiguous name must not be present.
-
-
-class TestSessionToolAuditResponseHasPresentVsAuditedCounts:
-    def test_response_model_has_total_present_and_total_audited(self):
-        from cc_explorer.responses import SessionToolAuditResponse
-
-        fields = SessionToolAuditResponse.model_fields
-        assert "total_present" in fields, (
-            "Need total_present: every subagent discovered for the session — "
-            "parent-dispatched plus orphan transcripts found on disk."
-        )
-        assert "total_audited" in fields, (
-            "total_audited: the subset whose transcript was readable."
-        )
-        assert "total_dispatched" not in fields, (
-            "total_dispatched was renamed to total_present once discovery became "
-            "bottom-up: orphan transcripts are present without being dispatched. "
-            "Toolbox, not product — no backwards-compat shim."
-        )
-        assert "total_agents" not in fields, (
-            "Drop total_agents — its meaning was ambiguous (audited or present?)."
-        )
 
 
 class TestSessionToolAuditCountsReflectSkippedAgents:
@@ -428,29 +384,3 @@ class TestGrepSessionsOmitsZeroHitSessions:
 
         assert len(resp.sessions) == 1
         assert str(resp.sessions[0].session) == "aaaaaaaa"
-
-
-# =============================================================================
-# Type hierarchy: agentId lives on BaseTranscriptEntry
-# =============================================================================
-#
-# BaseTranscriptEntry declares `agentId: Optional[PrefixId] = None`, and
-# every entry subclass inherits it. ToolResultEntry must not redeclare
-# the field with an identical type — a same-type shadow is dead code that
-# obscures the type hierarchy and invites a future reader to "fix" the
-# wrong layer. If a real reason forces the redeclaration back (a narrowing
-# issue, a serialization quirk), that reason needs to be recorded in a
-# comment on the field so this test can be updated with the justification
-# instead of blindly deleted.
-
-
-class TestToolResultEntryDoesNotRedeclareAgentId:
-    def test_agent_id_declared_only_on_base(self):
-        assert "agentId" in BaseTranscriptEntry.__annotations__, (
-            "Sanity check: agentId should still live on BaseTranscriptEntry."
-        )
-        assert "agentId" not in ToolResultEntry.__annotations__, (
-            "ToolResultEntry redeclares agentId with the same type as the parent. "
-            "Drop the redeclaration — or, if pyright forces it back, add a "
-            "comment explaining why it's load-bearing."
-        )

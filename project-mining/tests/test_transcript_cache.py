@@ -6,7 +6,6 @@ between tool calls avoids re-parsing 323MB of JSONL on every search.
 
 import json
 import os
-import time
 from pathlib import Path
 
 import pytest
@@ -56,11 +55,11 @@ class TestTranscriptCache:
         first = load_transcript(p)
         assert len(first) == 1
 
-        # Ensure mtime actually changes (some filesystems have 1s granularity)
-        time.sleep(0.05)
+        previous_mtime = p.stat().st_mtime
         _write_jsonl(p, [_make_entry("hello"), _make_entry("world", uuid="cccccccc-1111-2222-3333-444444444444")])
         # Force mtime change on filesystems with coarse granularity
-        os.utime(p, (time.time() + 1, time.time() + 1))
+        os.utime(p, (previous_mtime + 2, previous_mtime + 2))
+        assert p.stat().st_mtime != previous_mtime
 
         second = load_transcript(p)
 
@@ -80,9 +79,10 @@ class TestTranscriptCache:
         assert entries1 is not entries2
 
         # Modify p1, p2 should still return cached
-        time.sleep(0.05)
+        previous_mtime = p1.stat().st_mtime
         _write_jsonl(p1, [_make_entry("alpha modified")])
-        os.utime(p1, (time.time() + 1, time.time() + 1))
+        os.utime(p1, (previous_mtime + 2, previous_mtime + 2))
+        assert p1.stat().st_mtime != previous_mtime
 
         entries1_new = load_transcript(p1)
         entries2_same = load_transcript(p2)
