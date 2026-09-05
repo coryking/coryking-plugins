@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import difflib
 import json
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 # Wrong name -> canonical candidates, best first. A candidate is only used when
@@ -155,7 +156,7 @@ def argument_error_message(
     tool_name: str,
     schema: dict[str, Any],
     arguments: dict[str, Any],
-    errors: list[dict[str, Any]],
+    errors: Sequence[Mapping[str, Any]],
 ) -> str:
     """Build the recover-in-one-retry message for a failed argument validation.
 

@@ -1998,7 +1998,7 @@ def delete_conversions(
     resolved = resolve_artifacts(ids, corpus.refs)
 
     for raw_id, kind, full_id, path in resolved:
-        if not kind:
+        if not kind or path is None:
             refused.append(
                 RefusedDeletion(id=raw_id, reason="no session or subagent matches this id")
             )

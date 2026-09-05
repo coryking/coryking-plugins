@@ -328,6 +328,9 @@ class TriageResult:
     agent_id: Optional[PrefixId] = None
 
 
+SearchableEntry = HumanEntry | AssistantTranscriptEntry | ToolResultEntry
+
+
 @dataclass
 class MatchHit:
     """A single search match with surrounding context.
@@ -339,7 +342,7 @@ class MatchHit:
 
     session_id: PrefixId
     turn_uuid: PrefixId
-    entry: TranscriptEntry
+    entry: SearchableEntry
     context_before: list[TranscriptEntry]
     context_after: list[TranscriptEntry]
     agent_id: Optional[PrefixId] = None
@@ -375,15 +378,15 @@ ENTRY_TYPE_MAP: dict[str, tuple[type, ...]] = {
 
 def _is_searchable(
     entry: TranscriptEntry, search_types: tuple[type, ...]
-) -> TypeGuard[BaseTranscriptEntry]:
+) -> TypeGuard[SearchableEntry]:
     """isinstance against the dynamic search-type tuple, narrowed for the checker.
 
     `search_types` is built at runtime by conversation_types_for(), so a static
     checker can't narrow from `isinstance(entry, search_types)`. But every
-    searchable entry kind subclasses BaseTranscriptEntry, so a match proves that
-    — this TypeGuard states the invariant once, letting the search loops use a
-    single check (and reach `.uuid` / `.display`) instead of a redundant second
-    `isinstance(entry, BaseTranscriptEntry)`.
+    searchable entry kind is HumanEntry, AssistantTranscriptEntry, or
+    ToolResultEntry, so a match proves that concrete union. This TypeGuard
+    states the invariant once, letting the search loops retain the type detail
+    needed by matching and result construction.
     """
     return isinstance(entry, search_types)
 
@@ -501,7 +504,7 @@ def context_types_for(
 
 
 def _entry_matches(
-    entry: TranscriptEntry,
+    entry: SearchableEntry,
     pattern: re.Pattern,
     hide: frozenset[str] = frozenset(),
     errors_only: bool = False,

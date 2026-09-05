@@ -985,7 +985,7 @@ def _strip_leading_xml(body: str) -> str:
     return text
 
 
-def _user_marker_text(entry: BaseTranscriptEntry) -> str:
+def _user_marker_text(entry: HumanEntry | ToolResultEntry) -> str:
     """Raw text of a user-role entry, for marker/sentinel classification.
 
     The single authoritative raw-text source for sentinel/teammate detection.
