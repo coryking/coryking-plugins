@@ -44,6 +44,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from .identifiers import ambiguous_id, id_matches, matching_ids
+
 # Conversation line types we copy. Everything else (system, summary, progress,
 # file-history-snapshot, queue-operation, mode/permission/custom-title headers)
 # is dropped from the body — a subagent/session transcript is a linear chain of
@@ -618,19 +620,18 @@ def convert_session_to_subagent(
         for d in lines:
             f.write(json.dumps(d) + "\n")
 
-    src8 = src_session_id[:8]
     project_basename = Path(src_project_path).name if src_project_path else "?"
     # meta.json gets ONLY the standard three keys — any extra key is silently
     # dropped by the harness on first resume, so origin lives in `description`.
     meta = {
         "agentType": "general-purpose",
-        "description": f"converted from session {src8} ({project_basename})",
+        "description": f"converted from session {src_session_id} ({project_basename})",
         "toolUseId": _new_tool_use_id(),
     }
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f)
 
-    handoff = _suggested_handoff(src8, project_basename, prior, src_converted_from)
+    handoff = _suggested_handoff(src_session_id, project_basename, prior, src_converted_from)
 
     return ConversionResult(
         direction="session_to_subagent",
@@ -651,7 +652,7 @@ def convert_session_to_subagent(
 
 
 def _suggested_handoff(
-    src8: str,
+    src_session_id: str,
     project_basename: str,
     prior_lineage: list[dict[str, str]],
     src_converted_from: Optional[dict[str, Any]] = None,
@@ -661,7 +662,7 @@ def _suggested_handoff(
     When the SOURCE was itself a subagent-born transcript converted earlier
     (its own `_converted_from.kind == "subagent"`), the conversation was
     originally a subagent run inside some parent session, so we phrase its origin
-    that way and name that parent's first 8 chars (recovered from the lineage's
+    that way and name that parent's complete id (recovered from the lineage's
     last "session" hop — the session that subagent ran under).
     """
     born_as_subagent = (
@@ -670,19 +671,19 @@ def _suggested_handoff(
     if born_as_subagent:
         # The session the original subagent ran inside is the most-recent "session"
         # hop in the inherited lineage.
-        parent8 = "?"
+        parent_id = "?"
         for hop in reversed(prior_lineage):
             if hop.get("as") == "session":
-                parent8 = str(hop.get("id", ""))[:8]
+                parent_id = str(hop.get("id", ""))
                 break
         first = (
             f"This conversation was a subagent run inside Claude Code session "
-            f"`{parent8}`."
+            f"`{parent_id}`."
         )
     else:
         first = (
             f"This conversation was an interactive Claude Code session "
-            f"(`{src8}`, project `{project_basename}`) between Claude and the user."
+            f"(`{src_session_id}`, project `{project_basename}`) between Claude and the user."
         )
     return (
         "[CONVERTED SESSION]\n"
@@ -963,9 +964,7 @@ def rewind_transcript(
     turns_before = len(body)
 
     # Resolve the target turn within the body by uuid or prefix.
-    matched = [
-        d for d in body if (u := d.get("uuid")) and (u == turn or u.startswith(turn))
-    ]
+    matched = matching_ids(body, turn, lambda d: (d.get("uuid", ""),))
     if not matched:
         # The turn matches nothing — but distinguish the common "already rewound"
         # case from a genuinely unknown turn. A prior cut='before' rewind CONSUMES
@@ -978,9 +977,7 @@ def rewind_transcript(
         # ready to resume from its current tail, and there is nothing to do.
         prov = read_provenance(transcript_path)
         rewound_to = prov.get("rewound_to") if isinstance(prov, dict) else None
-        if isinstance(rewound_to, str) and (
-            rewound_to == turn or rewound_to.startswith(turn)
-        ):
+        if isinstance(rewound_to, str) and id_matches(rewound_to, turn):
             rewound_at = prov.get("rewound_at") if isinstance(prov, dict) else None
             when = f" at {rewound_at}" if isinstance(rewound_at, str) else ""
             raise ValueError(
@@ -993,14 +990,11 @@ def rewind_transcript(
         raise ValueError(f"turn {turn!r} not found in this transcript")
     distinct = {d["uuid"] for d in matched}
     if len(distinct) > 1:
-        raise ValueError(
-            f"turn prefix {turn!r} is ambiguous — it matches {len(distinct)} "
-            f"distinct turns in this transcript. Pass a longer id."
-        )
+        raise ambiguous_id(turn, "Turn", distinct)
     target_full = next(iter(distinct))
     if sum(1 for d in body if d.get("uuid") == target_full) > 1:
         raise ValueError(
-            f"turn {target_full[:8]} appears more than once in this transcript "
+            f"turn {target_full} appears more than once in this transcript "
             "(a resumed transcript can repeat a uuid) — cannot unambiguously rewind "
             "to it. Pick a turn with a unique id."
         )
@@ -1018,7 +1012,7 @@ def rewind_transcript(
     if not kept:
         raise ValueError(
             "rewind would discard the entire conversation — nothing remains after "
-            f"the cut={cut} at turn {target_full[:8]} and the resumable-tail trim. "
+            f"the cut={cut} at turn {target_full} and the resumable-tail trim. "
             "Pick a later turn or cut='after'."
         )
 

@@ -24,7 +24,6 @@ from cc_explorer.corpus import (
     rg_safe,
 )
 from cc_explorer.search import SessionInfo, promote_refs, triage
-from cc_explorer.utils import PrefixId
 
 SID_A = "aaaaaaaa-1111-2222-3333-444444444444"
 SID_B = "bbbbbbbb-1111-2222-3333-444444444444"
@@ -55,7 +54,7 @@ def _write_session(
     with open(path, "w") as f:
         for e in entries:
             f.write(json.dumps(e, ensure_ascii=ensure_ascii) + "\n")
-    return SessionRef(session_id=PrefixId(sid), path=path, project_path="/fake")
+    return SessionRef(session_id=sid, path=path, project_path="/fake")
 
 
 def _write_agent(ref: SessionRef, agent_id: str, entries: list[dict]) -> Path:
@@ -499,7 +498,7 @@ def test_session_info_load_returns_none_for_missing_file(tmp_path):
     discovery and promotion) is treated like any other unreadable session —
     load returns None rather than raising, per its documented contract."""
     ref = SessionRef(
-        session_id=PrefixId(SID_A),
+        session_id=SID_A,
         path=tmp_path / "does-not-exist.jsonl",
         project_path="/fake",
     )
@@ -512,7 +511,7 @@ def test_promote_refs_drops_missing_file_ref(tmp_path):
     enc = tmp_path / "enc"
     good = _write_session(enc, SID_A, [_entry("real content")])
     missing = SessionRef(
-        session_id=PrefixId(SID_B),
+        session_id=SID_B,
         path=tmp_path / "gone.jsonl",
         project_path="/fake",
     )

@@ -15,7 +15,6 @@ from cc_explorer.models import (
     UserMessageModel,
 )
 from cc_explorer.subagents import extract_agent_tool_audit
-from cc_explorer.utils import PrefixId
 
 TS = datetime(2026, 3, 15, 10, 30, 0, tzinfo=timezone.utc)
 SESSION_ID = "bbbbbbbb-1111-2222-3333-444444444444"
@@ -23,9 +22,9 @@ SESSION_ID = "bbbbbbbb-1111-2222-3333-444444444444"
 
 def _assistant_with_tool_use(tool_name: str, tool_id: str, inp: dict) -> AssistantTranscriptEntry:
     return AssistantTranscriptEntry(
-        uuid=PrefixId("aaaaaaaa-1111-2222-3333-444444444444"),
+        uuid="aaaaaaaa-1111-2222-3333-444444444444",
         timestamp=TS,
-        sessionId=PrefixId(SESSION_ID),
+        sessionId=SESSION_ID,
         type="assistant",
         message=AssistantMessageModel(
             id="m1",
@@ -35,7 +34,7 @@ def _assistant_with_tool_use(tool_name: str, tool_id: str, inp: dict) -> Assista
             content=[
                 ToolUseContent(
                     type="tool_use",
-                    id=PrefixId(tool_id),
+                    id=tool_id,
                     name=tool_name,
                     input=inp,
                 ),
@@ -46,16 +45,16 @@ def _assistant_with_tool_use(tool_name: str, tool_id: str, inp: dict) -> Assista
 
 def _tool_result_entry(tool_id: str, text: str, is_error: bool = False) -> ToolResultEntry:
     return ToolResultEntry(
-        uuid=PrefixId("cccccccc-1111-2222-3333-444444444444"),
+        uuid="cccccccc-1111-2222-3333-444444444444",
         timestamp=TS,
-        sessionId=PrefixId(SESSION_ID),
+        sessionId=SESSION_ID,
         type="user",
         message=UserMessageModel(
             role="user",
             content=[
                 ToolResultContent(
                     type="tool_result",
-                    tool_use_id=PrefixId(tool_id),
+                    tool_use_id=tool_id,
                     content=[{"type": "text", "text": text}],
                     is_error=is_error,
                 ),

@@ -36,7 +36,6 @@ from cc_explorer.parser import load_transcript
 from cc_explorer.responses import SurveyFailuresResponse
 from cc_explorer.search import SessionInfo, triage
 from cc_explorer.subagents import looks_like_no_match
-from cc_explorer.utils import PrefixId
 
 SID_A = "aaaaaaaa-1111-2222-3333-444444444444"
 SID_B = "bbbbbbbb-1111-2222-3333-444444444444"
@@ -100,7 +99,7 @@ def _write(enc: Path, sid: str, lines: list[dict], project="/fake") -> SessionRe
     enc.mkdir(parents=True, exist_ok=True)
     path = enc / f"{sid}.jsonl"
     path.write_text("".join(json.dumps(x) + "\n" for x in lines))
-    return SessionRef(session_id=PrefixId(sid), path=path, project_path=project)
+    return SessionRef(session_id=sid, path=path, project_path=project)
 
 
 def _write_agent(ref: SessionRef, agent_id: str, lines: list[dict]) -> Path:
@@ -294,7 +293,7 @@ def test_parse_kinds():
 def _block(text: str, is_error=None) -> ToolResultContent:
     return ToolResultContent(
         type="tool_result",
-        tool_use_id=PrefixId("t1"),
+        tool_use_id="t1",
         content=[{"type": "text", "text": text}],
         is_error=is_error,
     )
@@ -317,7 +316,7 @@ def test_flagged_result_is_classified():
 
 def test_result_text_flattens_both_content_shapes():
     assert _block("hello").text == "hello"
-    bare = ToolResultContent(type="tool_result", tool_use_id=PrefixId("t1"), content="raw")
+    bare = ToolResultContent(type="tool_result", tool_use_id="t1", content="raw")
     assert bare.text == "raw"
 
 

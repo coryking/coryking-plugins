@@ -43,19 +43,12 @@ import orjson
 from .providers import Harness, parse_harnesses, providers_for
 from .providers.codex import CodexProvider
 from .subagents import resolve_subagents_dir
-from .utils import PrefixId
+from .identifiers import MIN_ID_LEN, id_matches
 
 
 # Sentinel for sessions/projects with no timestamp: sorts last under newest-first.
 # tz-aware so it never collides with aware timestamps in a sort key.
 EPOCH = datetime.min.replace(tzinfo=timezone.utc)
-
-# Ids shorter than this never match as prefixes — the floor that keeps a stray
-# short id from sweeping the corpus, especially via the destructive tools
-# (rewind, delete). `resolve.py` raises the user-facing too-short error;
-# narrowing here just skips them.
-MIN_ID_LEN = 6
-
 
 # =============================================================================
 # Project resolution
@@ -298,7 +291,7 @@ class TranscriptSource:
     a `subagents/agent-*.jsonl` body (including workflow-orchestrated orphans).
     """
 
-    agent_id: Optional[PrefixId]
+    agent_id: Optional[str]
     path: Path
     harness: Harness = Harness.claude
     paths: tuple[Path, ...] = ()
@@ -314,7 +307,7 @@ class SessionRef:
     the full-parse cost of SessionInfo.
     """
 
-    session_id: PrefixId
+    session_id: str
     path: Path
     project_path: str
     worktree: Optional[str] = None
@@ -360,7 +353,7 @@ class Corpus:
         seen: set[tuple[Harness, str]] = set()
         for provider in providers_for(harnesses):
             for provider_ref in provider.discover_sessions(selected_projects):
-                key = (provider.harness, provider_ref.session_id.full)
+                key = (provider.harness, provider_ref.session_id)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -378,8 +371,7 @@ class Corpus:
 
     def narrow_to_ids(self, ids: Sequence[str]) -> "Corpus":
         """Refs whose session id matches any of the given ids/prefixes."""
-        wanted = [PrefixId(i) for i in ids]
-        return Corpus([r for r in self.refs if any(r.session_id == w for w in wanted)])
+        return Corpus([r for r in self.refs if any(id_matches(r.session_id, i) for i in ids)])
 
     def narrow_to_artifact_ids(self, ids: Sequence[str]) -> "Corpus":
         """Refs matching an id as a SESSION id or HOLDING an agent file for it.
@@ -408,7 +400,7 @@ class Corpus:
             hit_stems: set[str] = set()
             for f in enc.glob("*/subagents/**/agent-*.jsonl"):
                 agent_id = f.name[len("agent-") : -len(".jsonl")]
-                if any(agent_id.startswith(i) for i in wanted):
+                if any(id_matches(agent_id, i) for i in wanted):
                     hit_stems.add(f.relative_to(enc).parts[0])
             if not hit_stems:
                 continue

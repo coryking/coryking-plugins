@@ -18,10 +18,10 @@ from typing import Optional
 
 from fastmcp.exceptions import ToolError
 
-from .corpus import MIN_ID_LEN, SessionRef
+from .corpus import SessionRef
 from .search import SessionInfo
+from .identifiers import MIN_ID_LEN, ambiguous_id, matching_ids
 from .subagents import collect_agent_files, resolve_subagents_dir
-from .utils import PrefixId
 
 
 def resolve_unique_ref_or_none(
@@ -37,30 +37,22 @@ def resolve_unique_ref_or_none(
     `SessionInfo.load`) touches only the colliding refs, so cost stays
     bounded regardless of corpus size.
     """
-    matches = [r for r in refs if r.session_id == session]
-    if not matches:
-        return None
-    distinct = {r.session_id.full for r in matches}
+    matches = matching_ids(refs, session, lambda r: (r.session_id,))
+    distinct = {(r.harness, r.session_id): r for r in matches}
     if len(distinct) > 1:
-        # One ref per distinct full id decides whether the collision is real:
-        # a prefix matching an empty/unparseable session alongside a real one
-        # isn't ambiguous, it's just noise from the empty file.
-        one_per_id = {r.session_id.full: r for r in matches}
-        surviving = {
-            fid: r for fid, r in one_per_id.items() if SessionInfo.load(r) is not None
-        }
+        # Only inspect the colliding candidates; discovery remains filename-only.
+        surviving = [(r, info) for r in distinct.values()
+                     if (info := SessionInfo.load(r)) is not None]
         if len(surviving) == 1:
-            return next(iter(surviving.values()))
+            return surviving[0][0]
         if not surviving:
             return None
-        where = ", ".join(
-            sorted({r.project_path or "?" for r in surviving.values()})
-        )
-        raise ToolError(
-            f"Session prefix {session!r} is ambiguous — it matches {len(surviving)} "
-            f"distinct sessions (in: {where}). Pass a longer id or scope with `projects`."
-        )
-    return matches[0]
+        raise ToolError(str(ambiguous_id(session, "Session", (
+            f"{r.session_id} [{r.harness.value}] in {r.project_path} "
+            f"({info.first_timestamp}; {info.title})"
+            for r, info in surviving
+        ))))
+    return next(iter(distinct.values()), None)
 
 
 def resolve_unique_ref(refs: list[SessionRef], session: str) -> SessionRef:
@@ -91,12 +83,14 @@ def resolve_artifacts(
       - Returns a 4-tuple on unique match, or a no-match placeholder
         (raw_id, "", "", None) so the caller can format its own refused reason.
     """
-    # Build agent index once: (agent_id, project_path, transcript path)
-    agent_index: list[tuple[str, str, Path]] = []
-    for r in refs:
-        for af in collect_agent_files(resolve_subagents_dir(r.path)):
-            if af.agent_id:
-                agent_index.append((af.agent_id, r.project_path or "?", af.path))
+    # Session and agent identities share one lookup so exact matches win across
+    # kinds too. No body parsing is needed for mutation target selection.
+    index: list[tuple[str, str, Path, SessionRef]] = []
+    for ref in refs:
+        index.append(("session", ref.session_id, ref.path, ref))
+        for agent in collect_agent_files(resolve_subagents_dir(ref.path)):
+            if agent.agent_id:
+                index.append(("subagent", agent.agent_id, agent.path, ref))
 
     resolved: list[tuple[str, str, str, Optional[Path]]] = []
     for raw_id in raw_ids:
@@ -104,36 +98,19 @@ def resolve_artifacts(
             raise ToolError(
                 f"Id {raw_id!r} is too short ({len(raw_id)} chars) — pass at least "
                 f"{MIN_ID_LEN} chars to avoid accidental prefix matches. "
-                f"Use list_project_sessions or list_session_agents to find full ids."
+                "Use list_project_sessions or list_session_agents to find full ids."
             )
-        # Session matches
-        session_matches = [r for r in refs if r.session_id == raw_id]
-        distinct_sess = {r.session_id.full for r in session_matches}
-        # Agent matches
-        agent_matches = [
-            (fid, proj, p) for fid, proj, p in agent_index if PrefixId(fid) == raw_id
-        ]
-        distinct_agents = {fid for fid, _, _ in agent_matches}
-
-        total_kinds = len(distinct_sess) + len(distinct_agents)
-        if total_kinds > 1:
-            candidates: list[str] = []
-            for r in session_matches:
-                candidates.append(
-                    f"session {r.session_id.full[:12]} in {r.project_path or '?'}"
-                )
-            for fid, proj, _ in agent_matches:
-                candidates.append(f"agent {fid[:12]} in {proj}")
-            raise ToolError(
-                f"Id prefix {raw_id!r} is ambiguous — it matches {total_kinds} distinct "
-                f"artifacts: {'; '.join(candidates)}. Pass a longer id to disambiguate."
-            )
-        if len(distinct_sess) == 1:
-            r = session_matches[0]
-            resolved.append((raw_id, "session", r.session_id.full, r.path))
-        elif len(distinct_agents) == 1:
-            fid, _, p = agent_matches[0]
-            resolved.append((raw_id, "subagent", fid, p))
+        matches = matching_ids(index, raw_id, lambda row: (row[1],))
+        distinct = {(kind, fid, path): (kind, fid, path, ref)
+                    for kind, fid, path, ref in matches}
+        if len(distinct) > 1:
+            raise ToolError(str(ambiguous_id(raw_id, "Artifact", (
+                f"{kind} {fid} in {ref.project_path} (session {ref.session_id})"
+                for kind, fid, path, ref in distinct.values()
+            ))))
+        if distinct:
+            kind, fid, path, _ = next(iter(distinct.values()))
+            resolved.append((raw_id, kind, fid, path))
         else:
             resolved.append((raw_id, "", "", None))
     return resolved
