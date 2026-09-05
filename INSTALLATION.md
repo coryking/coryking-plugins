@@ -1,5 +1,23 @@
 # Installing coryking-plugins
 
+## Engineering Loop in Codex
+
+Register a local checkout and install the plugin:
+
+```bash
+codex plugin marketplace add /path/to/coryking-plugins
+codex plugin add engineering-loop@coryking-plugins
+```
+
+Use a persistent checkout, not a worktree that will be deleted after delivery.
+The native manifest is `engineering-loop/.codex-plugin/plugin.json`; both
+harnesses load the same skill sources. Start a new thread after installation or
+updates. Check the installed version with:
+
+```bash
+codex plugin list --marketplace coryking-plugins --json
+```
+
 ## From GitHub (recommended)
 
 ```bash
