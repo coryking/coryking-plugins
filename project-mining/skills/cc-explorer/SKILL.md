@@ -166,3 +166,29 @@ Trace subagent execution top-down: `list_project_sessions(min_agents=1)` identif
 - High agent counts in session listings signal orchestration sessions (fan-out research, multi-step workflows).
 - Search is exhaustive by default — patterns match against text, tool inputs (Bash commands, file paths, grep patterns), tool outputs, and assistant thinking. Write tight regex to narrow noisy searches.
 - Converted conversations push back on wrong premises rather than play along — but offer your understanding as understanding anyway; don't make them fight a frame you asserted as fact.
+
+## Parser diagnostics
+
+Each MCP call emits at most one parser summary to stderr: total skipped lines,
+affected transcript count, and separate malformed / unsupported counts. Counts
+cover distinct affected Claude transcripts loaded by that call, including cache
+hits; they are not a health assessment of files excluded by search prefilters.
+Structural headers are silent. Unsupported record types (including
+`agent-setting` and `bridge-session`) indicate missing parser support, not file
+corruption. Invalid JSON, invalid record shapes, and invalid modeled entries
+count as malformed. Codex provider parsing has its own behavior.
+
+For per-file paths and counts, set `CC_EXPLORER_PARSER_DEBUG=1` in the server's
+environment and restart it. Debug output goes to stderr, includes cache hits,
+and grows with the number of affected files; use it on a narrowed call. The
+ordinary summary contains no paths or transcript content, and tool response
+schemas carry no diagnostic fields.
+
+In-process library callers scanning multiple files should wrap the operation in
+`cc_explorer.parser.collect_parser_diagnostics()`; standalone `load_transcript`
+calls emit a single-file summary. Nested scopes share the outer aggregation.
+
+Issue #80 owns this diagnostic classification and aggregation. Issue #61 owns
+parsing and opt-in exposure of recorded provenance; supporting an additional
+record in the parser removes it from the unsupported count without adding it
+to default response payloads.

@@ -195,7 +195,8 @@ class TestSkippedLineReporting:
 
         assert len(entries) == 1
         err = capsys.readouterr().err
-        assert "skipped 2 unparseable line(s)" in err
+        assert "skipped 2 line(s) across 1 transcript(s)" in err
+        assert "1 malformed, 1 unsupported" in err
 
     def test_structural_headers_silent(self, tmp_path, capsys):
         """mode/permission-mode/custom-title/provenance lines are expected —

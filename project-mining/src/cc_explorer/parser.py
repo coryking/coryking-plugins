@@ -12,9 +12,11 @@ Core functions:
 import os
 import sys
 import threading
-from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, Sequence, Union, cast
+from typing import Any, Iterator, Optional, Sequence, Union, cast
 
 import orjson
 from cachetools import LRUCache
@@ -96,6 +98,10 @@ def create_message_content(
 # =============================================================================
 # Transcript Entry Creation
 # =============================================================================
+
+
+class UnsupportedTranscriptType(ValueError):
+    """A record type the conversation parser does not model (#61)."""
 
 
 def _create_user_entry(data: dict[str, Any]) -> Union[HumanEntry, ToolResultEntry, MetaEntry]:
@@ -193,7 +199,7 @@ def create_transcript_entry(data: dict[str, Any]) -> TranscriptEntry:
     elif entry_type == "file-history-snapshot":
         return FileSnapshotEntry.model_validate(data)
     else:
-        raise ValueError(f"Unknown transcript entry type: {entry_type}")
+        raise UnsupportedTranscriptType(f"Unknown transcript entry type: {entry_type}")
 
 
 # =============================================================================
@@ -212,6 +218,73 @@ class CachedTranscript:
     mtime: float
     entries: list[TranscriptEntry]
     nbytes: int
+    malformed: int = 0
+    unsupported: int = 0
+
+
+@dataclass
+class ParserDiagnostics:
+    """One operation's counts; retain paths for deduplication, never raw records."""
+
+    malformed: int = 0
+    unsupported: int = 0
+    _paths: set[Path] = field(default_factory=set)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def record(self, path: Path, malformed: int, unsupported: int) -> None:
+        if not (malformed or unsupported):
+            return
+        with self._lock:
+            if path in self._paths:
+                return
+            self._paths.add(path)
+            self.malformed += malformed
+            self.unsupported += unsupported
+            if os.environ.get("CC_EXPLORER_PARSER_DEBUG") == "1":
+                print(
+                    f"[cc-explorer parser debug] {str(path)!r}: "
+                    f"{malformed} malformed, {unsupported} unsupported line(s)",
+                    file=sys.stderr,
+                )
+
+    def report(self) -> None:
+        if self._paths:
+            # Constant shape: no filenames or record-type lists in ordinary
+            # output. stdout belongs exclusively to the MCP protocol.
+            print(
+                f"[cc-explorer parser] skipped {self.malformed + self.unsupported} "
+                f"line(s) across {len(self._paths)} transcript(s): "
+                f"{self.malformed} malformed, {self.unsupported} unsupported. "
+                "Per-file details: CC_EXPLORER_PARSER_DEBUG=1.",
+                file=sys.stderr,
+            )
+
+
+_diagnostics: ContextVar[ParserDiagnostics | None] = ContextVar(
+    "parser_diagnostics", default=None
+)
+
+
+@contextmanager
+def collect_parser_diagnostics() -> Iterator[ParserDiagnostics]:
+    """Aggregate a batch into one stderr summary, including on failure.
+
+    MCP middleware owns the outer scope. ContextVars propagate into FastMCP's
+    sync worker threads and keep concurrent requests independent. Library
+    callers can wrap their own batches; nested scopes share the outer counts.
+    Cached reads participate so warm and cold requests report the same facts.
+    """
+    existing = _diagnostics.get()
+    if existing is not None:
+        yield existing
+        return
+    diagnostics = ParserDiagnostics()
+    token = _diagnostics.set(diagnostics)
+    try:
+        yield diagnostics
+    finally:
+        _diagnostics.reset(token)
+        diagnostics.report()
 
 
 # Parsed pydantic entry graphs occupy ~1.8x the raw file bytes on the heap
@@ -282,8 +355,8 @@ _cache = TranscriptCache(_cache_max_bytes())
 # Structural header line types that are part of the wire format but are not
 # conversation data: session mode/permission/title/prompt headers, worktree and
 # PR bookkeeping, and our own conversion-provenance sentinel. Skipped silently
-# (they are expected in well-formed files); everything else that fails to parse
-# is counted and reported so tolerant parsing is no longer silent.
+# (they are expected in well-formed files). #61 owns harvesting provenance from
+# these and unsupported records; #80 owns diagnostics, not their exposure.
 _STRUCTURAL_LINE_TYPES = frozenset(
     {
         "mode",
@@ -309,19 +382,28 @@ def load_transcript(path: Path) -> list[TranscriptEntry]:
     The cache is byte-capped (CC_EXPLORER_CACHE_MB, default 200 MB), so a
     corpus-wide operation can't accumulate the whole corpus in memory.
 
-    Skips structural header lines silently and malformed/unknown lines with a
-    counted stderr note. Returns all entry types.
+    Structural headers stay silent. Malformed and unsupported records have
+    separate counts, aggregated by MCP call (or collect_parser_diagnostics for
+    library batches). An individual library load has its own summary.
     """
+    with collect_parser_diagnostics() as diagnostics:
+        cached = _load_transcript(path)
+        diagnostics.record(path.resolve(), cached.malformed, cached.unsupported)
+        return cached.entries
+
+
+def _load_transcript(path: Path) -> CachedTranscript:
     resolved = path.resolve()
     stat = resolved.stat()
     mtime = stat.st_mtime
 
     cached = _cache.get(resolved)
     if cached is not None and cached.mtime == mtime:
-        return cached.entries
+        return cached
 
     entries: list[TranscriptEntry] = []
-    skipped = 0
+    malformed = 0
+    unsupported = 0
     with open(resolved, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
@@ -330,31 +412,33 @@ def load_transcript(path: Path) -> list[TranscriptEntry]:
             try:
                 data = orjson.loads(line)
             except orjson.JSONDecodeError:
-                skipped += 1
+                malformed += 1
                 continue
-            if not isinstance(data, dict) or data.get("type") in _STRUCTURAL_LINE_TYPES:
+            if (
+                not isinstance(data, dict)
+                or not isinstance(data.get("type"), str)
+                or not data["type"]
+            ):
+                malformed += 1
+                continue
+            if data["type"] in _STRUCTURAL_LINE_TYPES:
                 continue
             try:
                 entries.append(create_transcript_entry(data))
+            except UnsupportedTranscriptType:
+                unsupported += 1
             except Exception:
-                skipped += 1
+                malformed += 1
 
-    if skipped:
-        # stderr, never stdout — stdout is the stdio MCP protocol channel.
-        print(
-            f"[cc-explorer parser] {resolved.name}: skipped {skipped} unparseable line(s)",
-            file=sys.stderr,
-        )
-
-    _cache.put(
-        resolved,
-        CachedTranscript(
-            mtime=mtime,
-            entries=entries,
-            nbytes=int(stat.st_size * _HEAP_FACTOR),
-        ),
+    cached = CachedTranscript(
+        mtime=mtime,
+        entries=entries,
+        nbytes=int(stat.st_size * _HEAP_FACTOR),
+        malformed=malformed,
+        unsupported=unsupported,
     )
-    return entries
+    _cache.put(resolved, cached)
+    return cached
 
 
 @dataclass(frozen=True)

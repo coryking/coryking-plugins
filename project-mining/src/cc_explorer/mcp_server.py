@@ -50,7 +50,7 @@ from .failures import narrow_to_error_sessions, survey_failures as run_failure_s
 from .formatting import matches_id
 from .models import FailureKind, TranscriptStats, parse_hide, parse_kinds
 from .param_repair import argument_error_message, repair_arguments
-from .parser import load_conversations, load_transcript
+from .parser import collect_parser_diagnostics, load_conversations, load_transcript
 from .providers import Harness
 from .resolve import (
     resolve_artifacts,
@@ -376,6 +376,19 @@ class ParameterRepairMiddleware(Middleware):
         return getattr(tool, "parameters", None)
 
 
+class ParserDiagnosticsMiddleware(Middleware):
+    """Bound parser stderr to one summary per tool call, including failures."""
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[CallToolRequestParams],
+        call_next: CallNext[CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        with collect_parser_diagnostics():
+            return await call_next(context)
+
+
+mcp.add_middleware(ParserDiagnosticsMiddleware())
 mcp.add_middleware(ParameterRepairMiddleware())
 
 _TOOL_ANNOTATIONS = {"readOnlyHint": True, "openWorldHint": False}
