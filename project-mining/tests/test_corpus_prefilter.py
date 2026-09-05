@@ -43,12 +43,18 @@ def _entry(text, uuid="11111111-aaaa-bbbb-cccc-dddddddddddd", session=SID_A, blo
     }
 
 
-def _write_session(enc_dir: Path, sid: str, entries: list[dict]) -> SessionRef:
+def _write_session(
+    enc_dir: Path,
+    sid: str,
+    entries: list[dict],
+    *,
+    ensure_ascii: bool = True,
+) -> SessionRef:
     enc_dir.mkdir(parents=True, exist_ok=True)
     path = enc_dir / f"{sid}.jsonl"
     with open(path, "w") as f:
         for e in entries:
-            f.write(json.dumps(e) + "\n")
+            f.write(json.dumps(e, ensure_ascii=ensure_ascii) + "\n")
     return SessionRef(session_id=PrefixId(sid), path=path, project_path="/fake")
 
 
@@ -73,14 +79,17 @@ def _write_agent(ref: SessionRef, agent_id: str, entries: list[dict]) -> Path:
         "hello",
         "foo.*bar",
         "colou?r",
-        r"wiggle\d+",
+        r"woggle\d+",
         r"foo\.bar",
         "alpha|beta",
         r"\bword\b",
-        "case INSENSITIVE",
-        "a.*b",             # `.*` absorbs a multi-char escape
-        "a.+b",             # `.+` absorbs a multi-char escape
-        r"a\.b",            # escaped literal dot — never rewritten by JSON escaping
+        "case-neutral",
+        "a.*b",  # `.*` absorbs a multi-char escape
+        "a.+b",  # `.+` absorbs a multi-char escape
+        r"a\.b",  # escaped literal dot — never rewritten by JSON escaping
+        r"[0-9]+",  # numeric ranges do not participate in case folding
+        r"[a-h]+",  # ASCII letter range that excludes I/i
+        r"[J-Z]+",  # ASCII letter range that excludes I/i
     ],
 )
 def test_rg_safe_accepts_plain_patterns(pattern):
@@ -109,6 +118,23 @@ def test_rg_safe_accepts_plain_patterns(pattern):
     ],
 )
 def test_rg_safe_rejects_escaping_hazards(pattern):
+    assert not rg_safe(pattern)
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "din",  # literal i also matches Python's extra İ/ı pair
+        "DIN",
+        "d[i]n",  # literal i inside a positive character class
+        "d[a-z]n",  # range includes i
+        "d[H-J]n",  # uppercase range includes I
+        "d[A-h]n",  # mixed-case ASCII range includes uppercase I
+        "d[J-z]n",  # mixed-case ASCII range includes lowercase i
+        "dİn",  # non-ASCII pattern: engine Unicode versions may differ
+    ],
+)
+def test_rg_safe_rejects_unproven_unicode_case_folding(pattern):
     assert not rg_safe(pattern)
 
 
@@ -205,28 +231,6 @@ def test_py_scanner_raises_scanner_error_on_permission_denied(tmp_path, monkeypa
         PyScanner().files_with_match(["alpha"], [a])
 
 
-@pytest.mark.skipif(shutil.which("rg") is None, reason="rg not on PATH")
-@pytest.mark.xfail(
-    strict=False,
-    reason="#82: rg --ignore-case does not fold U+0130 like Python re.IGNORECASE",
-)
-def test_rg_scanner_unicode_case_folding_gap(tmp_path):
-    """Pins the documented gap: Python's re.IGNORECASE folds U+0130 İ to 'i',
-    so `din` matches `dİn` in the typed matcher — but rg's --ignore-case
-    doesn't fold the same way, so the RgScanner prefilter can miss it. xfail
-    with strict=False since rg's exact Unicode behavior may vary by version."""
-    rg = shutil.which("rg")
-    a = tmp_path / "a.jsonl"
-    a.write_text(json.dumps(_entry("word dİn here"), ensure_ascii=False) + "\n")
-
-    # A raw JSON Unicode escape would make BOTH scanners miss the word and
-    # confound the folding comparison. Establish the Python oracle first.
-    assert PyScanner().files_with_match(["din"], [a]) == {a}
-
-    hits = RgScanner(rg).files_with_match(["din"], [a])
-    assert hits == {a}
-
-
 def test_rg_scanner_raises_on_bad_pattern(tmp_path):
     """A pattern the rust engine rejects surfaces as ScannerError (callers
     fall back to scan-all), never a silent empty candidate set."""
@@ -246,11 +250,11 @@ def test_rg_scanner_raises_on_bad_pattern(tmp_path):
 
 def test_candidate_refs_selects_matching_session(tmp_path):
     enc = tmp_path / "enc"
-    ref_a = _write_session(enc, SID_A, [_entry("we discussed the sandwich filter")])
+    ref_a = _write_session(enc, SID_A, [_entry("we discussed the hamburger filter")])
     ref_b = _write_session(enc, SID_B, [_entry("pruning strategy", session=SID_B)])
     corpus = Corpus([ref_a, ref_b])
 
-    candidates = corpus.candidate_refs(["sandwich"])
+    candidates = corpus.candidate_refs(["hamburger"])
     assert candidates == [ref_a]
 
 
@@ -357,6 +361,49 @@ def test_superset_at_bare_dot_escape_boundary(tmp_path):
     assert corpus.candidate_refs(["a.b"]) == [ref]
 
 
+def test_unicode_casefold_literal_json_uses_safe_fallback(tmp_path):
+    """Literal UTF-8 makes the engine mismatch visible: the decoded matcher
+    accepts dİn for `din`, so an rg prefilter must not be allowed to drop it."""
+    enc = tmp_path / "enc"
+    matching = _write_session(
+        enc,
+        SID_A,
+        [_entry("word dİn here")],
+        ensure_ascii=False,
+    )
+    unrelated = _write_session(enc, SID_B, [_entry("unrelated", session=SID_B)])
+    corpus = Corpus([matching, unrelated])
+
+    raw = matching.path.read_text()
+    assert "dİn" in raw
+    assert r"d\u0130n" not in raw
+    oracle = triage(promote_refs(corpus.refs), "din")
+    assert [result.session.session_id for result in oracle] == [matching.session_id]
+
+    # The Python fallback sees the literal character with the authoritative
+    # folding semantics without promoting the unrelated session.
+    assert corpus.candidate_refs(["din"]) == [matching]
+
+
+def test_unicode_casefold_escaped_json_uses_safe_fallback(tmp_path):
+    """ASCII-escaped JSON is a separate hazard: neither raw scanner can see
+    decoded dİn as `din` without the supplemental raw-escape candidate."""
+    enc = tmp_path / "enc"
+    matching = _write_session(enc, SID_A, [_entry("word dİn here")])
+    unrelated = _write_session(enc, SID_B, [_entry("unrelated", session=SID_B)])
+    corpus = Corpus([matching, unrelated])
+
+    raw = matching.path.read_text()
+    assert "dİn" not in raw
+    assert r"d\u0130n" in raw
+    oracle = triage(promote_refs(corpus.refs), "din")
+    assert [result.session.session_id for result in oracle] == [matching.session_id]
+
+    # The supplemental raw-escape pattern conservatively selects this file;
+    # the typed matcher above remains the oracle for whether it is a real hit.
+    assert corpus.candidate_refs(["din"]) == [matching]
+
+
 def test_prefilter_equivalent_to_full_scan_for_safe_patterns(tmp_path):
     """End-to-end superset check: triage over candidate refs produces exactly
     the same results as triage over every ref, for prefilter-safe patterns."""
@@ -370,14 +417,14 @@ def test_prefilter_equivalent_to_full_scan_for_safe_patterns(tmp_path):
         [
             _entry("the double pruning strategy looks good", session=SID_B),
             _entry(
-                "let's check the rendering pipeline",
+                "let's check the export path",
                 uuid="44444444-aaaa-bbbb-cccc-dddddddddddd",
                 session=SID_B,
             ),
         ],
     )
     corpus = Corpus([ref_a, ref_b])
-    patterns = ["database", "prun", "rendering", "zzznotfound"]
+    patterns = ["database", "prun", "export", "zzznotfound"]
 
     all_sessions = [SessionInfo.load(r) for r in corpus.refs]
     all_sessions = [s for s in all_sessions if s]
