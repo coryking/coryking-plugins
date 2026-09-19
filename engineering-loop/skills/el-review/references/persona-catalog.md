@@ -58,7 +58,7 @@ A fourth layer that lives **in the consuming project, not in engineering-loop**.
 
 **Selection.** Each opted-in agent's frontmatter `description` carries its own "invoke when…" criterion. The orchestrator treats it exactly like a built-in cross-cutting conditional's selection line: read the diff, decide whether the agent's stated domain is touched, select it when it is. Additive to the built-in layers, never a replacement.
 
-**Model.** Project-custom reviewers run at whatever their own frontmatter `model:` declares — they are exempt from the mid-tier dispatch override the built-ins receive. The built-in tiering was hand-calibrated per persona; an unknown project reviewer's stakes cannot be, so the author owns the call (`model: inherit` runs it at the session model). Under Codex, `model:` has no meaning; a reviewer that wants a specific Codex model declares `codex_model:` with a literal model ID, and the orchestrator passes it at spawn time (no override when absent).
+**Model.** Project-custom reviewers are exempt from the built-in mid-tier override. `model:` governs Claude Code; `codex_model:` declares a literal Codex model ID. The author owns the cost/quality choice. The orchestrator resolves these fields using Stage 4's project-custom dispatch instructions, including compatible fork settings and user model constraints.
 
 **Author contract.** A project-custom reviewer must conform to the same output contract as a built-in persona (see `subagent-template.md`):
 
