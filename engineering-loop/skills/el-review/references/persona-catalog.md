@@ -58,7 +58,7 @@ A fourth layer that lives **in the consuming project, not in engineering-loop**.
 
 **Selection.** Each opted-in agent's frontmatter `description` carries its own "invoke when…" criterion. The orchestrator treats it exactly like a built-in cross-cutting conditional's selection line: read the diff, decide whether the agent's stated domain is touched, select it when it is. Additive to the built-in layers, never a replacement.
 
-**Model.** Project-custom reviewers run at whatever their own frontmatter `model:` declares — they are exempt from the mid-tier dispatch override the built-ins receive. The built-in tiering was hand-calibrated per persona; an unknown project reviewer's stakes cannot be, so the author owns the call (`model: inherit` runs it at the session model).
+**Model.** Project-custom reviewers run at whatever their own frontmatter `model:` declares — they are exempt from the mid-tier dispatch override the built-ins receive. The built-in tiering was hand-calibrated per persona; an unknown project reviewer's stakes cannot be, so the author owns the call (`model: inherit` runs it at the session model). Under Codex, `model:` has no meaning; a reviewer that wants a specific Codex model declares `codex_model:` with a literal model ID, and the orchestrator passes it at spawn time (no override when absent).
 
 **Author contract.** A project-custom reviewer must conform to the same output contract as a built-in persona (see `subagent-template.md`):
 
@@ -66,6 +66,7 @@ A fourth layer that lives **in the consuming project, not in engineering-loop**.
 - Honor the anchored confidence rubric (anchors `0/25/50/75/100`; actionable floor `75`, P0 may surface at `50`).
 - Respect the `run_id` artifact convention: write full analysis to `/tmp/engineering-loop/review/{run_id}/{reviewer}.json`, return compact merge-tier JSON.
 - An agent that emits **unstructured** markdown instead can use the existing agent-native / deployment surfaces (Stage 6 dedicated sections); structured JSON is the path that flows through merge/dedup/confidence.
+- Declare `model:` for Claude Code; add `codex_model:` (literal Codex model ID) when the reviewer should run on a specific model under Codex.
 
 **Reference implementation.** The King-family finance project's `financial-modeling-reviewer` (`~/projects/finance/.claude/agents/financial-modeling-reviewer.md`) is built to this contract — schema- and rubric-compatible, with an explicit "Invoke when…" description — and serves as the worked example for authors.
 
