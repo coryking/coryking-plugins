@@ -1,6 +1,6 @@
 {
   "name": "engineering-loop",
-  "version": "0.9.0+codex.20260905180103",
+  "version": "0.9.1",
   "description": "Code review, instruction maintenance, research agents, and session closeout for solo development.",
   "author": {
     "name": "Cory King"
