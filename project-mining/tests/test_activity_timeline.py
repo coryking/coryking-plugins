@@ -19,7 +19,6 @@ import cc_explorer.activity as activity
 from cc_explorer.activity import build_activity_timeline
 from cc_explorer.parser import ConversationRef
 from cc_explorer.subagents import AgentFile
-from cc_explorer.utils import PrefixId
 
 # Window: 2026-06-02 00:00 -> 2026-06-09 00:00 in America/Los_Angeles (UTC-7).
 TZ = "America/Los_Angeles"
@@ -204,7 +203,7 @@ def corpus(tmp_path, monkeypatch):
         proj_dir = tmp_path / project
         path = proj_dir / f"{session_id}.jsonl"
         write_jsonl(path, entries)
-        projects.setdefault(str(proj_dir), {})[PrefixId(session_id)] = ConversationRef(
+        projects.setdefault(str(proj_dir), {})[session_id] = ConversationRef(
             path=path, worktree=None
         )
         files = []
@@ -345,11 +344,11 @@ class TestHeadlessSegregation:
         assert round(s["headless"]["machine_hours"], 1) == round(10 / 60, 1)
         # Both present in sessions list.
         ids = {x["id"] for x in out["sessions"]}
-        assert SESSION_A[:8] in ids and SESSION_H[:8] in ids
+        assert SESSION_A in ids and SESSION_H in ids
         # Headless is flagged and present in the timeline grid.
-        headless_row = next(x for x in out["sessions"] if x["id"] == SESSION_H[:8])
+        headless_row = next(x for x in out["sessions"] if x["id"] == SESSION_H)
         assert headless_row["headless"] is True
-        in_timeline = any(SESSION_H[:8] in row for row in out["timeline"].values())
+        in_timeline = any(SESSION_H in row for row in out["timeline"].values())
         assert in_timeline
 
     def test_headless_not_in_day_arrays(self, corpus):
@@ -570,7 +569,7 @@ class TestDedupeByUuid:
         corpus("proj_two", SESSION_A, entries)  # same UUID under a second project
         out = run()
         ids = [x["id"] for x in out["sessions"]]
-        assert ids.count(SESSION_A[:8]) == 1
+        assert ids.count(SESSION_A) == 1
         assert out["summary"]["interactive"]["sessions"] == 1
 
 
@@ -629,7 +628,7 @@ class TestSessionFields:
         out = run()
         ids = [x["id"] for x in out["sessions"]]
         # Interactive first (B with 10min before A with 1min), headless last despite 100min.
-        assert ids == [SESSION_B[:8], SESSION_A[:8], SESSION_H[:8]]
+        assert ids == [SESSION_B, SESSION_A, SESSION_H]
 
 
 class TestOpeningClosingSubstance:
@@ -818,7 +817,7 @@ class TestMtimePruning:
         out = run()
 
         assert old_path not in scanned  # pruned before parse
-        assert [s["id"] for s in out["sessions"]] == [SESSION_A[:8]]
+        assert [s["id"] for s in out["sessions"]] == [SESSION_A]
 
     def test_pruning_preserves_payload(self, corpus, tmp_path):
         """Parity: the same window produces an identical payload whether the
@@ -856,7 +855,7 @@ class TestMtimePruning:
 
         out = run()
 
-        assert [s["id"] for s in out["sessions"]] == [SESSION_A[:8]]
+        assert [s["id"] for s in out["sessions"]] == [SESSION_A]
         sess = out["sessions"][0]
         assert sess["n_sub"] == 1
         assert sess["agent_turns"] == 2
@@ -901,3 +900,14 @@ class TestMtimePruning:
 
         assert parent_path in scanned  # kept alive past the stat-only prune...
         assert out["sessions"] == []  # ...but folds in no activity, so it's dropped
+
+
+def test_colliding_session_prefixes_keep_separate_activity(corpus):
+    first = "01992000-1111-7111-8111-111111111111"
+    second = "01992000-2222-7222-8222-222222222222"
+    for sid in (first, second):
+        corpus("proj", sid, [human(utc(2026, 6, 3, 18, 0), sid)])
+    out = run()
+    assert {s["id"] for s in out["sessions"]} == {first, second}
+    assert any(first in row and second in row for row in out["timeline"].values())
+    assert out["summary"]["interactive"]["human_turns"] == 2

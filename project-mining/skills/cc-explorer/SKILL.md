@@ -46,6 +46,12 @@ Each step narrows scope and increases fidelity. No tool switches modes or change
 
 Entry text in `grep_session`, `read_turn`, and `browse_session` output uses pipe-delimited format: `turn_id|timestamp|role|full_length|display`. `turn_id` leads so it's the first field to grab when feeding `read_turn`. Roles: `U` = user, `A` = assistant, `T` = tool result (output from a tool call). The tool descriptions document this format in detail. In agent-team sessions, a `U` turn that is a teammate DM (orchestration, not the human) renders labeled as `[teammate: <sender> → <recipient>] ...` rather than as raw `<teammate-message>` XML.
 
+### Identifiers and saved references
+
+Tool output contains complete identifiers. Copy them unchanged into follow-up calls and citations; do not shorten them. Legacy prefixes are accepted when they identify one object. A successful lookup returns the complete ID: use it when refreshing a saved project reference. If a prefix is ambiguous, compare the complete candidates with the citation's project, date, or topic and narrow the scope. Never choose the first candidate just to make the lookup succeed. A complete turn ID copied into multiple transcripts may also require session scope.
+
+Absent response fields are omitted; meaningful zero counts, false flags, and empty collections remain. `context=0` returns only the matching turn, without neighboring turns.
+
 ### Controlling assistant turn detail with `hide`
 
 `grep_session`, `read_turn`, and `browse_session` accept a `hide` parameter — a comma-separated set of assistant-turn content atoms to suppress from both search and display:

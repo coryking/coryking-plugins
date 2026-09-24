@@ -37,7 +37,6 @@ from cc_explorer.search import (
     search,
     triage_multi,
 )
-from cc_explorer.utils import PrefixId
 
 
 SESSION_ID = "aaaaaaaa-1111-2222-3333-444444444444"
@@ -98,7 +97,7 @@ def _tool_result_entry(text: str, uuid: str = "33333333-aaaa-bbbb-cccc-ddddddddd
             content=[
                 ToolResultContent(
                     type="tool_result",
-                    tool_use_id=PrefixId("tool-0001-2222-3333-444444444444"),
+                    tool_use_id="tool-0001-2222-3333-444444444444",
                     content=text,
                 ),
             ],
@@ -256,7 +255,7 @@ class TestExcerptFallsBackToRawText:
                     TextContent(type="text", text="short reply"),
                     ToolUseContent(
                         type="tool_use",
-                        id=PrefixId("tool-9999-2222-3333-444444444444"),
+                        id="tool-9999-2222-3333-444444444444",
                         name="Bash",
                         input={"command": long_cmd},
                     ),

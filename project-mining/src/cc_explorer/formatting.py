@@ -5,7 +5,7 @@ Builder logic lives on the response models themselves (responses.py).
 
 Pipe-delimited entry line format:
   turn_id|timestamp|role|full_length|display
-  - turn_id: first 8 chars of turn UUID (via PrefixId.__str__) — leads so it's
+  - turn_id: complete turn UUID — leads so it's
     the first thing grabbed when an agent extracts it for read_turn
   - timestamp: unix epoch seconds
   - role: U (user), A (assistant), or T (tool result)
@@ -29,7 +29,7 @@ from .models import (
     format_tool_input,
 )
 from .subagents import SubagentInfo
-from .utils import PrefixId, smart_truncate
+from .utils import smart_truncate
 
 
 # =============================================================================
@@ -132,7 +132,7 @@ def format_entry_line(
     """
     if not isinstance(entry, BaseTranscriptEntry):
         uuid = getattr(entry, 'uuid', None)
-        turn_id = uuid if isinstance(uuid, PrefixId) else PrefixId(uuid or '')
+        turn_id = uuid if isinstance(uuid, str) else str(uuid or '')
         return f"{turn_id}|0|?|0|[?]"
 
     # Get full display for length calculation
@@ -209,13 +209,3 @@ def render_trace(
                 ts = "        "
 
     return lines
-
-
-# =============================================================================
-# ID matching helper
-# =============================================================================
-
-
-def matches_id(sa: SubagentInfo, prefix: str) -> bool:
-    """Check if a subagent matches an agent_id or tool_use_id prefix."""
-    return sa.agent_id == prefix or sa.tool_use_id == prefix

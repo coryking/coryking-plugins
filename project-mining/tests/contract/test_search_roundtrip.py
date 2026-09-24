@@ -1,18 +1,4 @@
-"""Contract test: IDs returned by search() are resolvable by get_turn_context().
-
-This is a regression test for a bug where grep_session returned turn IDs that
-read_turn couldn't find. The root cause was that get_turn_context used != (which
-dispatches to str.__ne__ on PrefixId, doing exact comparison) instead of using
-PrefixId's prefix-aware equality.
-
-Test level: integration/contract. Neither search() nor get_turn_context() is
-broken in isolation — the bug is in the contract between them. search() returns
-turn UUIDs that get serialized to 8-char prefixes at the MCP boundary;
-get_turn_context() must accept those prefixes back.
-
-Reference: Fowler, "Contract Test" — verifies two components agree on the
-shape and semantics of their shared interface.
-"""
+"""Search identifiers round-trip unchanged; saved legacy prefixes still resolve."""
 
 from datetime import datetime, timezone
 from pathlib import Path
@@ -88,31 +74,27 @@ class TestSearchToReadTurnContract:
         assert result.matches, "search should find 'hello' in the user message"
 
         turn_uuid = result.matches[0].turn_uuid
-        session, entries, _agent = get_turn_context(sessions, turn_uuid)
+        resolved = get_turn_context(sessions, turn_uuid)
 
-        assert session is not None, (
+        assert resolved is not None, (
             f"get_turn_context could not resolve full turn_uuid={turn_uuid!r}"
         )
 
     def test_prefix_from_search_resolves(self, sessions):
-        """The actual bug: search returns a PrefixId, MCP serializes to 8-char
-        prefix, read_turn passes that prefix back to get_turn_context.
-
-        get_turn_context must resolve prefix IDs, not just full UUIDs.
-        """
+        """A unique prefix saved by an earlier caller still locates the full turn."""
         result = search(sessions, "hello")
         assert result.matches
 
-        # Simulate the MCP serialization boundary: turn_uuid -> 8-char prefix
+        # Simulate a saved legacy citation.
         full_turn_uuid = result.matches[0].turn_uuid
         prefix = str(full_turn_uuid)[:8]
 
-        session, entries, _agent = get_turn_context(sessions, prefix)
+        resolved = get_turn_context(sessions, prefix)
 
-        assert session is not None, (
+        assert resolved is not None, (
             f"get_turn_context could not resolve prefix={prefix!r} "
             f"(from full={full_turn_uuid!r}). "
             f"This is the grep_session -> read_turn contract: "
             f"IDs returned by search must be resolvable."
         )
-        assert len(entries) > 0, "should return the matched turn plus context"
+        assert len(resolved.entries) > 0, "should return the matched turn plus context"

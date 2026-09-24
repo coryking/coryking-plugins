@@ -56,11 +56,10 @@ def patch_session_corpus(sessions):
     import site (mcp_server, search).
     """
     from cc_explorer.corpus import Corpus, SessionRef
-    from cc_explorer.utils import PrefixId
 
     refs = [
         SessionRef(
-            session_id=PrefixId(str(s.session_id.full if isinstance(s.session_id, PrefixId) else s.session_id)),
+            session_id=s.session_id,
             path=s.path,
             project_path=s.project_path or "/fake",
             worktree=s.worktree,

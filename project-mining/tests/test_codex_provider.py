@@ -14,7 +14,6 @@ from cc_explorer.providers import Harness
 from cc_explorer.providers.codex import CodexProvider
 from cc_explorer.search import SessionInfo, get_turn_context, triage_multi
 from cc_explorer.responses import SessionSummary
-from cc_explorer.utils import PrefixId
 
 
 def _write_rollout(path: Path, *items: dict) -> None:
@@ -50,7 +49,7 @@ def test_discovers_codex_rollouts_by_metadata_cwd(tmp_path: Path) -> None:
 
     assert len(refs) == 1
     assert refs[0].harness is Harness.codex
-    assert refs[0].session_id.full == thread
+    assert refs[0].session_id == thread
     assert refs[0].project_path == "/repo/example"
     assert refs[0].transcript_files() == [rollout]
 
@@ -100,7 +99,7 @@ def test_parses_messages_reasoning_tools_and_outputs(tmp_path: Path) -> None:
     assert "rg blue" in entries[2].display(0)
     assert "project/widget.py: blue" in entries[3].display(0)
     assert entries[4].display(0) == "Found it."
-    assert len({e.uuid.full for e in entries}) == 5
+    assert len({e.uuid for e in entries}) == 5
 
 
 def test_history_base_is_one_logical_session(tmp_path: Path) -> None:
@@ -134,7 +133,7 @@ def test_history_base_is_one_logical_session(tmp_path: Path) -> None:
 
     provider = CodexProvider(tmp_path)
     refs = provider.discover_sessions(["/repo/example"])
-    child_ref = next(ref for ref in refs if ref.session_id.full == child_id)
+    child_ref = next(ref for ref in refs if ref.session_id == child_id)
     entries = provider.load_transcript(child_ref.paths)
 
     rendered = [entry.display(0) for entry in entries]
@@ -168,7 +167,7 @@ def test_corpus_combines_harnesses_and_can_filter(monkeypatch, tmp_path: Path) -
     claude_path.touch()
     codex_path.touch()
     codex_ref = type("CodexRef", (), {
-        "session_id": PrefixId("22222222-2222-4222-8222-222222222222"),
+        "session_id": "22222222-2222-4222-8222-222222222222",
         "path": codex_path,
         "paths": (codex_path,),
         "project_path": "/repo/example",
@@ -179,7 +178,7 @@ def test_corpus_combines_harnesses_and_can_filter(monkeypatch, tmp_path: Path) -
     monkeypatch.setattr(
         "cc_explorer.providers.claude.load_conversations",
         lambda project: {
-            PrefixId("11111111-1111-4111-8111-111111111111"):
+            "11111111-1111-4111-8111-111111111111":
                 ConversationRef(path=claude_path, worktree=None)
         },
     )
@@ -191,7 +190,7 @@ def test_corpus_combines_harnesses_and_can_filter(monkeypatch, tmp_path: Path) -
     combined = Corpus.discover(["/repo/example"])
     codex_only = Corpus.discover(["/repo/example"], harnesses=["codex"])
 
-    assert [(ref.harness.value, ref.session_id.full) for ref in combined.refs] == [
+    assert [(ref.harness.value, ref.session_id) for ref in combined.refs] == [
         ("claude", "11111111-1111-4111-8111-111111111111"),
         ("codex", "22222222-2222-4222-8222-222222222222"),
     ]
@@ -214,7 +213,7 @@ def test_codex_ref_runs_through_existing_search_and_read(tmp_path: Path) -> None
         }),
     )
     ref = SessionRef(
-        session_id=PrefixId(thread), path=rollout, paths=(rollout,),
+        session_id=thread, path=rollout, paths=(rollout,),
         project_path="/repo/example", harness=Harness.codex,
     )
 
@@ -225,11 +224,11 @@ def test_codex_ref_runs_through_existing_search_and_read(tmp_path: Path) -> None
     result = triage_multi([session], ["needle"])
     assert result[0][1][0].count == 1
     entries = CodexProvider(tmp_path).load_transcript((rollout,))
-    found, context, _ = get_turn_context(
-        [session], entries[0].uuid.full, context=1, session_id=thread
+    found = get_turn_context(
+        [session], entries[0].uuid, context=1, session_id=thread
     )
-    assert found is session
-    assert [entry.display(0) for entry in context] == [
+    assert found is not None and found.session is session
+    assert [entry.display(0) for entry in found.entries] == [
         "needle in Codex", "answer from Codex"
     ]
 
@@ -292,7 +291,7 @@ def test_read_turn_finds_synthetic_codex_turn_without_session(monkeypatch, tmp_p
         }),
     )
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-    turn = CodexProvider(tmp_path).load_transcript((rollout,))[0].uuid.full
+    turn = CodexProvider(tmp_path).load_transcript((rollout,))[0].uuid
 
     response = read_turn(
         turn=turn,

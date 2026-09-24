@@ -35,7 +35,8 @@ from .conversion import read_provenance
 from .parser import load_transcript
 from .providers import Harness, provider_for
 from .subagents import collect_agent_files, discover_subagents, resolve_subagents_dir
-from .utils import PrefixId, smart_truncate
+from .utils import smart_truncate
+from .identifiers import ambiguous_id, id_matches, matching_ids
 
 
 # =============================================================================
@@ -105,7 +106,7 @@ def session_sources(
             continue
         sources.append(
             TranscriptSource(
-                agent_id=PrefixId(af.agent_id) if af.agent_id else None,
+                agent_id=af.agent_id if af.agent_id else None,
                 path=af.path,
             )
         )
@@ -176,7 +177,7 @@ class SessionInfo:
     sessions come back labeled with their basename (e.g. 'happy-lehmann').
     """
 
-    session_id: PrefixId
+    session_id: str
     path: Path
     title: str  # auto-generated from first human message
     first_timestamp: Optional[datetime]
@@ -325,7 +326,7 @@ class TriageResult:
     session: SessionInfo
     count: int
     first_match_example: str = ""  # example excerpt from first matching entry
-    agent_id: Optional[PrefixId] = None
+    agent_id: Optional[str] = None
 
 
 SearchableEntry = HumanEntry | AssistantTranscriptEntry | ToolResultEntry
@@ -340,12 +341,12 @@ class MatchHit:
     the same transcript the match came from.
     """
 
-    session_id: PrefixId
-    turn_uuid: PrefixId
+    session_id: str
+    turn_uuid: str
     entry: SearchableEntry
     context_before: list[TranscriptEntry]
     context_after: list[TranscriptEntry]
-    agent_id: Optional[PrefixId] = None
+    agent_id: Optional[str] = None
 
 
 @dataclass
@@ -567,6 +568,8 @@ def _get_context(
     errors_only: bool = False,
 ) -> tuple[list[TranscriptEntry], list[TranscriptEntry]]:
     """Get context entries around a match, filtered to visible conversation types."""
+    if context <= 0:
+        return [], []
     conv_types = context_types_for(hide, base_types, errors_only)
 
     before: list[TranscriptEntry] = []
@@ -622,7 +625,7 @@ def triage(
             continue
         count = 0
         first_example = ""
-        first_agent_id: Optional[PrefixId] = None
+        first_agent_id: Optional[str] = None
         for source in session_sources(session):
             entries = load_source_transcript(source)
             for entry in entries:
@@ -667,7 +670,7 @@ def triage_multi(
     search_types = search_types_for(hide, base_types, errors_only)
 
     # Per-pattern accumulators: {pattern_index: {session_index: (count, first_example, first_agent_id)}}
-    accum: dict[int, dict[int, tuple[int, str, Optional[PrefixId]]]] = {
+    accum: dict[int, dict[int, tuple[int, str, Optional[str]]]] = {
         i: {} for i in range(len(compiled))
     }
 
@@ -717,7 +720,7 @@ def search_multi(
     max_results_per_pattern: int = 30,
     hide: frozenset[str] = frozenset(),
     errors_only: bool = False,
-) -> dict[PrefixId, list[tuple[str, list[MatchHit], int]]]:
+) -> dict[str, list[tuple[str, list[MatchHit], int]]]:
     """Search N patterns across N sessions in a single pass per session.
 
     Mirrors triage_multi's accumulator shape but holds full MatchHit objects
@@ -734,7 +737,7 @@ def search_multi(
     compiled = [(pat, re.compile(pat, re.IGNORECASE)) for pat in patterns]
     search_types = search_types_for(hide, base_types, errors_only)
 
-    out: dict[PrefixId, list[tuple[str, list[MatchHit], int]]] = {}
+    out: dict[str, list[tuple[str, list[MatchHit], int]]] = {}
 
     for session in sessions:
         if session.is_conversion_artifact:
@@ -762,7 +765,7 @@ def search_multi(
                     per_pattern[pi].append(
                         MatchHit(
                             session_id=session.session_id,
-                            turn_uuid=PrefixId(entry.uuid or ""),
+                            turn_uuid=entry.uuid,
                             entry=entry,
                             context_before=before,
                             context_after=after,
@@ -803,7 +806,11 @@ def search(
 
     target_sessions = sessions
     if session_id:
-        target_sessions = [s for s in sessions if s.session_id == session_id]
+        target_sessions = matching_ids(sessions, session_id, lambda s: (s.session_id,))
+        if len(target_sessions) > 1:
+            raise ambiguous_id(session_id, "Session", (
+                f"{s.session_id} in {s.project_path}" for s in target_sessions
+            ))
 
     for session in target_sessions:
         if session.is_conversion_artifact:
@@ -822,7 +829,7 @@ def search(
                 session_matches.append(
                     MatchHit(
                         session_id=session.session_id,
-                        turn_uuid=PrefixId(entry.uuid or ""),
+                        turn_uuid=entry.uuid,
                         entry=entry,
                         context_before=before,
                         context_after=after,
@@ -870,65 +877,52 @@ def search(
     )
 
 
+@dataclass
+class TurnContext:
+    session: SessionInfo
+    turn: str
+    entries: list[TranscriptEntry]
+    agent_id: str | None = None
+
+
+@dataclass
+class BrowseWindow:
+    entries: list[TranscriptEntry]
+    total: int
+    anchor: str | None = None
+
+
 def get_turn_context(
     sessions: list[SessionInfo],
     turn_uuid: str,
     context: int = 3,
     hide: frozenset[str] = frozenset(),
     session_id: str | None = None,
-) -> tuple[SessionInfo | None, list[TranscriptEntry], Optional[PrefixId]]:
-    """Find a turn by UUID across sessions and return surrounding entries.
+) -> TurnContext | None:
+    """Resolve across every source, rejecting ambiguous references before returning context.
 
-    Turn UUIDs are globally unique — session_id is optional and used only to
-    narrow the search when the caller wants to be explicit. The turn may live in
-    the main transcript or in any subagent body (#22), so the whole corpus is
-    scanned per session.
-
-    Returns (session_info, entries, agent_id) where entries includes context and
-    agent_id names the subagent body the turn was found in (None for main).
+    Return the canonical turn identity with its window. A copied turn can exist
+    in multiple sessions, so even a complete turn id can require session scope.
     """
     conv_types = conversation_types_for(hide)
-
     target_sessions = sessions
     if session_id:
-        target_sessions = [s for s in sessions if s.session_id == session_id]
-
+        target_sessions = matching_ids(sessions, session_id, lambda s: (s.session_id,))
+    candidates: list[TurnContext] = []
     for session in target_sessions:
         for source in session_sources(session):
             entries = load_source_transcript(source)
             for idx, entry in enumerate(entries):
-                if not isinstance(entry, BaseTranscriptEntry):
-                    continue
-                if entry.uuid != turn_uuid:
-                    continue
-
-                # Found it — gather context
-                result: list[TranscriptEntry] = []
-
-                # Before
-                count = 0
-                before_start = idx
-                for i in range(idx - 1, -1, -1):
-                    if isinstance(entries[i], conv_types):
-                        before_start = i
-                        count += 1
-                        if count >= context:
-                            break
-
-                # Collect from before_start through context after
-                # Always include the target turn even if it's not in conv_types
-                count_after = 0
-                for i in range(before_start, len(entries)):
-                    if i == idx or isinstance(entries[i], conv_types):
-                        result.append(entries[i])
-                        if i > idx:
-                            count_after += 1
-                            if count_after >= context:
-                                break
-
-                return session, result, source.agent_id
-
-    return None, [], None
+                if isinstance(entry, BaseTranscriptEntry) and id_matches(entry.uuid, turn_uuid):
+                    before, after = _get_context(entries, idx, context, conv_types, hide)
+                    candidates.append(TurnContext(session, entry.uuid, before + [entry] + after, source.agent_id))
+    matches = matching_ids(candidates, turn_uuid, lambda c: (c.turn,))
+    if len(matches) > 1:
+        raise ambiguous_id(turn_uuid, "Turn", (
+            f"{c.turn} in session {c.session.session_id} ({c.session.project_path}; agent {c.agent_id or 'main'})"
+            for c in matches
+        ))
+    return matches[0] if matches else None
 
 
 def browse_session_turns(
@@ -937,14 +931,14 @@ def browse_session_turns(
     turns: int = 10,
     anchor_turn: str | None = None,
     entry_types: tuple[type, ...] = (HumanEntry, AssistantTranscriptEntry),
-) -> tuple[list[TranscriptEntry], int]:
+) -> BrowseWindow:
     """Return first or last N conversation turns from a transcript file.
 
     Takes a bare path so any transcript browses — a session's main file or a
     subagent body — without promoting a SessionInfo first.
     Filters to entry_types (default: HumanEntry + AssistantTranscriptEntry).
     If anchor_turn is set, tail reads forward from anchor, head reads up to anchor.
-    Returns (sliced_entries, total_conversation_turns).
+    Returns the window, total count, and resolved canonical anchor.
     """
     if isinstance(transcript, Path):
         entries = load_transcript(transcript)
@@ -953,15 +947,19 @@ def browse_session_turns(
     conversation = [e for e in entries if isinstance(e, entry_types)]
     total = len(conversation)
 
+    anchor = None
     if anchor_turn:
-        anchor_idx = None
-        for i, e in enumerate(conversation):
-            if isinstance(e, BaseTranscriptEntry) and e.uuid == anchor_turn:
-                anchor_idx = i
-                break
+        matches = matching_ids(
+            [(i, e) for i, e in enumerate(conversation) if isinstance(e, BaseTranscriptEntry)],
+            anchor_turn, lambda pair: (pair[1].uuid,),
+        )
+        if len(matches) > 1:
+            raise ambiguous_id(anchor_turn, "Turn", (e.uuid for _, e in matches))
+        anchor_idx = matches[0][0] if matches else None
         if anchor_idx is None:
-            return [], total
+            return BrowseWindow([], total)
 
+        anchor = matches[0][1].uuid
         if position == "tail":
             sliced = conversation[anchor_idx : anchor_idx + turns]
         else:
@@ -973,4 +971,4 @@ def browse_session_turns(
         else:
             sliced = conversation[:turns]
 
-    return sliced, total
+    return BrowseWindow(sliced, total, anchor)

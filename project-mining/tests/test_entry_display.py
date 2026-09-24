@@ -15,7 +15,6 @@ from cc_explorer.models import (
     ToolUseContent,
     UserMessageModel,
 )
-from cc_explorer.utils import PrefixId
 
 from .conftest import FULL_UUID, TS
 
@@ -36,7 +35,7 @@ def assistant_entry():
                 TextContent(type="text", text="Exactly. Facebook's initial page load."),
                 ToolUseContent(
                     type="tool_use",
-                    id=PrefixId("tool-uuid-1111-2222-3333-444444444444"),
+                    id="tool-uuid-1111-2222-3333-444444444444",
                     name="Read",
                     input={"file_path": "/tmp/foo.py"},
                 ),
@@ -614,5 +613,5 @@ class TestFormatEntryLineNoDuplicateIdentity:
         parts = line.split("|", 4)
         display = parts[4]
         assert "[A:" not in display
-        assert parts[0] == "a9529cc1"
+        assert parts[0] == FULL_UUID
         assert parts[2] == "A"

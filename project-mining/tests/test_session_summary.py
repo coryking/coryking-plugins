@@ -23,7 +23,6 @@ from cc_explorer.models import (
 )
 from cc_explorer.responses import SessionSummary
 from cc_explorer.search import SessionInfo
-from cc_explorer.utils import PrefixId
 
 TS = datetime(2026, 3, 15, 10, 30, 0, tzinfo=timezone.utc)
 SESSION_ID = "a9529cc1-b576-5fd3-9f1a-1234567890ab"
@@ -31,7 +30,7 @@ SESSION_ID = "a9529cc1-b576-5fd3-9f1a-1234567890ab"
 
 def _session(stats: TranscriptStats) -> SessionInfo:
     return SessionInfo(
-        session_id=PrefixId(SESSION_ID),
+        session_id=SESSION_ID,
         path=Path("/tmp/fake.jsonl"),
         title="test session",
         first_timestamp=TS,
@@ -76,9 +75,9 @@ def test_compactions_reports_event_count():
 def _turn(uuid_hex: str, input_tokens: int, model: str = "claude-opus-4") -> AssistantTranscriptEntry:
     """One assistant turn reporting `input_tokens` of context."""
     return AssistantTranscriptEntry(
-        uuid=PrefixId(uuid_hex),
+        uuid=uuid_hex,
         timestamp=TS,
-        sessionId=PrefixId(SESSION_ID),
+        sessionId=SESSION_ID,
         type="assistant",
         message=AssistantMessageModel(
             id="m",

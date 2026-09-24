@@ -59,11 +59,10 @@ from cc_explorer.models import (
 from cc_explorer.search import MatchHit, SessionInfo
 
 from tests.conftest import patch_session_corpus
-from cc_explorer.utils import PrefixId
 
 
 TS = datetime(2026, 3, 15, 10, 30, 0, tzinfo=timezone.utc)
-TURN_UUID = PrefixId("11111111-aaaa-bbbb-cccc-dddddddddddd")
+TURN_UUID = "11111111-aaaa-bbbb-cccc-dddddddddddd"
 
 
 # =============================================================================
@@ -73,7 +72,7 @@ TURN_UUID = PrefixId("11111111-aaaa-bbbb-cccc-dddddddddddd")
 
 def _build_session(sid: str, name: str = "t") -> SessionInfo:
     return SessionInfo(
-        session_id=PrefixId(sid),
+        session_id=sid,
         path=Path(f"/fake/{name}.jsonl"),
         title=name,
         first_timestamp=TS,
@@ -86,7 +85,7 @@ def _fake_match_for(sid: str) -> MatchHit:
     entry = AssistantTranscriptEntry(
         uuid=TURN_UUID,
         timestamp=TS,
-        sessionId=PrefixId(sid),
+        sessionId=sid,
         type="assistant",
         message=AssistantMessageModel(
             id="m1",
@@ -97,7 +96,7 @@ def _fake_match_for(sid: str) -> MatchHit:
         ),
     )
     return MatchHit(
-        session_id=PrefixId(sid),
+        session_id=sid,
         turn_uuid=TURN_UUID,
         entry=entry,
         context_before=[],
@@ -220,27 +219,26 @@ class TestSessionToolAuditCountsReflectSkippedAgents:
     def test_dispatched_and_audited_counts_diverge_when_outputs_missing(self):
         from cc_explorer.mcp_server import audit_session_tools
         from cc_explorer.subagents import SubagentInfo
-        from cc_explorer.utils import PrefixId
 
         target_id = "aaaaaaaa-1111-2222-3333-444444444444"
         sessions = [_build_session(target_id, "audit")]
 
         # Three agents: only one has an accessible output file
         audited_agent = SubagentInfo(
-            tool_use_id=PrefixId("11111111-aaaa-bbbb-cccc-dddddddddddd"),
-            agent_id=PrefixId("aaaaaaa1-aaaa-bbbb-cccc-dddddddddddd"),
+            tool_use_id="11111111-aaaa-bbbb-cccc-dddddddddddd",
+            agent_id="aaaaaaa1-aaaa-bbbb-cccc-dddddddddddd",
             subagent_type="researcher",
             description="audited one",
         )
         skipped_a = SubagentInfo(
-            tool_use_id=PrefixId("22222222-aaaa-bbbb-cccc-dddddddddddd"),
-            agent_id=PrefixId("aaaaaaa2-aaaa-bbbb-cccc-dddddddddddd"),
+            tool_use_id="22222222-aaaa-bbbb-cccc-dddddddddddd",
+            agent_id="aaaaaaa2-aaaa-bbbb-cccc-dddddddddddd",
             subagent_type="researcher",
             description="missing output",
         )
         skipped_b = SubagentInfo(
-            tool_use_id=PrefixId("33333333-aaaa-bbbb-cccc-dddddddddddd"),
-            agent_id=PrefixId("aaaaaaa3-aaaa-bbbb-cccc-dddddddddddd"),
+            tool_use_id="33333333-aaaa-bbbb-cccc-dddddddddddd",
+            agent_id="aaaaaaa3-aaaa-bbbb-cccc-dddddddddddd",
             subagent_type="researcher",
             description="also missing",
         )
@@ -292,14 +290,14 @@ class TestSessionToolAuditCountsReflectSkippedAgents:
         # Two dispatched agents, neither has an output file
         all_agents = [
             SubagentInfo(
-                tool_use_id=PrefixId("11111111-aaaa-bbbb-cccc-dddddddddddd"),
-                agent_id=PrefixId("aaaaaaa1-aaaa-bbbb-cccc-dddddddddddd"),
+                tool_use_id="11111111-aaaa-bbbb-cccc-dddddddddddd",
+                agent_id="aaaaaaa1-aaaa-bbbb-cccc-dddddddddddd",
                 subagent_type="researcher",
                 description="missing one",
             ),
             SubagentInfo(
-                tool_use_id=PrefixId("22222222-aaaa-bbbb-cccc-dddddddddddd"),
-                agent_id=PrefixId("aaaaaaa2-aaaa-bbbb-cccc-dddddddddddd"),
+                tool_use_id="22222222-aaaa-bbbb-cccc-dddddddddddd",
+                agent_id="aaaaaaa2-aaaa-bbbb-cccc-dddddddddddd",
                 subagent_type="researcher",
                 description="missing two",
             ),
@@ -355,7 +353,7 @@ class TestGrepSessionsPreservesInputOrder:
             )
 
         out_ids = [str(s.session) for s in resp.sessions]
-        assert out_ids == ["cccccccc", "aaaaaaaa", "bbbbbbbb"], (
+        assert out_ids == [sid_c, sid_a, sid_b], (
             f"input order must be preserved, got {out_ids}"
         )
 
@@ -383,4 +381,4 @@ class TestGrepSessionsOmitsZeroHitSessions:
             )
 
         assert len(resp.sessions) == 1
-        assert str(resp.sessions[0].session) == "aaaaaaaa"
+        assert resp.sessions[0].session == sid_hit

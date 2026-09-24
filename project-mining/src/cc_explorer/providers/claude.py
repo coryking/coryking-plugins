@@ -7,7 +7,6 @@ from typing import Sequence
 
 from ..models import TranscriptEntry
 from ..parser import load_conversations, load_transcript
-from ..utils import PrefixId
 from .base import Harness, ProviderSession
 
 
@@ -21,8 +20,7 @@ class ClaudeProvider:
         for project in projects or ():
             for session_id, conversation in load_conversations(project).items():
                 refs.append(ProviderSession(
-                    session_id=(session_id if isinstance(session_id, PrefixId)
-                                else PrefixId(session_id)),
+                    session_id=session_id,
                     paths=(conversation.path,),
                     project_path=project,
                     worktree=conversation.worktree,

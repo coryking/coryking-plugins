@@ -14,11 +14,10 @@ import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 from .formatting import format_entry_line, format_session_date, render_trace
 from .providers import Harness
-from .utils import PrefixId
 
 if TYPE_CHECKING:
     from .corpus import ProjectInfo
@@ -33,13 +32,11 @@ class SparseModel(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    def model_dump(self, **kwargs):
-        kwargs.setdefault("exclude_none", True)
-        return super().model_dump(**kwargs)
-
-    def model_dump_json(self, **kwargs):
-        kwargs.setdefault("exclude_none", True)
-        return super().model_dump_json(**kwargs)
+    @model_serializer(mode="wrap")
+    def serialize(self, handler: SerializerFunctionWrapHandler):
+        # FastMCP serializes through TypeAdapter, which bypasses model_dump
+        # overrides. A serializer participates in every nested response model.
+        return {key: value for key, value in handler(self).items() if value is not None}
 
 
 # =============================================================================
@@ -50,7 +47,7 @@ class SparseModel(BaseModel):
 class SessionSummary(SparseModel):
     """Summary of a single conversation session."""
 
-    session: PrefixId = Field(description="Session identifier — pass this back as the `session` param to other tools.")
+    session: str = Field(description="Session identifier — pass this back as the `session` param to other tools.")
     harness: Harness = Field(description="Harness that wrote this transcript: claude or codex.")
     project: str | None = Field(default=None, description="Project this session belongs to — pass to the `projects` param to scope other tools to it. Useful when results span projects.")
     date: datetime | None = Field(default=None, description="Timestamp of first message.")
@@ -188,9 +185,9 @@ class SearchHitExample(SparseModel):
 
     project: str = Field(description="Project the hit lives in — pass to the `projects` param of other tools to scope to it.")
     harness: Harness = Field(description="Harness that wrote the matching transcript.")
-    session: PrefixId = Field(description="Session containing the hit.")
+    session: str = Field(description="Session containing the hit.")
     date: str | None = Field(default=None, description="Session date (YYYY-MM-DD).")
-    agent: PrefixId | None = Field(
+    agent: str | None = Field(
         default=None,
         description="Subagent body the hit was in, if any. Absent for the main transcript.",
     )
@@ -224,7 +221,7 @@ class SearchProjectsResponse(SparseModel):
     matches: list[PatternMatch] = Field(
         description="Patterns with hits, sorted by hit count descending. Zero-hit patterns omitted."
     )
-    excluded_current_session: PrefixId | None = Field(
+    excluded_current_session: str | None = Field(
         default=None,
         description="The calling conversation was excluded from this search (it would otherwise match itself). Absent when nothing was excluded. Pass include_current_session=true to search it too.",
     )
@@ -234,7 +231,7 @@ class SearchProjectsResponse(SparseModel):
         cls,
         all_results: PatternTriageResults,
         projects_searched: int,
-        excluded_current_session: PrefixId | None = None,
+        excluded_current_session: str | None = None,
     ) -> SearchProjectsResponse:
         """Build from triage over a flattened cross-project session list.
 
@@ -258,7 +255,7 @@ class SearchProjectsResponse(SparseModel):
                 SearchHitExample(
                     project=r.session.project_path or "",
                     harness=r.session.harness,
-                    session=PrefixId(r.session.session_id),
+                    session=r.session.session_id,
                     date=format_session_date(r.session.first_timestamp) or None,
                     agent=r.agent_id,
                     excerpt=r.first_match_example,
@@ -299,7 +296,7 @@ class MatchBlock(SparseModel):
     with a centered excerpt when truncated so the hit is always visible.
     """
 
-    agent: PrefixId | None = Field(
+    agent: str | None = Field(
         default=None,
         description="Subagent body this match came from (a `subagents/agent-*.jsonl` transcript). Absent when the match is in the main session transcript. Pass it to get_agent_detail to inspect that agent.",
     )
@@ -346,7 +343,7 @@ class GrepSessionResponse(SparseModel):
     dead weight rather than guessing why they're missing.
     """
 
-    session: PrefixId = Field(description="Session identifier.")
+    session: str = Field(description="Session identifier.")
     harness: Harness = Field(description="Harness that wrote this transcript.")
     project: str | None = Field(
         default=None,
@@ -414,7 +411,7 @@ class GrepSessionResponse(SparseModel):
 
         pattern_results.sort(key=lambda p: p.hits, reverse=True)
         return cls(
-            session=PrefixId(session_id),
+            session=session_id,
             harness=harness,
             project=project,
             worktree=worktree,
@@ -449,7 +446,7 @@ class GrepSessionsResponse(SparseModel):
 class ReadTurnResponse(SparseModel):
     """A specific moment in a conversation at full fidelity."""
 
-    session: PrefixId | None = Field(default=None, description="Session identifier.")
+    session: str | None = Field(default=None, description="Session identifier.")
     harness: Harness | None = Field(default=None, description="Harness that wrote this transcript.")
     project: str | None = Field(
         default=None,
@@ -459,11 +456,11 @@ class ReadTurnResponse(SparseModel):
         default=None,
         description="Git worktree name this session lived in, if not the main one.",
     )
-    agent: PrefixId | None = Field(
+    agent: str | None = Field(
         default=None,
         description="Subagent body this turn lives in (a `subagents/agent-*.jsonl` transcript). Absent when the turn is in the main session transcript.",
     )
-    turn: PrefixId = Field(description="Turn identifier.")
+    turn: str = Field(description="Turn identifier.")
     chats: list[str] = Field(
         description="Pipe-delimited entry lines: turn_id|timestamp|role|full_length|display. Full untruncated text unless truncate was set.",
     )
@@ -476,18 +473,18 @@ class ReadTurnResponse(SparseModel):
         entries: list,
         truncate: int,
         hide: frozenset[str] = frozenset(),
-        agent_id: Optional[PrefixId] = None,
+        agent_id: Optional[str] = None,
     ) -> ReadTurnResponse:
 
         chats = [format_entry_line(e, truncate=truncate, hide=hide) for e in entries]
 
         return cls(
-            session=PrefixId(session_info.session_id) if session_info else None,
+            session=session_info.session_id if session_info else None,
             harness=session_info.harness if session_info else None,
             project=session_info.project_path if session_info else None,
             worktree=session_info.worktree if session_info else None,
             agent=agent_id,
-            turn=PrefixId(turn),
+            turn=turn,
             chats=chats,
         )
 
@@ -500,7 +497,7 @@ class ReadTurnResponse(SparseModel):
 class BrowseSessionResponse(SparseModel):
     """First or last N conversation turns from a session."""
 
-    session: PrefixId = Field(description="Session identifier.")
+    session: str = Field(description="Session identifier.")
     harness: Harness = Field(description="Harness that wrote this transcript.")
     project: str | None = Field(
         default=None,
@@ -513,7 +510,7 @@ class BrowseSessionResponse(SparseModel):
     position: str = Field(description="'head' or 'tail' — which end was read.")
     showing: int = Field(description="Number of turns returned.")
     total_turns: int = Field(description="Total conversation turns in the session.")
-    anchor: PrefixId | None = Field(default=None, description="Turn used as anchor, if one was specified.")
+    anchor: str | None = Field(default=None, description="Turn used as anchor, if one was specified.")
     chats: list[str] = Field(
         description="Pipe-delimited entry lines: turn_id|timestamp|role|full_length|display.",
     )
@@ -534,14 +531,14 @@ class BrowseSessionResponse(SparseModel):
     ) -> BrowseSessionResponse:
         chats = [format_entry_line(e, truncate=truncate, hide=hide) for e in entries]
         return cls(
-            session=PrefixId(session_id),
+            session=session_id,
             harness=harness,
             project=project,
             worktree=worktree,
             position=position,
             showing=len(entries),
             total_turns=total,
-            anchor=PrefixId(anchor) if anchor else None,
+            anchor=anchor,
             chats=chats,
         )
 
@@ -554,14 +551,14 @@ class BrowseSessionResponse(SparseModel):
 class AgentSummary(SparseModel):
     """Summary of a single subagent spawned during a session."""
 
-    agent_id: PrefixId = Field(description="Agent identifier.")
-    tool_use_id: PrefixId = Field(description="Tool use ID that spawned this agent.")
+    agent_id: str = Field(description="Agent identifier.")
+    tool_use_id: str = Field(description="Tool use ID that spawned this agent.")
     source: str = Field(
         description="Whether this agent's record is complete and how it relates to the conversation. 'dispatched' — the conversation requested it and its full run is available. 'dispatch_only' — the conversation requested it but no run is available (rejected, never started, or no longer kept), so result/stats/trace will be missing. 'orphan' — it ran with a full record but the conversation didn't request it directly, typically because a workflow spawned it."
     )
     workflow_run_id: str | None = Field(
         default=None,
-        description="The workflow run this agent belongs to; null if it wasn't spawned by a workflow. Agents sharing a value ran in the same workflow.",
+        description="The workflow run this agent belongs to; absent if it wasn't spawned by a workflow. Agents sharing a value ran in the same workflow.",
     )
     is_conversion_artifact: bool | None = Field(
         default=None,
@@ -598,7 +595,7 @@ class AgentSummary(SparseModel):
 class SessionAgentsResponse(SparseModel):
     """All agents spawned by a specific session."""
 
-    session: PrefixId = Field(description="Session identifier.")
+    session: str = Field(description="Session identifier.")
     project: str | None = Field(
         default=None,
         description="Project this session belongs to. Present when located across projects.",
@@ -646,7 +643,7 @@ class OutputFileInfo(SparseModel):
 class AgentDetailResponse(SparseModel):
     """Full detail for a single agent: prompt, result, stats, optional trace."""
 
-    session: PrefixId = Field(description="Parent session identifier.")
+    session: str = Field(description="Parent session identifier.")
     project: str | None = Field(
         default=None,
         description="Project the parent session belongs to. Present when located across projects.",
@@ -657,14 +654,14 @@ class AgentDetailResponse(SparseModel):
     )
     date: datetime | None = Field(default=None, description="Timestamp of session start.")
     title: str | None = Field(default=None, description="Session title.")
-    agent_id: PrefixId = Field(description="Agent identifier.")
-    tool_use_id: PrefixId = Field(description="Tool use ID that spawned this agent.")
+    agent_id: str = Field(description="Agent identifier.")
+    tool_use_id: str = Field(description="Tool use ID that spawned this agent.")
     source: str = Field(
         description="Whether this agent's record is complete and how it relates to the conversation. 'dispatched' — the conversation requested it and its full run is available. 'dispatch_only' — the conversation requested it but no run is available (rejected, never started, or no longer kept), so result/stats/trace will be missing. 'orphan' — it ran with a full record but the conversation didn't request it directly, typically because a workflow spawned it."
     )
     workflow_run_id: str | None = Field(
         default=None,
-        description="The workflow run this agent belongs to; null if it wasn't spawned by a workflow. Agents sharing a value ran in the same workflow.",
+        description="The workflow run this agent belongs to; absent if it wasn't spawned by a workflow. Agents sharing a value ran in the same workflow.",
     )
     type: str = Field(description="Subagent type.")
     status: str = Field(description="Agent status.")
@@ -760,13 +757,13 @@ class AgentToolCall(SparseModel):
 class AgentToolAudit(SparseModel):
     """Per-agent tool usage audit: counts, error rate, full chronological trace."""
 
-    agent_id: PrefixId = Field(description="Agent identifier.")
+    agent_id: str = Field(description="Agent identifier.")
     source: str = Field(
         description="Whether this agent's record is complete and how it relates to the conversation. 'dispatched' — the conversation requested it and its full run is available. 'dispatch_only' — the conversation requested it but no run is available (rejected, never started, or no longer kept), so result/stats/trace will be missing. 'orphan' — it ran with a full record but the conversation didn't request it directly, typically because a workflow spawned it."
     )
     workflow_run_id: str | None = Field(
         default=None,
-        description="The workflow run this agent belongs to; null if it wasn't spawned by a workflow. Agents sharing a value ran in the same workflow.",
+        description="The workflow run this agent belongs to; absent if it wasn't spawned by a workflow. Agents sharing a value ran in the same workflow.",
     )
     type: str = Field(description="Subagent type.")
     description: str = Field(description="Short description passed to the agent.")
@@ -788,7 +785,7 @@ class SessionToolAuditResponse(SparseModel):
     by name substring).
     """
 
-    session: PrefixId = Field(description="Session identifier.")
+    session: str = Field(description="Session identifier.")
     project: str | None = Field(
         default=None,
         description="Project this session belongs to. Present when located across projects.",
@@ -823,7 +820,7 @@ class SessionToolAuditResponse(SparseModel):
 #
 # Timestamp labels are all rendered in `window.tz`: "Day MM-DD HH:MM" for
 # session start/end and the summary/day peaks, "MM-DD HH:MM" for timeline keys,
-# "HH:MM" for within-day fields. Session `id`s are 8-char prefixes and `project`
+# "HH:MM" for within-day fields. Session `id`s are complete identifiers and `project`
 # values are repo names — both can be passed straight back to the other
 # cc-explorer tools (read_turn, grep_session, list_session_agents, ...).
 
@@ -898,7 +895,7 @@ class ActivityDay(SparseModel):
 class ActivitySession(SparseModel):
     """One session's roll-up. id and project pass straight back to other tools."""
 
-    id: PrefixId = Field(description="8-char session id — pass as `session` to read_turn/grep_session/list_session_agents.")
+    id: str = Field(description="Complete session id — pass as `session` to read_turn/grep_session/list_session_agents.")
     project: str = Field(description="Repo name — pass to `projects`.")
     headless: bool = Field(description="True for sdk-cli (claude -p / SDK / cron). Machine work, excluded from interactive rollups.")
     entrypoint: str | None = Field(default=None, description="Raw entrypoint value, e.g. 'cli' (interactive) or 'sdk-cli' (headless); other values are possible. Don't switch on it for the interactive/headless split — the `headless` boolean is authoritative.")
@@ -1179,9 +1176,9 @@ class FailureExampleOut(SparseModel):
 
     text: str = Field(description="Leading excerpt of the error, whitespace-collapsed and truncated. To read the whole thing, grep_session the shown session with a distinctive phrase from here, or read_turn.")
     tool: str = Field(description="Tool that produced it (short name).")
-    session: PrefixId = Field(description="A session it happened in — pass to grep_session/browse_session.")
+    session: str = Field(description="A session it happened in — pass to grep_session/browse_session.")
     project: str | None = Field(default=None, description="Project that session belongs to.")
-    agent: PrefixId | None = Field(default=None, description="Subagent body it came from. Absent when it happened in the main transcript.")
+    agent: str | None = Field(default=None, description="Subagent body it came from. Absent when it happened in the main transcript.")
 
 
 class FailureKindRow(SparseModel):
@@ -1207,7 +1204,7 @@ class FailureToolRow(SparseModel):
 class FailureSessionRow(SparseModel):
     """One session's failure load — a drill-in target, not a summary of it."""
 
-    session: PrefixId = Field(description="Pass to grep_session (with errors_only=true) or audit_session_tools to see the actual failures.")
+    session: str = Field(description="Pass to grep_session (with errors_only=true) or audit_session_tools to see the actual failures.")
     project: str | None = Field(default=None, description="Project — pass to the `projects` param when drilling in.")
     errors: int = Field(description="Failures in this session, in scope.")
     top_kind: str = Field(description="Most common failure kind in this session.")

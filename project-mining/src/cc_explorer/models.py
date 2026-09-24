@@ -23,7 +23,7 @@ from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, BeforeValidator
 
-from .utils import PrefixId, collapse_ws, smart_truncate
+from .utils import collapse_ws, smart_truncate
 
 
 # Coerce None → 0 for token fields that the API may return as null
@@ -319,7 +319,7 @@ class ThinkingContent(BaseModel):
 
 class ToolUseContent(BaseModel):
     type: Literal["tool_use"]
-    id: PrefixId
+    id: str
     name: str
     input: dict[str, Any]
     caller: Optional[dict] = None
@@ -327,10 +327,10 @@ class ToolUseContent(BaseModel):
 
 class ToolResultContent(BaseModel):
     type: Literal["tool_result"]
-    tool_use_id: PrefixId
+    tool_use_id: str
     content: Union[str, list[dict[str, Any]]]
     is_error: Optional[bool] = None
-    agentId: Optional[PrefixId] = None
+    agentId: Optional[str] = None
 
     @property
     def text(self) -> str:
@@ -516,15 +516,15 @@ ToolUseResult = Union[
 
 class BaseTranscriptEntry(BaseModel):
     """Common fields across all transcript entries."""
-    uuid: PrefixId
-    parentUuid: Optional[PrefixId] = None
+    uuid: str
+    parentUuid: Optional[str] = None
     timestamp: datetime
-    sessionId: PrefixId
+    sessionId: str
     isSidechain: bool = False
     userType: str = ""
     cwd: str = ""
     version: str = ""
-    agentId: Optional[PrefixId] = None
+    agentId: Optional[str] = None
     gitBranch: Optional[str] = None
     # How this session was invoked. "cli" = interactive; "sdk-cli" = headless
     # (claude -p / SDK / cron — e.g. the nightly dreamer runs). Distinguishes
@@ -743,9 +743,9 @@ class SummaryTranscriptEntry(BaseModel):
     """Context compaction summary."""
     type: Literal["summary"]
     summary: str
-    leafUuid: PrefixId
+    leafUuid: str
     cwd: Optional[str] = None
-    sessionId: Optional[PrefixId] = None
+    sessionId: Optional[str] = None
 
 
 class SystemTranscriptEntry(BaseTranscriptEntry):
@@ -782,7 +782,7 @@ class QueueOperationTranscriptEntry(BaseModel):
     type: Literal["queue-operation"]
     operation: Literal["enqueue", "dequeue", "remove", "popAll"]
     timestamp: datetime
-    sessionId: PrefixId
+    sessionId: str
     content: Optional[Union[list[ContentItem], str]] = None
 
 
@@ -1174,7 +1174,7 @@ def collect_tool_calls(entries: list[TranscriptEntry]) -> list[ToolCall]:
             for block in entry.results:
                 # First result wins: a retried id would otherwise let a later
                 # block overwrite the outcome the model actually saw.
-                results.setdefault(block.tool_use_id.full, block)
+                results.setdefault(block.tool_use_id, block)
 
     calls: list[ToolCall] = []
     for entry in entries:
@@ -1188,7 +1188,7 @@ def collect_tool_calls(entries: list[TranscriptEntry]) -> list[ToolCall]:
                     name=item.name,
                     input=item.input,
                     timestamp=entry.timestamp,
-                    result=results.get(item.id.full),
+                    result=results.get(item.id),
                 )
             )
 

@@ -10,7 +10,6 @@ import pytest
 from cc_explorer.corpus import Corpus, SessionRef
 from cc_explorer.mcp_server import mcp
 from cc_explorer.parser import collect_parser_diagnostics, load_transcript
-from cc_explorer.utils import PrefixId
 
 
 def write_transcript(path: Path, broken: bool = True, matching: bool = True) -> None:
@@ -34,7 +33,7 @@ def test_search_result_survives_capture_cap(tmp_path, monkeypatch, capsys, file_
     for index in range(file_count):
         path = tmp_path / f"{index:08x}-1111-2222-3333-444444444444.jsonl"
         write_transcript(path, matching=index == 0)
-        refs.append(SessionRef(session_id=PrefixId(path.stem), path=path,
+        refs.append(SessionRef(session_id=path.stem, path=path,
                                project_path=str(tmp_path), worktree=None))
     # Only discovery is substituted: parsing, cache, search, serialization, and
     # the FastMCP middleware/thread boundary are real.
