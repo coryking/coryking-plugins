@@ -13,7 +13,7 @@ description: >
 
 # cc-explorer
 
-Explores Claude Code and Codex history stored as local JSONL transcripts. MCP tools handle all interaction — call them directly, no CLI commands needed. Search/list/read tools span both harnesses by default; pass `harnesses=["claude"]` or `harnesses=["codex"]` to narrow them. Conversion and agent-forensics tools remain Claude-specific.
+Explores Claude Code and Codex history stored as local JSONL transcripts. MCP tools handle all interaction — call them directly, no CLI commands needed. Search/list/read tools span both harnesses by default; pass `harnesses=["claude"]` or `harnesses=["codex"]` to narrow them. `convert_session` accepts Codex sessions as a source (they arrive as text turns); the agent-forensics tools and the rest of the conversion lifecycle are Claude-specific.
 
 ## Delegate or DIY
 
@@ -95,7 +95,7 @@ Tools that create, mutate, or remove transcripts — the one mutating axis in th
 
 > **Resuming a `session_to_subagent` conversion needs `SendMessage` — and nothing else.** No agent-teams runtime, no env var: `SendMessage` resumes any background subagent by id, and a conversion artifact is one. If `SendMessage` is not in your toolset it is *deferred*, not absent — load it with `ToolSearch` query `"select:SendMessage"`, then convert and resume as normal. Only if it still can't be loaded should you stay on `grep_session`/`read_turn` against the source. (`subagent_to_session` → `claude -r` needs nothing at all.)
 
-- **`convert_session`** — copy a session into a subagent under the calling session (direction `session_to_subagent`), or a subagent out to a top-level session (direction `subagent_to_session`).
+- **`convert_session`** — copy a session into a subagent under the calling session (direction `session_to_subagent`), or a subagent out to a top-level session (direction `subagent_to_session`). A Codex session converts too (`session_to_subagent` only): its tool calls become `[Codex tool: …]` text with truncated output and its private reasoning is dropped, so ask it about intent and decisions, and check exact command output against the record.
 - **`rewind_transcript`** — truncate a conversion artifact (session or subagent) **in place** at a chosen turn, discarding everything after, so it resumes from that earlier point. Eligible only for conversion artifacts — a real session or dispatched subagent is refused untouched. Destructive (the cut tail is gone); use `convert_session` first if you want to keep the original.
 - **`delete_conversions`** — remove subagent artifacts the converter created. Refuses everything else, including converted sessions. Permanent — no undo.
 

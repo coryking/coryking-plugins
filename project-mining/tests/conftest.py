@@ -14,6 +14,16 @@ FULL_UUID = "a9529cc1-b576-5fd3-9f1a-1234567890ab"
 TS = datetime(2026, 3, 15, 10, 30, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_session_registry(monkeypatch):
+    """Keep tests hermetic: never read the real ~/.claude/sessions registry.
+
+    Test runs under Claude Code have a live Claude ancestor, whose registry id
+    would otherwise override the env vars tests set.
+    """
+    monkeypatch.setattr("cc_explorer.mcp_server.registry_session_id", lambda: None)
+
+
 @pytest.fixture
 def full_uuid():
     return FULL_UUID

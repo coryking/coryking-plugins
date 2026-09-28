@@ -153,6 +153,8 @@ def fake_claude(tmp_path, monkeypatch):
     config = tmp_path / ".claude"
     (config / "projects").mkdir(parents=True)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    # An empty Codex home, so the real ~/.codex never leaks into the corpus.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
     # No git anywhere → _get_worktree_paths returns [] → single-dir pooling.
     monkeypatch.setattr(paths, "_get_worktree_paths", lambda cwd: [])
     # Identity canonicalize so our synthetic absolute cwds stay stable.

@@ -44,6 +44,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from ._codex_resume import build_turns, extract_items
+
 # Conversation line types we copy. Everything else (system, summary, progress,
 # file-history-snapshot, queue-operation, mode/permission/custom-title headers)
 # is dropped from the body — a subagent/session transcript is a linear chain of
@@ -462,7 +464,7 @@ def _environment(lines: list[dict[str, Any]]) -> dict[str, Any]:
         "cwd_exists": cwd_exists,
         "original_branch": branch or None,
         "branch_exists": branch_exists,
-        "cc_version": version or None,
+        "harness_version": version or None,
         "last_timestamp": last_ts or None,
         "age_days": age_days,
     }
@@ -524,6 +526,10 @@ class ConversionResult:
     lineage: list[dict[str, str]]
     nested_agents: int = 0
     dropped_branches: int = 0
+    source_harness: str = "claude"
+    # Codex sources only: estimated tokens the rendered copy replays on resume.
+    # A Claude copy inherits its source's measured context instead.
+    copy_context_tokens: Optional[int] = None
     # session_to_subagent
     parent_session: Optional[str] = None
     suggested_handoff: Optional[str] = None
@@ -583,6 +589,141 @@ def convert_session_to_subagent(
 
     trimmed = _trim_trailing_noise(lines)
 
+    src8 = src_session_id[:8]
+    project_basename = Path(src_project_path).name if src_project_path else "?"
+    result = _write_subagent_artifact(
+        lines=lines,
+        new_agent=new_agent,
+        src_session_id=src_session_id,
+        src_project_path=src_project_path,
+        dest_parent_session_id=dest_parent_session_id,
+        dest_parent_session_dir=dest_parent_session_dir,
+        prior=prior,
+        handoff=_suggested_handoff(src8, project_basename, prior, src_converted_from),
+    )
+    result.trimmed_trailing = trimmed
+    result.dropped_branches = dropped_branches
+    result.nested_agents = nested_agents
+    result.models = _model_stats(lines)
+    result.environment = _environment(lines)
+    return result
+
+
+def convert_codex_session_to_subagent(
+    *,
+    src_session_id: str,
+    src_records: list[dict[str, Any]],
+    src_project_path: str,
+    dest_parent_session_id: str,
+    dest_parent_session_dir: Path,
+    claude_version: str,
+) -> ConversionResult:
+    """Copy a Codex session into a new Claude Code subagent under a parent session.
+
+    `src_records` are the session's raw rollout records (CodexProvider.session_records).
+    The vendored codex-resume layer renders them into alternating text turns —
+    Codex tool calls become ``[Codex tool: …]`` text, since Claude Code cannot
+    replay Codex's tools — and each turn becomes one subagent transcript line.
+    `claude_version` is stamped on the lines as the harness version writing them.
+    """
+    meta = next(
+        (r.get("payload") for r in src_records if r.get("type") == "session_meta"), None
+    )
+    meta = meta if isinstance(meta, dict) else {}
+    contexts = [
+        r["payload"] for r in src_records
+        if r.get("type") == "turn_context" and isinstance(r.get("payload"), dict)
+    ]
+    # A chat can be moved to another folder mid-thread; the latest turn wins.
+    cwd = next((c["cwd"] for c in reversed(contexts) if c.get("cwd")), None) or meta.get("cwd") or ""
+    started = str(meta.get("timestamp") or "")[:10]
+
+    header = (
+        f"[This conversation took place in OpenAI Codex ({started or 'date unknown'}, "
+        f"cwd {cwd or 'unknown'}) and was converted to Claude Code format. The "
+        "assistant replies were written by the Codex agent; [Codex tool: …] blocks "
+        "are commands it ran and their output, truncated. Codex's private reasoning "
+        "was not carried over.]"
+    )
+    turns = build_turns(extract_items(src_records), header)
+    if not turns:
+        raise ValueError(f"Codex session {src_session_id} has no messages to carry over")
+
+    new_agent = _new_agent_id()
+    lines: list[dict[str, Any]] = []
+    for n, turn in enumerate(turns):
+        if turn.role == "user":
+            content: Any = (
+                [{"type": "text", "text": turn.text}, *turn.images] if turn.images else turn.text
+            )
+            message: dict[str, Any] = {"role": "user", "content": content}
+        else:
+            # "<synthetic>" is the model id Claude Code gives turns it did not
+            # generate; a Codex model id here would be misread as a Claude model.
+            message = {
+                "id": f"msg_codex_{n}", "type": "message", "role": "assistant",
+                "model": "<synthetic>", "content": [{"type": "text", "text": turn.text}],
+                "stop_reason": "end_turn", "stop_sequence": None,
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            }
+        lines.append({
+            "isSidechain": True, "agentId": new_agent, "type": turn.role,
+            "message": message, "uuid": str(uuid.uuid4()),
+            "timestamp": turn.ts or _now_iso(), "userType": "external",
+            "entrypoint": "cli", "cwd": cwd, "sessionId": dest_parent_session_id,
+            "version": claude_version, "gitBranch": "",
+        })
+    _relinearize(lines)
+    lines[0]["promptId"] = str(uuid.uuid4())
+
+    project_basename = Path(src_project_path).name if src_project_path else "?"
+    result = _write_subagent_artifact(
+        lines=lines,
+        new_agent=new_agent,
+        src_session_id=src_session_id,
+        src_project_path=src_project_path,
+        dest_parent_session_id=dest_parent_session_id,
+        dest_parent_session_dir=dest_parent_session_dir,
+        prior=[],
+        handoff=_suggested_handoff(src_session_id[:8], project_basename, [], harness="codex"),
+    )
+    result.source_harness = "codex"
+    codex_models = [c["model"] for c in contexts if isinstance(c.get("model"), str) and c["model"]]
+    result.models = {
+        "first": codex_models[0] if codex_models else None,
+        "last": codex_models[-1] if codex_models else None,
+        "counts": dict(Counter(codex_models)),
+    }
+    last_ts = next(
+        (r["timestamp"] for r in reversed(src_records) if isinstance(r.get("timestamp"), str)), None
+    )
+    cli_version = meta.get("cli_version")
+    result.environment = {
+        **_environment([{"cwd": cwd, "timestamp": last_ts}]),
+        "harness_version": cli_version if isinstance(cli_version, str) else None,
+    }
+    # ~4 characters per token: a size signal for planning the interview, not a count.
+    result.copy_context_tokens = sum(len(t.text) for t in turns) // 4
+    return result
+
+
+def _write_subagent_artifact(
+    *,
+    lines: list[dict[str, Any]],
+    new_agent: str,
+    src_session_id: str,
+    src_project_path: str,
+    dest_parent_session_id: str,
+    dest_parent_session_dir: Path,
+    prior: list[dict[str, str]],
+    handoff: str,
+) -> ConversionResult:
+    """Stamp provenance on subagent-shaped `lines` and write them plus meta.json.
+
+    Shared by every session_to_subagent source. `lines` must already be linear
+    subagent lines (isSidechain, agentId, parent sessionId, promptId on line 1).
+    The caller fills the source-specific result fields (models, environment, …).
+    """
     lineage = list(prior) + [
         {"as": "session", "id": src_session_id},
         {"as": "subagent", "id": new_agent},
@@ -592,7 +733,6 @@ def convert_session_to_subagent(
         "id": src_session_id,
         "project": src_project_path,
     }
-    # Stamp provenance keys in the existing mutation loop (no second pass).
     for d in lines:
         d["_converted_from"] = converted_from
         d["_lineage"] = lineage
@@ -612,7 +752,6 @@ def convert_session_to_subagent(
         agent_id=new_agent,
         lines_at_creation=len(lines) + 1,
     )
-    # Write provenance line then body sequentially (no list concat).
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(json.dumps(provenance_line) + "\n")
         for d in lines:
@@ -630,19 +769,15 @@ def convert_session_to_subagent(
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f)
 
-    handoff = _suggested_handoff(src8, project_basename, prior, src_converted_from)
-
     return ConversionResult(
         direction="session_to_subagent",
         created_id=new_agent,
         turns=len(lines),
-        trimmed_trailing=trimmed,
-        dropped_branches=dropped_branches,
+        trimmed_trailing=0,
         tail_state=_tail_state(lines),
-        models=_model_stats(lines),
-        environment=_environment(lines),
+        models={},
+        environment={},
         lineage=lineage,
-        nested_agents=nested_agents,
         parent_session=dest_parent_session_id,
         suggested_handoff=handoff,
         written_path=out_path,
@@ -655,6 +790,8 @@ def _suggested_handoff(
     project_basename: str,
     prior_lineage: list[dict[str, str]],
     src_converted_from: Optional[dict[str, Any]] = None,
+    *,
+    harness: str = "claude",
 ) -> str:
     """The first-message handoff template, with the lineage-aware first sentence.
 
@@ -667,7 +804,14 @@ def _suggested_handoff(
     born_as_subagent = (
         src_converted_from is not None and src_converted_from.get("kind") == "subagent"
     )
-    if born_as_subagent:
+    if harness == "codex":
+        first = (
+            f"This conversation was an OpenAI Codex session (`{src8}`, project "
+            f"`{project_basename}`) between the Codex agent and the user, converted "
+            "into Claude Code format — tool output is truncated and Codex's private "
+            "reasoning did not carry over."
+        )
+    elif born_as_subagent:
         # The session the original subagent ran inside is the most-recent "session"
         # hop in the inherited lineage.
         parent8 = "?"

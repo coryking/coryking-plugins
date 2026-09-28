@@ -9,10 +9,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Iterator, Sequence
 
 import orjson
 
+from .._codex_resume import NOISE_PREFIXES
 from ..models import (
     AssistantMessageModel,
     AssistantTranscriptEntry,
@@ -135,13 +136,21 @@ class CodexProvider:
         ]
         return refs
 
-    def load_transcript(self, paths: Sequence[Path]) -> list[TranscriptEntry]:
+    def _plan(
+        self, paths: Sequence[Path]
+    ) -> tuple[str, str, list[tuple[Path, int | None, int | None]]]:
+        """Which bytes of which rollouts belong to a session.
+
+        Returns (thread_id, cwd, [(path, byte_limit, start_ordinal)]). A revert
+        chain reads each earlier rollout only up to where its successor forked
+        (the successor's history-base byte offset). A subagent rollout may point
+        at its parent's history for model context; that inherited prefix is not
+        part of the child session, so only the child's own file is read.
+        """
         if not paths:
-            return []
+            return "", "", []
         metas = [self._read_meta(path) for path in paths]
         if metas and metas[-1] is not None and metas[-1].history_start_ordinal is not None:
-            # A subagent rollout may point at its parent's history for model
-            # context. That inherited prefix is not part of the child session.
             paths = paths[-1:]
             metas = metas[-1:]
         limits: list[int | None] = [None] * len(paths)
@@ -152,15 +161,46 @@ class CodexProvider:
 
         thread_id = next((m.thread_id for m in reversed(metas) if m), "")
         cwd = next((m.cwd for m in reversed(metas) if m), "")
+        plan = [
+            (path, limit, meta.history_start_ordinal if meta is not None else None)
+            for path, limit, meta in zip(paths, limits, metas)
+        ]
+        return thread_id, cwd, plan
+
+    @staticmethod
+    def _records(
+        path: Path, byte_limit: int | None, start_ordinal: int | None
+    ) -> Iterator[dict[str, Any]]:
+        """Parsed records of one rollout within its planned byte/ordinal window."""
+        with path.open("rb") as stream:
+            while byte_limit is None or stream.tell() < byte_limit:
+                line = stream.readline()
+                if not line:
+                    break
+                try:
+                    data = orjson.loads(line)
+                except orjson.JSONDecodeError:
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                if start_ordinal is not None and data.get("ordinal", 0) < start_ordinal:
+                    continue
+                yield data
+
+    def session_records(self, paths: Sequence[Path]) -> list[dict[str, Any]]:
+        """Every raw rollout record belonging to a session, in order.
+
+        The raw-record view of the same selection load_transcript parses —
+        conversion renders from these rather than from normalized entries.
+        """
+        _, _, plan = self._plan(paths)
+        return [data for path, limit, start in plan for data in self._records(path, limit, start)]
+
+    def load_transcript(self, paths: Sequence[Path]) -> list[TranscriptEntry]:
+        thread_id, cwd, plan = self._plan(paths)
         entries: list[TranscriptEntry] = []
-        for path, limit, meta in zip(paths, limits, metas):
-            entries.extend(self._parse_file(
-                path,
-                thread_id,
-                cwd,
-                limit,
-                meta.history_start_ordinal if meta is not None else None,
-            ))
+        for path, limit, start in plan:
+            entries.extend(self._parse_file(path, thread_id, cwd, limit, start))
         return entries
 
     def _parse_file(
@@ -182,25 +222,15 @@ class CodexProvider:
                     has_turn_context = True
                     break
         turn_context_seen = not has_turn_context
-        with path.open("rb") as stream:
-            while byte_limit is None or stream.tell() < byte_limit:
-                line = stream.readline()
-                if not line:
-                    break
-                try:
-                    data = orjson.loads(line)
-                except orjson.JSONDecodeError:
-                    continue
-                if start_ordinal is not None and data.get("ordinal", 0) < start_ordinal:
-                    continue
-                if data.get("type") == "turn_context":
-                    turn_context_seen = True
-                    continue
-                entry = self._normalize(
-                    data, thread_id, cwd, allow_user=turn_context_seen
-                )
-                if entry is not None:
-                    entries.append(entry)
+        for data in self._records(path, byte_limit, start_ordinal):
+            if data.get("type") == "turn_context":
+                turn_context_seen = True
+                continue
+            entry = self._normalize(
+                data, thread_id, cwd, allow_user=turn_context_seen
+            )
+            if entry is not None:
+                entries.append(entry)
         return entries
 
     @staticmethod
@@ -259,7 +289,19 @@ class CodexProvider:
 
         if kind == "message":
             role = payload.get("role")
-            text = self._text_blocks(payload.get("content"))
+            content = payload.get("content")
+            if role == "user" and isinstance(content, list):
+                # Codex injects environment, AGENTS.md, and skill text as user
+                # message items; that is harness scaffolding, not the human.
+                content = [
+                    item for item in content
+                    if not (
+                        isinstance(item, dict)
+                        and isinstance(item.get("text"), str)
+                        and item["text"].lstrip().startswith(NOISE_PREFIXES)
+                    )
+                ]
+            text = self._text_blocks(content)
             if not text or role not in {"user", "assistant"}:
                 return None
             if role == "user":

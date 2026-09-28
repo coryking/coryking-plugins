@@ -8,6 +8,7 @@ return type annotations.
 """
 
 import asyncio
+import json
 import os
 import re
 import sys
@@ -29,6 +30,7 @@ from ._claude_paths import _get_projects_dir
 from .activity import build_activity_timeline
 from .conversion import (
     conversion_age_seconds,
+    convert_codex_session_to_subagent,
     convert_session_to_subagent,
     convert_subagent_to_session,
     delete_agent_conversion,
@@ -48,10 +50,12 @@ from .corpus import (
 )
 from .failures import narrow_to_error_sessions, survey_failures as run_failure_survey
 from .formatting import matches_id
+from .live_session import registry_session_id
 from .models import FailureKind, TranscriptStats, parse_hide, parse_kinds
 from .param_repair import argument_error_message, repair_arguments
 from .parser import collect_parser_diagnostics, load_conversations, load_transcript
 from .providers import Harness
+from .providers.codex import CodexProvider
 from .resolve import (
     resolve_artifacts,
     resolve_unique_ref,
@@ -545,15 +549,15 @@ def _current_session_id() -> str | None:
     so broad discovery tools can drop the *calling* conversation from results:
     the session doing the searching is the one thing it never wants back.
 
-    Returns None when the var is absent (orphaned server, or one launched
-    outside a session), in which case nothing is excluded. The value is frozen
-    at process spawn; since the server is per-session that's the right value
-    for its whole life, save the rare case where one server outlives an
-    in-process session switch (`/clear`, resume) — a low-harm miss, never a
-    wrong result.
+    The env var is frozen at process spawn, and a Claude session can change id
+    after its servers start (remote/bridge sessions always do), so the owning
+    Claude process's live registry entry wins over it — see live_session.
+
+    Returns None when nothing identifies the caller (orphaned server, or one
+    launched outside a session), in which case nothing is excluded.
     """
     return (
-        os.environ.get("CLAUDE_CODE_SESSION_ID")
+        _current_claude_session_id()
         or os.environ.get("CODEX_THREAD_ID")
         or os.environ.get("CODEX_SESSION_ID")
         or None
@@ -561,8 +565,8 @@ def _current_session_id() -> str | None:
 
 
 def _current_claude_session_id() -> str | None:
-    """Claude caller identity for Claude-only conversion lifecycle tools."""
-    return os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+    """Claude caller identity: the live registry id, else the spawn-time env var."""
+    return registry_session_id() or os.environ.get("CLAUDE_CODE_SESSION_ID") or None
 
 
 def _exclude_current_session(
@@ -1659,6 +1663,25 @@ def _source_stats(path: Path) -> TranscriptStats:
     return TranscriptStats.from_entries(load_transcript(path))
 
 
+def _transcript_version(path: Path) -> str:
+    """The Claude Code version a transcript was written under ("" if none found).
+
+    A Codex conversion has no Claude version of its own; it borrows the parent
+    session's, so the copy looks like it was written by the harness resuming it.
+    """
+    with open(path, "rb") as f:
+        for line in f:
+            if b'"version"' not in line:
+                continue
+            try:
+                version = json.loads(line).get("version")
+            except (json.JSONDecodeError, AttributeError):
+                continue
+            if isinstance(version, str) and version:
+                return version
+    return ""
+
+
 def _resolve_agent_for_convert(src_id: str, src_project: str | None):
     """Resolve an agent id/prefix to (AgentFile, holding SessionRef), or raise.
 
@@ -1732,7 +1755,7 @@ def convert_session(
 ) -> ConvertSessionResponse:
     """Convert a session into a subagent, or a subagent into a session. Always a copy — the source transcript is never modified, moved, or deleted.
 
-    direction='session_to_subagent': copy a session (any project) into a new subagent parented under dest_parent_session (default: the calling session). The conversation continues as a subagent: resume it like any completed background agent — SendMessage with the returned created_id — and ask it what you need; its whole history is in its context window. Use this when grep answers aren't enough: questions of reasoning, synthesis, or meaning; summaries at any altitude; judgment calls briefed with new evidence; or using a past session as a domain expert whose context you don't want to rebuild. SendMessage does NOT require agent-teams — it resumes any background subagent by id, and a conversion artifact is one. If SendMessage is not in your toolset it is deferred, not absent: load it with ToolSearch query "select:SendMessage", then convert and resume as normal.
+    direction='session_to_subagent': copy a session (any project, Claude Code or Codex) into a new subagent parented under dest_parent_session (default: the calling session). A Codex session arrives as text turns: its tool calls become [Codex tool: …] blocks with truncated output, and its private reasoning does not carry over. The conversation continues as a subagent: resume it like any completed background agent — SendMessage with the returned created_id — and ask it what you need; its whole history is in its context window. Use this when grep answers aren't enough: questions of reasoning, synthesis, or meaning; summaries at any altitude; judgment calls briefed with new evidence; or using a past session as a domain expert whose context you don't want to rebuild. SendMessage does NOT require agent-teams — it resumes any background subagent by id, and a conversion artifact is one. If SendMessage is not in your toolset it is deferred, not absent: load it with ToolSearch query "select:SendMessage", then convert and resume as normal.
 
     direction='subagent_to_session': copy a subagent out to a top-level session a human can open — the response carries the exact `claude -r` command. Use when the user wants to read or continue an agent's run interactively.
 
@@ -1743,8 +1766,9 @@ def convert_session(
         parent_id = dest_parent_session or _current_claude_session_id()
         if not parent_id:
             raise ToolError(
-                "dest_parent_session is required: the calling session is unknown "
-                "(CLAUDE_CODE_SESSION_ID is not set), so there is no default parent. "
+                "dest_parent_session is required: the calling session is unknown (no "
+                "Claude Code session registry entry and CLAUDE_CODE_SESSION_ID is not "
+                "set), so there is no default parent. "
                 "Pass the session id to parent the new subagent under."
             )
 
@@ -1753,6 +1777,22 @@ def convert_session(
         # in the right encoded dir (not assumed to be the source's project).
         parent = _resolve_session_ref_for_convert(parent_id, None)
         parent_session_dir = parent.path.with_suffix("")
+
+        if src.harness is Harness.codex:
+            try:
+                result = convert_codex_session_to_subagent(
+                    src_session_id=src.session_id.full,
+                    src_records=CodexProvider().session_records(src.transcript_files()),
+                    src_project_path=src.project_path or "",
+                    dest_parent_session_id=parent.session_id.full,
+                    dest_parent_session_dir=parent_session_dir,
+                    claude_version=_transcript_version(parent.path),
+                )
+            except ValueError as e:
+                raise ToolError(str(e))
+            return ConvertSessionResponse.from_result(
+                result, TranscriptStats(context_tokens=result.copy_context_tokens or 0)
+            )
 
         # Subagents the SOURCE session ran are NOT copied — their results already
         # appear inline. Report the count so the caller knows context was folded in.
@@ -1979,8 +2019,9 @@ def delete_conversions(
         current = _current_claude_session_id()
         if not current:
             raise ToolError(
-                "Cannot sweep: the calling session is unknown (CLAUDE_CODE_SESSION_ID "
-                "is not set). Pass explicit ids instead."
+                "Cannot sweep: the calling session is unknown (no Claude Code session "
+                "registry entry and CLAUDE_CODE_SESSION_ID is not set). Pass explicit "
+                "ids instead."
             )
         try:
             holding = _resolve_session_ref_for_convert(current, None)

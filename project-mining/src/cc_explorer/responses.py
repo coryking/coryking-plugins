@@ -970,7 +970,7 @@ class ConversionEnvironment(SparseModel):
         default=None,
         description="Whether original_branch is still a valid ref. null when the cwd is gone or isn't a git repo (can't tell).",
     )
-    cc_version: str | None = Field(default=None, description="Claude Code version the source ran under.")
+    harness_version: str | None = Field(default=None, description="Version of the harness (Claude Code or Codex CLI) the source ran under.")
     last_timestamp: str | None = Field(default=None, description="Timestamp of the source's last turn.")
     age_days: int | None = Field(default=None, description="Whole days from the source's last turn to now.")
 
@@ -986,6 +986,7 @@ class ConvertSessionResponse(SparseModel):
 
     operation: str = Field(description="Always 'copy' — the source is never modified, moved, or deleted.")
     direction: str = Field(description="'session_to_subagent' or 'subagent_to_session'.")
+    source_harness: str = Field(description="Harness that wrote the source: 'claude' or 'codex'. A Codex source is rendered as text turns — its tool calls appear as [Codex tool: …] blocks with truncated output, and its private reasoning is not carried over.")
     created_id: str = Field(description="The new agent id (session_to_subagent) or session uuid (subagent_to_session).")
     invocation: str = Field(description="The exact next step to use the created artifact.")
     parent_session: str | None = Field(
@@ -1005,9 +1006,9 @@ class ConvertSessionResponse(SparseModel):
         default=None,
         description="session_to_subagent only: subagents the SOURCE session ran. They are NOT copied — their results already appear inline in the conversation. Absent/0 for subagent sources.",
     )
-    models: ConversionModels = Field(description="Assistant model history of the copy.")
+    models: ConversionModels = Field(description="Assistant model history of the source. Codex sources report the Codex models the thread ran on; the copy's own turns are stamped '<synthetic>'.")
     source_context_tokens: int = Field(
-        description="How full the source's context window already was at its last turn, in tokens. The copy inherits it: this is roughly what resuming the conversion re-reads before it answers anything, and how little headroom is left for your questions. A source near the ceiling can compact mid-interview — ask everything in one batched message rather than a back-and-forth.",
+        description="How full the source's context window already was at its last turn, in tokens. The copy inherits it: this is roughly what resuming the conversion re-reads before it answers anything, and how little headroom is left for your questions. A source near the ceiling can compact mid-interview — ask everything in one batched message rather than a back-and-forth. For a Codex source this is an estimate (~4 characters per token) of the rendered copy, which is truncated text rather than the source's own context.",
     )
     source_compactions: int | None = Field(
         default=None,
@@ -1041,6 +1042,7 @@ class ConvertSessionResponse(SparseModel):
         return cls(
             operation="copy",
             direction=r.direction,
+            source_harness=r.source_harness,
             created_id=r.created_id,
             invocation=invocation,
             parent_session=r.parent_session,
