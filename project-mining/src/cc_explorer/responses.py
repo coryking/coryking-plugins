@@ -1004,7 +1004,7 @@ class ConvertSessionResponse(SparseModel):
     tail_state: str = Field(description="'clean' (ends on an assistant turn) or 'pending_user_input' (ends on a real user turn awaiting a reply).")
     nested_agents: int | None = Field(
         default=None,
-        description="session_to_subagent only: subagents the SOURCE session ran. They are NOT copied — their results already appear inline in the conversation. Absent/0 for subagent sources.",
+        description="session_to_subagent only: subagents the SOURCE session ran. They are NOT copied — their results already appear inline in the conversation. Absent/0 for subagent sources. Absent for Codex sources: not tracked there, and Codex subagents are separate rollouts whose content is never folded into the copy.",
     )
     models: ConversionModels = Field(description="Assistant model history of the source. Codex sources report the Codex models the thread ran on; the copy's own turns are stamped '<synthetic>'.")
     source_context_tokens: int = Field(
@@ -1013,6 +1013,10 @@ class ConvertSessionResponse(SparseModel):
     source_compactions: int | None = Field(
         default=None,
         description="Context compactions the source went through (absent when none). The copy inherits them: that much of its early conversation is a summary, not the original turns, so its recollection of how things started is lossy. Verify claims about the early history against the transcript (grep_session on the source) instead of trusting the answer.",
+    )
+    source_turns_dropped: int | None = Field(
+        default=None,
+        description="Codex sources only: the oldest turns left out of the copy to keep it under the size budget (absent when none). The copy knows its early history is missing; verify claims about how the session started against the source with grep_session.",
     )
     environment: ConversionEnvironment = Field(description="The source's original cwd/branch/version/age.")
     suggested_handoff: str | None = Field(
@@ -1056,6 +1060,7 @@ class ConvertSessionResponse(SparseModel):
             models=ConversionModels(**r.models),
             source_context_tokens=source_stats.context_tokens,
             source_compactions=source_stats.compaction_count or None,
+            source_turns_dropped=r.dropped_for_size or None,
             environment=ConversionEnvironment(**r.environment),
             suggested_handoff=r.suggested_handoff,
             lineage=r.lineage,

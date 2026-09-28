@@ -13,7 +13,7 @@ description: >
 
 # cc-explorer
 
-Explores Claude Code and Codex history stored as local JSONL transcripts. MCP tools handle all interaction — call them directly, no CLI commands needed. Search/list/read tools span both harnesses by default; pass `harnesses=["claude"]` or `harnesses=["codex"]` to narrow them. `convert_session` accepts Codex sessions as a source (they arrive as text turns); the agent-forensics tools and the rest of the conversion lifecycle are Claude-specific.
+Explores Claude Code and Codex history stored as local JSONL transcripts. MCP tools handle all interaction — call them directly, no CLI commands needed. Search/list/read tools span both harnesses by default; pass `harnesses=["claude"]` or `harnesses=["codex"]` to narrow them. `convert_session` accepts Codex sessions as a source (they arrive as text turns), and the resulting subagent is an ordinary conversion artifact that `rewind_transcript` and `delete_conversions` handle like any other. `subagent_to_session` and the agent-forensics tools are Claude-specific.
 
 ## Delegate or DIY
 

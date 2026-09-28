@@ -130,43 +130,110 @@ def test_search_drops_codex_injected_context(tmp_path):
 # --- live session identity -----------------------------------------------------
 
 
-def test_registry_session_id_reads_owning_process_entry(tmp_path, monkeypatch):
+@pytest.fixture
+def registry(tmp_path, monkeypatch):
+    """An empty registry dir and a clean owner cache for the ancestor walk."""
     sessions = tmp_path / "sessions"
     sessions.mkdir()
-    (sessions / f"{os.getppid()}.json").write_text(json.dumps({"sessionId": "live-id"}))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-    live_session._owning_registry_file.cache_clear()
-    try:
-        assert live_session.registry_session_id() == "live-id"
-    finally:
-        live_session._owning_registry_file.cache_clear()
+    monkeypatch.setattr(live_session, "_owner_cache", None)
+    monkeypatch.setattr(live_session, "_process_name", lambda pid: "python")
+    return sessions
 
 
-def test_registry_session_id_walks_up_to_an_ancestor(tmp_path, monkeypatch):
-    sessions = tmp_path / "sessions"
-    sessions.mkdir()
+def _register(sessions: Path, pid: int, session_id: str, *, recorded_pid: int | None = None) -> None:
+    (sessions / f"{pid}.json").write_text(
+        json.dumps({"pid": recorded_pid if recorded_pid is not None else pid, "sessionId": session_id})
+    )
+
+
+def test_live_owner_reads_parent_registry_entry(registry):
+    _register(registry, os.getppid(), "live-id")
+    assert live_session.live_owner() == ("claude", "live-id")
+
+
+def test_live_owner_walks_up_to_an_ancestor(registry):
     grandparent = live_session._parent_pid(os.getppid())
     assert grandparent
-    (sessions / f"{grandparent}.json").write_text(json.dumps({"sessionId": "ancestor-id"}))
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-    live_session._owning_registry_file.cache_clear()
-    try:
-        assert live_session.registry_session_id() == "ancestor-id"
-    finally:
-        live_session._owning_registry_file.cache_clear()
+    _register(registry, grandparent, "ancestor-id")
+    assert live_session.live_owner() == ("claude", "ancestor-id")
 
 
-def test_registry_session_id_none_without_registry(tmp_path, monkeypatch):
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-    live_session._owning_registry_file.cache_clear()
-    try:
-        assert live_session.registry_session_id() is None
-    finally:
-        live_session._owning_registry_file.cache_clear()
+def test_live_owner_ignores_entry_for_a_different_pid(registry):
+    _register(registry, os.getppid(), "reused-pid-id", recorded_pid=os.getppid() + 1)
+    assert live_session.live_owner() is None
+
+
+def test_live_owner_nearest_codex_beats_outer_claude(registry, monkeypatch):
+    grandparent = live_session._parent_pid(os.getppid())
+    _register(registry, grandparent, "outer-claude-id")
+    monkeypatch.setattr(
+        live_session, "_process_name", lambda pid: "codex" if pid == os.getppid() else "python"
+    )
+    assert live_session.live_owner() == ("codex", None)
+
+
+def test_live_owner_miss_is_not_cached(registry):
+    assert live_session.live_owner() is None
+    _register(registry, os.getppid(), "late-id")
+    assert live_session.live_owner() == ("claude", "late-id")
 
 
 def test_live_registry_id_beats_stale_spawn_env(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "stale-spawn-id")
-    monkeypatch.setattr(srv, "registry_session_id", lambda: "live-id")
+    monkeypatch.setattr(srv, "live_owner", lambda: ("claude", "live-id"))
     assert srv._current_claude_session_id() == "live-id"
     assert srv._current_session_id() == "live-id"
+
+
+def test_codex_owner_ignores_inherited_claude_env(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "outer-claude-id")
+    monkeypatch.setenv("CODEX_THREAD_ID", THREAD)
+    monkeypatch.setattr(srv, "live_owner", lambda: ("codex", None))
+    assert srv._current_claude_session_id() is None
+    assert srv._current_session_id() == THREAD
+
+
+# --- size budget and Codex-specific result fields ------------------------------
+
+
+def test_codex_conversion_reports_turns_dropped_for_size(fake_claude, codex_home, monkeypatch):
+    import cc_explorer._codex_resume as vendored
+
+    fake_claude.write_session(SID_PARENT, _simple_session_lines())
+    many = "01a04576-1111-7ee0-a898-58bb50387cc5"
+    items = [_meta(many, PROJECT)]
+    for i in range(6):
+        role = "user" if i % 2 == 0 else "assistant"
+        kind = "input_text" if role == "user" else "output_text"
+        items.append(_line(f"2026-08-27T12:00:0{i}Z", i + 1, "response_item", {
+            "type": "message", "role": role, "content": [{"type": kind, "text": f"turn-{i} " + "x" * 100}],
+        }))
+    _write_rollout(codex_home / "sessions/2026/08/29" / f"rollout-x-{many}.jsonl", *items)
+    # Budget fits the last two turns only; build_turns reads its default at call time.
+    monkeypatch.setattr(vendored.build_turns, "__defaults__", (None, 250))
+
+    resp = srv.convert_session(direction="session_to_subagent", src_id=many, dest_parent_session=SID_PARENT)
+
+    assert resp.source_turns_dropped == 4
+    assert resp.dropped_branches is None
+    assert resp.turns == 2
+
+
+def test_codex_subagent_rollout_keeps_its_own_session_meta(tmp_path):
+    rollout = tmp_path / "sessions/2026/08/27" / f"rollout-x-{THREAD}.jsonl"
+    _write_rollout(
+        rollout,
+        _meta(THREAD, PROJECT, subagent_history_start_ordinal=5),
+        _line("2026-08-27T12:00:01Z", 1, "response_item", {
+            "type": "message", "role": "user", "content": [{"type": "input_text", "text": "inherited"}],
+        }),
+        _line("2026-08-27T12:00:06Z", 6, "response_item", {
+            "type": "message", "role": "user", "content": [{"type": "input_text", "text": "child"}],
+        }),
+    )
+
+    records = CodexProvider(tmp_path).session_records([rollout])
+
+    assert [r["type"] for r in records] == ["session_meta", "response_item"]
+    assert records[1]["payload"]["content"][0]["text"] == "child"

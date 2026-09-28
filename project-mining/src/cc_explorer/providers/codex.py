@@ -183,7 +183,13 @@ class CodexProvider:
                     continue
                 if not isinstance(data, dict):
                     continue
-                if start_ordinal is not None and data.get("ordinal", 0) < start_ordinal:
+                # A child rollout's own session_meta sits before its history
+                # cutoff; it describes the child, so it is never inherited prefix.
+                if (
+                    start_ordinal is not None
+                    and data.get("type") != "session_meta"
+                    and data.get("ordinal", 0) < start_ordinal
+                ):
                     continue
                 yield data
 

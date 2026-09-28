@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sys
 import uuid
 from collections import Counter
 from dataclasses import dataclass
@@ -44,7 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from ._codex_resume import build_turns, extract_items
+from ._codex_resume import LEAD_USER_TEXT, Turn, build_turns, extract_items
 
 # Conversation line types we copy. Everything else (system, summary, progress,
 # file-history-snapshot, queue-operation, mode/permission/custom-title headers)
@@ -525,11 +526,14 @@ class ConversionResult:
     environment: dict[str, Any]
     lineage: list[dict[str, str]]
     nested_agents: int = 0
-    dropped_branches: int = 0
+    # None when no thread walk ran (Codex sources have no edit branches).
+    dropped_branches: Optional[int] = None
     source_harness: str = "claude"
     # Codex sources only: estimated tokens the rendered copy replays on resume.
     # A Claude copy inherits its source's measured context instead.
     copy_context_tokens: Optional[int] = None
+    # Codex sources only: oldest turns left out of the copy by the size budget.
+    dropped_for_size: int = 0
     # session_to_subagent
     parent_session: Optional[str] = None
     suggested_handoff: Optional[str] = None
@@ -591,7 +595,7 @@ def convert_session_to_subagent(
 
     src8 = src_session_id[:8]
     project_basename = Path(src_project_path).name if src_project_path else "?"
-    result = _write_subagent_artifact(
+    lineage, out_path, meta_path = _write_subagent_artifact(
         lines=lines,
         new_agent=new_agent,
         src_session_id=src_session_id,
@@ -599,14 +603,23 @@ def convert_session_to_subagent(
         dest_parent_session_id=dest_parent_session_id,
         dest_parent_session_dir=dest_parent_session_dir,
         prior=prior,
-        handoff=_suggested_handoff(src8, project_basename, prior, src_converted_from),
     )
-    result.trimmed_trailing = trimmed
-    result.dropped_branches = dropped_branches
-    result.nested_agents = nested_agents
-    result.models = _model_stats(lines)
-    result.environment = _environment(lines)
-    return result
+    return ConversionResult(
+        direction="session_to_subagent",
+        created_id=new_agent,
+        turns=len(lines),
+        trimmed_trailing=trimmed,
+        dropped_branches=dropped_branches,
+        tail_state=_tail_state(lines),
+        models=_model_stats(lines),
+        environment=_environment(lines),
+        lineage=lineage,
+        nested_agents=nested_agents,
+        parent_session=dest_parent_session_id,
+        suggested_handoff=_suggested_handoff(src8, project_basename, prior, src_converted_from),
+        written_path=out_path,
+        meta_path=meta_path,
+    )
 
 
 def convert_codex_session_to_subagent(
@@ -645,9 +658,13 @@ def convert_codex_session_to_subagent(
         "are commands it ran and their output, truncated. Codex's private reasoning "
         "was not carried over.]"
     )
-    turns = build_turns(extract_items(src_records), header)
+    items = extract_items(src_records)
+    turns = build_turns(items, header)
     if not turns:
         raise ValueError(f"Codex session {src_session_id} has no messages to carry over")
+    # build_turns drops the oldest turns past its size budget and says so only
+    # inside the copy; count them so the caller knows early history is absent.
+    dropped_for_size = _real_turns(build_turns(items, max_chars=sys.maxsize)) - _real_turns(turns)
 
     new_agent = _new_agent_id()
     lines: list[dict[str, Any]] = []
@@ -676,8 +693,7 @@ def convert_codex_session_to_subagent(
     _relinearize(lines)
     lines[0]["promptId"] = str(uuid.uuid4())
 
-    project_basename = Path(src_project_path).name if src_project_path else "?"
-    result = _write_subagent_artifact(
+    lineage, out_path, meta_path = _write_subagent_artifact(
         lines=lines,
         new_agent=new_agent,
         src_session_id=src_session_id,
@@ -685,26 +701,43 @@ def convert_codex_session_to_subagent(
         dest_parent_session_id=dest_parent_session_id,
         dest_parent_session_dir=dest_parent_session_dir,
         prior=[],
-        handoff=_suggested_handoff(src_session_id[:8], project_basename, [], harness="codex"),
     )
-    result.source_harness = "codex"
     codex_models = [c["model"] for c in contexts if isinstance(c.get("model"), str) and c["model"]]
-    result.models = {
-        "first": codex_models[0] if codex_models else None,
-        "last": codex_models[-1] if codex_models else None,
-        "counts": dict(Counter(codex_models)),
-    }
     last_ts = next(
         (r["timestamp"] for r in reversed(src_records) if isinstance(r.get("timestamp"), str)), None
     )
     cli_version = meta.get("cli_version")
-    result.environment = {
-        **_environment([{"cwd": cwd, "timestamp": last_ts}]),
-        "harness_version": cli_version if isinstance(cli_version, str) else None,
-    }
-    # ~4 characters per token: a size signal for planning the interview, not a count.
-    result.copy_context_tokens = sum(len(t.text) for t in turns) // 4
-    return result
+    project_basename = Path(src_project_path).name if src_project_path else "?"
+    return ConversionResult(
+        direction="session_to_subagent",
+        created_id=new_agent,
+        turns=len(lines),
+        trimmed_trailing=0,
+        tail_state=_tail_state(lines),
+        models={
+            "first": codex_models[0] if codex_models else None,
+            "last": codex_models[-1] if codex_models else None,
+            "counts": dict(Counter(codex_models)),
+        },
+        environment={
+            **_environment([{"cwd": cwd, "timestamp": last_ts}]),
+            "harness_version": cli_version if isinstance(cli_version, str) else None,
+        },
+        lineage=lineage,
+        source_harness="codex",
+        # ~4 characters per token: a size signal for planning the interview, not a count.
+        copy_context_tokens=sum(len(t.text) for t in turns) // 4,
+        dropped_for_size=dropped_for_size,
+        parent_session=dest_parent_session_id,
+        suggested_handoff=_suggested_handoff(src_session_id[:8], project_basename, [], harness="codex"),
+        written_path=out_path,
+        meta_path=meta_path,
+    )
+
+
+def _real_turns(turns: list[Turn]) -> int:
+    """Turn count excluding the synthetic lead-in build_turns adds before an assistant-first copy."""
+    return len(turns) - (1 if turns and LEAD_USER_TEXT in turns[0].parts else 0)
 
 
 def _write_subagent_artifact(
@@ -716,13 +749,12 @@ def _write_subagent_artifact(
     dest_parent_session_id: str,
     dest_parent_session_dir: Path,
     prior: list[dict[str, str]],
-    handoff: str,
-) -> ConversionResult:
+) -> tuple[list[dict[str, str]], Path, Path]:
     """Stamp provenance on subagent-shaped `lines` and write them plus meta.json.
 
     Shared by every session_to_subagent source. `lines` must already be linear
     subagent lines (isSidechain, agentId, parent sessionId, promptId on line 1).
-    The caller fills the source-specific result fields (models, environment, …).
+    Returns (lineage, transcript_path, meta_path) for the caller's result.
     """
     lineage = list(prior) + [
         {"as": "session", "id": src_session_id},
@@ -769,20 +801,7 @@ def _write_subagent_artifact(
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f)
 
-    return ConversionResult(
-        direction="session_to_subagent",
-        created_id=new_agent,
-        turns=len(lines),
-        trimmed_trailing=0,
-        tail_state=_tail_state(lines),
-        models={},
-        environment={},
-        lineage=lineage,
-        parent_session=dest_parent_session_id,
-        suggested_handoff=handoff,
-        written_path=out_path,
-        meta_path=meta_path,
-    )
+    return lineage, out_path, meta_path
 
 
 def _suggested_handoff(

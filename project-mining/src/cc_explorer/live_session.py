@@ -9,12 +9,12 @@ session with no transcript on disk.
 Claude Code also keeps a per-process registry file, ``~/.claude/sessions/<pid>.json``,
 whose ``sessionId`` tracks the session the process is running *now*. The MCP
 server is a descendant of that process (claude -> uv -> python), so walking up the
-process ancestry to the first pid with a registry entry recovers the live id.
+process ancestry to the nearest harness process recovers the live id — or finds a
+Codex process first, in which case the Claude env vars are inherited, not ours.
 """
 
 from __future__ import annotations
 
-import functools
 import json
 import os
 import subprocess
@@ -48,33 +48,81 @@ def _parent_pid(pid: int) -> int | None:
         return None
 
 
-@functools.cache
-def _owning_registry_file() -> Path | None:
-    """Registry file of the nearest ancestor Claude Code process, found once.
+def _process_name(pid: int) -> str:
+    """Executable name of `pid` via /proc (Linux) or `ps` (macOS); "" if unknown."""
+    comm = Path(f"/proc/{pid}/comm")
+    if comm.exists():
+        try:
+            return comm.read_text().strip()
+        except OSError:
+            return ""
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "comm=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5, check=False,
+        ).stdout.strip()
+        return Path(out).name if out else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
 
-    The ancestry of a running process never changes, so the walk is cached; the
-    file's contents are re-read on every lookup because the session id in it can.
+
+def _registry_entry(path: Path, pid: int) -> dict | None:
+    """The registry file's contents if it describes `pid`, else None.
+
+    Registry files outlive crashed processes, and pids get reused; an entry only
+    counts when the pid recorded inside it is the process we walked to.
     """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) and data.get("pid") == pid else None
+
+
+# The nearest harness ancestor never changes for a running process, so a hit is
+# cached; a miss is not, since the registry file may simply not exist yet.
+_owner_cache: tuple[str, Path | None] | None = None
+
+
+def _nearest_harness() -> tuple[str, Path | None] | None:
+    """("claude", registry_path) or ("codex", None) for the nearest harness ancestor.
+
+    Nearest wins: Codex launched from inside a Claude session (or the reverse)
+    inherits the outer harness's env vars, so only the process tree says which
+    harness actually owns this MCP server.
+    """
+    global _owner_cache
+    if _owner_cache is not None:
+        return _owner_cache
     sessions = _sessions_dir()
     pid = os.getppid()
     for _ in range(_MAX_ANCESTOR_HOPS):
         if pid is None or pid <= 1:
             return None
         candidate = sessions / f"{pid}.json"
-        if candidate.is_file():
-            return candidate
+        if candidate.is_file() and _registry_entry(candidate, pid) is not None:
+            _owner_cache = ("claude", candidate)
+            return _owner_cache
+        if _process_name(pid).startswith("codex"):
+            _owner_cache = ("codex", None)
+            return _owner_cache
         pid = _parent_pid(pid)
     return None
 
 
-def registry_session_id() -> str | None:
-    """The owning Claude Code process's current session id, or None if unknown."""
-    path = _owning_registry_file()
-    if path is None:
+def live_owner() -> tuple[str, str | None] | None:
+    """The harness that owns this server and, for Claude, its current session id.
+
+    Returns ("claude", <live session id or None>), ("codex", None), or None when
+    no harness ancestor is found. The Claude id is re-read on every call because
+    the session a process runs can change.
+    """
+    owner = _nearest_harness()
+    if owner is None:
         return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    sid = data.get("sessionId") if isinstance(data, dict) else None
-    return sid if isinstance(sid, str) and sid else None
+    harness, path = owner
+    if harness != "claude" or path is None:
+        return (harness, None)
+    entry = _registry_entry(path, int(path.stem))
+    sid = entry.get("sessionId") if entry else None
+    return ("claude", sid if isinstance(sid, str) and sid else None)

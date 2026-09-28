@@ -21,7 +21,7 @@ def _no_live_session_registry(monkeypatch):
     Test runs under Claude Code have a live Claude ancestor, whose registry id
     would otherwise override the env vars tests set.
     """
-    monkeypatch.setattr("cc_explorer.mcp_server.registry_session_id", lambda: None)
+    monkeypatch.setattr("cc_explorer.mcp_server.live_owner", lambda: None)
 
 
 @pytest.fixture

@@ -50,7 +50,7 @@ from .corpus import (
 )
 from .failures import narrow_to_error_sessions, survey_failures as run_failure_survey
 from .formatting import matches_id
-from .live_session import registry_session_id
+from .live_session import live_owner
 from .models import FailureKind, TranscriptStats, parse_hide, parse_kinds
 from .param_repair import argument_error_message, repair_arguments
 from .parser import collect_parser_diagnostics, load_conversations, load_transcript
@@ -556,17 +556,27 @@ def _current_session_id() -> str | None:
     Returns None when nothing identifies the caller (orphaned server, or one
     launched outside a session), in which case nothing is excluded.
     """
-    return (
-        _current_claude_session_id()
-        or os.environ.get("CODEX_THREAD_ID")
-        or os.environ.get("CODEX_SESSION_ID")
-        or None
-    )
+    owner = live_owner()
+    codex_id = os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID") or None
+    if owner is not None and owner[0] == "codex":
+        return codex_id
+    return _current_claude_session_id() or codex_id
 
 
 def _current_claude_session_id() -> str | None:
-    """Claude caller identity: the live registry id, else the spawn-time env var."""
-    return registry_session_id() or os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+    """Claude caller identity: the live registry id, else the spawn-time env var.
+
+    None when a Codex process is the nearest harness: any Claude env var then
+    belongs to an outer Claude session, not the caller.
+    """
+    owner = live_owner()
+    env_id = os.environ.get("CLAUDE_CODE_SESSION_ID") or None
+    if owner is None:
+        return env_id
+    harness, live_id = owner
+    if harness == "codex":
+        return None
+    return live_id or env_id
 
 
 def _exclude_current_session(
