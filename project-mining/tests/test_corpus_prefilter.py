@@ -519,3 +519,53 @@ def test_promote_refs_drops_missing_file_ref(tmp_path):
 
     sessions = promote_refs([good, missing])
     assert [s.session_id for s in sessions] == [good.session_id]
+
+
+# ---------------------------------------------------------------------------
+# written_since — mtime pruning ahead of the raw-byte scan
+# ---------------------------------------------------------------------------
+
+
+def test_written_since_drops_files_untouched_since_cutoff(tmp_path):
+    import os
+    from datetime import datetime, timezone
+
+    from cc_explorer.corpus import Corpus, SessionRef
+
+    cutoff = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    stale = tmp_path / "11111111-1111-1111-1111-111111111111.jsonl"
+    fresh = tmp_path / "22222222-2222-2222-2222-222222222222.jsonl"
+    missing = tmp_path / "33333333-3333-3333-3333-333333333333.jsonl"
+    for p in (stale, fresh):
+        p.write_text("{}\n")
+    os.utime(stale, (cutoff.timestamp() - 60, cutoff.timestamp() - 60))
+    os.utime(fresh, (cutoff.timestamp() + 60, cutoff.timestamp() + 60))
+
+    refs = [
+        SessionRef(session_id=PrefixId(p.stem), path=p, project_path=str(tmp_path))
+        for p in (stale, fresh, missing)
+    ]
+    kept = Corpus(refs).written_since(cutoff).refs
+
+    assert [r.path for r in kept] == [fresh]
+
+
+def test_written_since_drops_files_untouched_since_cutoff(tmp_path):
+    import os
+    from datetime import datetime, timezone
+
+
+    cutoff = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    stale = tmp_path / "11111111-1111-1111-1111-111111111111.jsonl"
+    fresh = tmp_path / "22222222-2222-2222-2222-222222222222.jsonl"
+    missing = tmp_path / "33333333-3333-3333-3333-333333333333.jsonl"
+    for p in (stale, fresh):
+        p.write_text("{}\n")
+    os.utime(stale, (cutoff.timestamp() - 60, cutoff.timestamp() - 60))
+    os.utime(fresh, (cutoff.timestamp() + 60, cutoff.timestamp() + 60))
+
+    refs = [
+        SessionRef(session_id=PrefixId(p.stem), path=p, project_path=str(tmp_path))
+        for p in (stale, fresh, missing)
+    ]
+    assert [r.path for r in Corpus(refs).written_since(cutoff).refs] == [fresh]

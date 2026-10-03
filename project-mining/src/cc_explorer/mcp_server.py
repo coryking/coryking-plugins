@@ -459,6 +459,7 @@ HarnessesParam = Annotated[
 def _load_all_sessions(
     projects: list[str] | None,
     harnesses: list[str] | None = None,
+    after: datetime | None = None,
 ) -> tuple[list[SessionInfo], list[str]]:
     """Load sessions across the selected projects (omit/empty ⇒ all projects).
 
@@ -469,7 +470,10 @@ def _load_all_sessions(
     narrow to refs first and promote only what they need.
     """
     proj_paths = resolve_projects(projects)
-    sessions = promote_refs(Corpus.discover(proj_paths, harnesses=harnesses).refs)
+    corpus = Corpus.discover(proj_paths, harnesses=harnesses)
+    if after:
+        corpus = corpus.written_since(_as_utc(after))
+    sessions = promote_refs(corpus.refs)
     sort_sessions_newest_first(sessions)
     return sessions, proj_paths
 
@@ -529,6 +533,11 @@ def _resolve_browsable_artifact(
     )
 
 
+def _as_utc(dt: datetime) -> datetime:
+    """Tool datetimes arrive naive or aware; naive is read as UTC."""
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
 def _filter_by_date(
     sessions: list[SessionInfo],
     after: datetime | None,
@@ -536,12 +545,10 @@ def _filter_by_date(
 ) -> list[SessionInfo]:
     """Filter sessions by date range. Naive datetimes treated as UTC."""
     if after:
-        if after.tzinfo is None:
-            after = after.replace(tzinfo=timezone.utc)
+        after = _as_utc(after)
         sessions = [s for s in sessions if s.first_timestamp and s.first_timestamp >= after]
     if before:
-        if before.tzinfo is None:
-            before = before.replace(tzinfo=timezone.utc)
+        before = _as_utc(before)
         sessions = [s for s in sessions if s.first_timestamp and s.first_timestamp <= before]
     return sessions
 
@@ -795,9 +802,12 @@ def list_project_sessions(
     Defaults to the CURRENT project (CWD). Pass `projects` to list one or more named projects instead; to enumerate the projects themselves use list_projects, and to find a conversation when you don't know its project use search_projects.
     """
     proj_sel = projects if projects else [resolve_project(None)]
-    sessions, _ = _load_all_sessions(proj_sel, harnesses)
+    sessions, _ = _load_all_sessions(proj_sel, harnesses, after)
     if not sessions:
-        raise ToolError(f"No conversations found for {', '.join(proj_sel)}")
+        raise ToolError(
+            f"No conversations found for {', '.join(proj_sel)}"
+            + (f" written since {after.isoformat()}" if after else "")
+        )
 
     sessions = [s for s in sessions if s.message_count >= min_messages]
     sessions = [s for s in sessions if s.stats.tool_use_count >= min_tools]
@@ -863,6 +873,11 @@ def search_projects(
     corpus = Corpus.discover(proj_paths, harnesses=harnesses)
     if not corpus.refs:
         raise ToolError(f"No conversations found for: {', '.join(proj_paths) or '(no projects)'}")
+    # mtime prune before the raw-byte scan and parse: with `after` set, files
+    # untouched since then are never read. `_filter_by_date` below stays the
+    # filter of record (and handles `before`, which mtime cannot prune).
+    if after:
+        corpus = corpus.written_since(_as_utc(after))
 
     no_match_error = ToolError(
         f"No matches for: {', '.join(patterns)} across {len(proj_paths)} project(s)"
