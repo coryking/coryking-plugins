@@ -376,6 +376,25 @@ class Corpus:
                 )
         return cls(refs)
 
+    def written_since(self, after: datetime) -> "Corpus":
+        """Refs whose session transcript was written at or after `after`.
+
+        Pure stat() pruning ahead of any read: transcripts are append-only, so
+        a session's first timestamp can never postdate its file's mtime — a
+        file last written before `after` cannot hold a session that started
+        after it. Every subset `_filter_by_date(after=...)` would keep survives
+        (a compaction rewrite bumps mtime, so pruning errs toward keeping).
+        """
+        lo_ts = after.timestamp()
+
+        def written(ref: SessionRef) -> bool:
+            try:
+                return max(p.stat().st_mtime for p in ref.paths or (ref.path,)) >= lo_ts
+            except OSError:
+                return False
+
+        return Corpus([r for r in self.refs if written(r)])
+
     def narrow_to_ids(self, ids: Sequence[str]) -> "Corpus":
         """Refs whose session id matches any of the given ids/prefixes."""
         wanted = [PrefixId(i) for i in ids]
@@ -471,21 +490,18 @@ class Corpus:
         if not all(_raw_prefilter_safe(p) for p in patterns):
             return list(self.refs)
 
-        scanner: Optional[Scanner] = None
         raw_patterns = list(patterns)
         if not all(rg_safe(p) for p in patterns):
-            scanner = PyScanner()
-            # PyScanner uses the authoritative re.IGNORECASE semantics, so it
-            # sees literal İ/ı. JSON writers may encode those characters as
-            # \u0130/\u0131 instead; select every file containing either escape
-            # and let the typed matcher discard over-selection after decoding.
-            raw_patterns.append(_PYTHON_EXTRA_I_JSON_ESCAPE)
+            # Python's re.IGNORECASE also folds i/I to İ/ı; rg's does not. A
+            # line rg misses but Python matches must therefore contain İ or ı —
+            # literally, or JSON-escaped as \u0130/\u0131 — so selecting every
+            # file holding one keeps the set a superset while staying on rg.
+            # (Scanning these patterns in Python instead is a line-by-line
+            # regex over the whole corpus: minutes on any pattern with an "i".)
+            raw_patterns += [_PYTHON_EXTRA_I_LITERAL, _PYTHON_EXTRA_I_JSON_ESCAPE]
 
         try:
-            return [
-                ref
-                for ref, _ in self.matching_files(raw_patterns, scanner=scanner)
-            ]
+            return [ref for ref, _ in self.matching_files(raw_patterns)]
         except ScannerError as e:
             # stderr, never stdout — stdout is the stdio MCP protocol channel.
             print(
@@ -546,6 +562,7 @@ _RG_UNSAFE = re.compile(
 # This raw regex selects escaped forms of the two characters Python adds to the
 # ASCII I/i case-insensitive equivalence class but Unicode simple folding omits.
 _PYTHON_EXTRA_I_JSON_ESCAPE = r"\\u013[01]"
+_PYTHON_EXTRA_I_LITERAL = "[\u0130\u0131]"
 
 
 def _class_range_includes_ascii_i(pattern: str) -> bool:
