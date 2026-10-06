@@ -28,6 +28,8 @@ from pydantic import ValidationError as PydanticValidationError
 
 from ._claude_paths import _get_projects_dir
 from .activity import build_activity_timeline
+from .usage import get_report as build_usage_report, get_observations as build_usage_observations
+from .usage_models import Attribution, UsageReport, UsageObservations
 from .conversion import (
     conversion_age_seconds,
     convert_codex_session_to_subagent,
@@ -145,7 +147,12 @@ bodies; Codex subagents are independent rollout sessions linked by metadata.
    at once, peaks, hands-on vs autonomous time). Session ids and projects it
    returns pass straight back to the tools above.
 
-5. Interview — ask a past session what it meant, when grep can't answer.
+5. Usage accounting — get_usage_report selects an observed workload, includes
+   discoverable descendants, and reports tokens/coverage before detail. Audit
+   native counters and source locators with get_usage_observations. No rates or
+   prices are calculated; unknown categories/configuration stay explicit.
+
+6. Interview — ask a past session what it meant, when grep can't answer.
    convert_session copies the session into a resumable subagent; SendMessage
    resumes it (no agent-teams needed — if SendMessage is not in your toolset it
    is deferred, so load it with ToolSearch query "select:SendMessage"); send ONE
@@ -666,6 +673,70 @@ def _validate_turn_id(turn: str) -> None:
 # =============================================================================
 # Conversation tools
 # =============================================================================
+
+
+@mcp.tool(annotations=_TOOL_ANNOTATIONS)
+def get_usage_report(
+    sessions: Annotated[list[str] | None, Field(description="Explicit session/agent IDs. Full harness-qualified identities are preferred; prefixes resolve uniquely within projects and harnesses. Omit for project/corpus scope.")] = None,
+    projects: Annotated[list[str] | None, Field(description="Paths or bare project names; worktrees pooled. Omit for all local projects. Included roots expand to evidenced descendants across project boundaries.")] = None,
+    harnesses: HarnessesParam = None,
+    include_descendants: bool = True,
+    after: Annotated[datetime | None, Field(description="Inclusive timezone-aware timestamp. Cumulative deltas read predecessors before this bound.")] = None,
+    before: Annotated[datetime | None, Field(description="Exclusive timezone-aware timestamp; selects [after,before).")] = None,
+    attribution: Annotated[list[Attribution] | None, Field(description="Caller labels and unit-labeled artifact measurements targeting full included session or observation IDs. Overlapping assignments fail; no size-to-token conversion.")] = None,
+    offset: Annotated[int, Field(ge=0, description="Session detail offset; totals and coverage cover the entire selection.")] = 0,
+    limit: Annotated[int, Field(ge=1, le=500, description="Session detail page size.")] = 20,
+    rollup_offsets: Annotated[dict[str, int] | None, Field(description="Independent offsets for model_effort/configuration/project/role/caller_labels rollups. Each defaults to zero.")] = None,
+    rollup_limit: Annotated[int, Field(ge=1, le=500, description="Maximum rows in each rollup; counts and next offsets precede detail.")] = 20,
+) -> UsageReport:
+    """Account for an agent workload's observed tokens, with coverage before detail.
+
+    Discover full IDs with session tools, select roots, then read category semantics,
+    configuration/project/role/caller-label rollups and coverage. Retained execution
+    branches are included where evidenced; deleted or unrecorded work cannot be
+    recovered. Ambiguous copied-request ownership remains separate from measured
+    workload consumption. No prices or subscription allowance estimates.
+    Use get_usage_observations to audit native counters and source locators.
+    """
+    try:
+        return build_usage_report(sessions=sessions, projects=projects, harnesses=harnesses,
+            include_descendants=include_descendants, start=after.isoformat() if after else None,
+            end=before.isoformat() if before else None, attribution=attribution,
+            offset=offset, limit=limit, rollup_offsets=rollup_offsets, rollup_limit=rollup_limit)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool(annotations=_TOOL_ANNOTATIONS)
+def get_usage_observations(
+    session: Annotated[str, Field(description="One session/agent identity; full harness-qualified ID preferred. Unique prefixes resolve within projects and harnesses.")],
+    projects: Annotated[list[str] | None, Field(description="Paths or bare project names used to resolve the selected identity; worktrees pooled.")] = None,
+    harnesses: HarnessesParam = None,
+    after: Annotated[datetime | None, Field(description="Inclusive timezone-aware timestamp; predecessors are read for cumulative deltas.")] = None,
+    before: Annotated[datetime | None, Field(description="Exclusive timezone-aware timestamp.")] = None,
+    offset: Annotated[int, Field(ge=0, description="Observation detail offset; totals cover the full selection.")] = 0,
+    limit: Annotated[int, Field(ge=1, le=500, description="Observation page size.")] = 100,
+    source_offset: Annotated[int, Field(ge=0, description="Independent source detail offset.")] = 0,
+    source_limit: Annotated[int, Field(ge=1, le=500, description="Source page size.")] = 50,
+    lifecycle_offset: Annotated[int, Field(ge=0, description="Independent lifecycle detail offset.")] = 0,
+    lifecycle_limit: Annotated[int, Field(ge=1, le=500, description="Lifecycle page size.")] = 100,
+    branch_offset: Annotated[int, Field(ge=0, description="Independent branch metadata offset.")] = 0,
+    branch_limit: Annotated[int, Field(ge=1, le=500, description="Branch metadata page size.")] = 20,
+) -> UsageObservations:
+    """Audit native usage evidence for one session/agent without descendants.
+
+    Counts and totals cover the full scope. Observations, lifecycle, sources
+    and branch facts have independent bounded pages. Native counters, inclusion semantics,
+    increments, uncertainty and file/line/byte locators remain visible. Null means
+    unknown. Growing sources can change between calls; compare their bounds.
+    """
+    try:
+        return build_usage_observations(session=session, projects=projects, harnesses=harnesses,
+            start=after.isoformat() if after else None, end=before.isoformat() if before else None,
+            offset=offset, limit=limit, source_offset=source_offset, source_limit=source_limit,
+            lifecycle_offset=lifecycle_offset, lifecycle_limit=lifecycle_limit, branch_offset=branch_offset, branch_limit=branch_limit)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -1304,11 +1375,13 @@ def list_session_agents(
         Field(description="Directory containing saved .output files."),
     ] = None,
 ) -> SessionAgentsResponse:
-    """List every subagent a session ran — type, status, token cost, duration, and whether its full record is available.
+    """Use get_usage_report for reconciled consumption accounting.
+
+    List every subagent a session ran — type, status, lightweight token estimates, duration, and whether its full record is available.
 
     Includes agents spawned by a workflow, not just ones the conversation dispatched directly, so the count reflects the session's real fan-out. Each row's `source` tells you whether to trust missing fields — and `workflow_run_id` lets you group agents from the same workflow run.
 
-    Use when you want to see a session's fan-out before drilling in: which agents ran, which errored, which burned the most tokens. Step two of agent forensics — get a session id from list_project_sessions(min_agents=1), then from here pass an agent_id to get_agent_detail for the full prompt/result/trace, or audit the whole session's tool usage with audit_session_tools.
+    Use when you want to see a session's fan-out before drilling in: which agents ran, which errored, which had the largest browsing token estimate. Step two of agent forensics — get a session id from list_project_sessions(min_agents=1), then from here pass an agent_id to get_agent_detail for the full prompt/result/trace, or audit the whole session's tool usage with audit_session_tools.
     """
     target = _resolve_session(session, projects)
 

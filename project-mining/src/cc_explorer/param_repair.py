@@ -65,6 +65,9 @@ ID_LIST_PARAMS: frozenset[str] = frozenset(
     {"projects", "sessions", "ids", "agent_ids", "harnesses"}
 )
 
+# Structured lists require native objects, not string wrapping/JSON guessing.
+STRUCTURED_LIST_PARAMS: frozenset[str] = frozenset({"attribution"})
+
 
 def _properties(schema: dict[str, Any]) -> dict[str, Any]:
     return schema.get("properties", {}) or {}
@@ -101,7 +104,7 @@ def _coerce(name: str, value: Any, prop_schema: Any) -> Any:
     guessing that it was meant as a list would search for the wrong thing
     without saying so.
     """
-    if not isinstance(value, str) or not _accepts_array(prop_schema):
+    if name in STRUCTURED_LIST_PARAMS or not isinstance(value, str) or not _accepts_array(prop_schema):
         return value
     text = value.strip()
     if name in ID_LIST_PARAMS and text.startswith("[") and text.endswith("]"):

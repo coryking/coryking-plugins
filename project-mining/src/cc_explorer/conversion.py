@@ -127,6 +127,19 @@ def _provenance_line(
     }
 
 
+def validate_provenance(data: Any) -> Optional[dict[str, Any]]:
+    """One validator for conversion discovery, browsing and accounting."""
+    if not isinstance(data, dict) or data.get("type") != _PROVENANCE_TYPE:
+        return None
+    sentinel = data.get("x_converter")
+    if not isinstance(sentinel, dict) or not isinstance(sentinel.get("from"), dict):
+        return None
+    lines = sentinel.get("lines_at_creation")
+    if not isinstance(lines, int) or isinstance(lines, bool) or lines < 1:
+        return None
+    return sentinel
+
+
 def read_provenance(transcript_path: Path) -> Optional[dict[str, Any]]:
     """Return the validated `x_converter` sentinel for a conversion, else None.
 
@@ -155,16 +168,9 @@ def read_provenance(transcript_path: Path) -> Optional[dict[str, Any]]:
                     data = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(data, dict) or data.get("type") != _PROVENANCE_TYPE:
-                    continue
-                sentinel = data.get("x_converter")
-                if not isinstance(sentinel, dict):
-                    continue
-                if not isinstance(sentinel.get("from"), dict):
-                    continue
-                if not isinstance(sentinel.get("lines_at_creation"), int):
-                    continue
-                return sentinel
+                sentinel = validate_provenance(data)
+                if sentinel is not None:
+                    return sentinel
     except OSError:
         return None
     return None

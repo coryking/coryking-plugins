@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -27,7 +27,7 @@ from ..models import (
     UserMessageModel,
 )
 from ..utils import PrefixId
-from .base import Harness, ProviderSession
+from .base import Harness, ProviderSession, project_identity as shared_project_identity
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,7 @@ class _RolloutMeta:
     history_base_id: str | None
     history_base_offset: int | None
     history_start_ordinal: int | None
+    payload: dict[str, Any] = field(default_factory=dict)
 
 
 class CodexProvider:
@@ -62,14 +63,17 @@ class CodexProvider:
             with path.open("rb") as stream:
                 line = stream.readline()
             data = orjson.loads(line)
-            if data.get("type") != "session_meta":
+            if not isinstance(data, dict) or data.get("type") != "session_meta":
                 return None
             payload = data.get("payload") or {}
+            if not isinstance(payload, dict):
+                return None
             thread_id = payload.get("id") or payload.get("session_id")
             cwd = payload.get("cwd")
             if not isinstance(thread_id, str) or not isinstance(cwd, str):
                 return None
-            history = payload.get("history_base") or {}
+            history = payload.get("history_base")
+            history = history if isinstance(history, dict) else {}
             return _RolloutMeta(
                 # Rollout id is the filename UUID. SessionMeta.id is the stable
                 # logical thread id and can survive a revert to a new rollout.
@@ -80,13 +84,12 @@ class CodexProvider:
                 history_base_id=history.get("thread_id"),
                 history_base_offset=history.get("end_byte_offset"),
                 history_start_ordinal=payload.get("subagent_history_start_ordinal"),
+                payload=payload,
             )
-        except (OSError, orjson.JSONDecodeError, AttributeError):
+        except (OSError, orjson.JSONDecodeError, AttributeError, TypeError):
             return None
 
     def discover_sessions(self, projects: Sequence[str] | None = None) -> list[ProviderSession]:
-        from .._claude_paths import _get_worktree_paths
-
         wanted = (
             {str(Path(p).expanduser().resolve()) for p in projects}
             if projects
@@ -117,11 +120,7 @@ class CodexProvider:
 
         @lru_cache(maxsize=None)
         def project_identity(cwd: str) -> tuple[str, str | None]:
-            worktrees = _get_worktree_paths(cwd)
-            if not worktrees:
-                return cwd, None
-            main = str(Path(worktrees[0]).expanduser().resolve())
-            return main, (None if cwd == main else Path(cwd).name)
+            return shared_project_identity(cwd)
 
         refs = [
             ProviderSession(
@@ -390,3 +389,11 @@ class CodexProvider:
                 content=content,
             ),
         )
+
+    def discover_usage(self, selectors=None):
+        from .codex_usage import discover
+        return discover(self.home)
+
+    def load_usage(self, session: ProviderSession, snapshots=None):
+        from .codex_usage import load
+        return load(session, snapshots)

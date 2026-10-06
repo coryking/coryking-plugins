@@ -50,6 +50,7 @@ class SparseModel(BaseModel):
 class SessionSummary(SparseModel):
     """Summary of a single conversation session."""
 
+    identity: str | None = Field(default=None, description="Full harness-qualified accounting identity; avoids ambiguous UUID prefixes.")
     session: PrefixId = Field(description="Session identifier — pass this back as the `session` param to other tools.")
     harness: Harness = Field(description="Harness that wrote this transcript: claude or codex.")
     project: str | None = Field(default=None, description="Project this session belongs to — pass to the `projects` param to scope other tools to it. Useful when results span projects.")
@@ -65,12 +66,12 @@ class SessionSummary(SparseModel):
     team_role: str | None = Field(default=None, description="This worker's role in the team (agentName), e.g. 'reviewer-3'. Absent outside agent-team sessions.")
     agents: int = Field(description="Subagents dispatched directly by the parent transcript (Task/Agent/TaskCreate blocks). Top-down view — does NOT count workflow-orchestrated agents.")
     agents_present: int = Field(description="Full discovered subagent population — direct dispatches plus on-disk orphans (notably workflow-orchestrated agents). Matches list_session_agents' total_agents. When this exceeds `agents`, the session ran workflows. The min_agents filter matches on this number.")
-    context_tokens: int = Field(description="Last assistant turn's input tokens (context window size).")
+    context_tokens: int = Field(description="Lightweight last observed request input estimate; not exact context occupancy. Use get_usage_report for consumption accounting.")
     compactions: int | None = Field(
         default=None,
         description="Context compactions detected in this session (a >30% drop from peak input tokens). Absent when there were none. A nonzero count means the early conversation was summarized away: the session can no longer quote its own beginning, so anything it says about how it started is reconstruction, not recall — verify that part against the transcript rather than asking the session.",
     )
-    output_tokens: int = Field(description="Total output tokens across all turns.")
+    output_tokens: int = Field(description="Lightweight sum of browsing assistant-record output; may include streaming fragments. Use get_usage_report for reconciled execution consumption.")
     tools: int = Field(description="Total tool_use invocations.")
     is_current: bool | None = Field(
         default=None,
@@ -85,6 +86,7 @@ class SessionSummary(SparseModel):
     def from_session_info(cls, s: SessionInfo, is_current: bool = False) -> SessionSummary:
         return cls(
             session=s.session_id,
+            identity=f"{s.harness.value}:{s.session_id.full}",
             harness=s.harness,
             project=s.project_path,
             date=s.first_timestamp,
@@ -554,6 +556,7 @@ class BrowseSessionResponse(SparseModel):
 class AgentSummary(SparseModel):
     """Summary of a single subagent spawned during a session."""
 
+    identity: str | None = Field(default=None, description="Full Claude agent accounting identity; use in usage selectors.")
     agent_id: PrefixId = Field(description="Agent identifier.")
     tool_use_id: PrefixId = Field(description="Tool use ID that spawned this agent.")
     source: str = Field(
@@ -571,14 +574,15 @@ class AgentSummary(SparseModel):
     type: str = Field(description="Subagent type (e.g. 'general-purpose', 'Explore').")
     status: str = Field(description="Agent status: completed, error, async_launched, unknown.")
     description: str = Field(description="Short description passed to the agent.")
-    input_tokens: int | None = Field(default=None, description="Total input tokens (input + cache).")
-    output_tokens: int | None = Field(default=None, description="Total output tokens.")
+    input_tokens: int | None = Field(default=None, description="Lightweight browsing input-plus-cache estimate; use get_usage_report for accounting.")
+    output_tokens: int | None = Field(default=None, description="Lightweight browsing output estimate; use get_usage_report for reconciled accounting.")
     tools: int | None = Field(default=None, description="Total tool invocations.")
     duration_ms: int | None = Field(default=None, description="Wall-clock duration in milliseconds.")
 
     @classmethod
     def from_subagent(cls, sa: SubagentInfo) -> AgentSummary:
         return cls(
+            identity=f"claude:{sa.agent_id.full}" if sa.agent_id.full else None,
             agent_id=sa.agent_id,
             tool_use_id=sa.tool_use_id,
             source=sa.source,
@@ -657,6 +661,7 @@ class AgentDetailResponse(SparseModel):
     )
     date: datetime | None = Field(default=None, description="Timestamp of session start.")
     title: str | None = Field(default=None, description="Session title.")
+    identity: str | None = Field(default=None, description="Full Claude agent accounting identity; use in usage selectors.")
     agent_id: PrefixId = Field(description="Agent identifier.")
     tool_use_id: PrefixId = Field(description="Tool use ID that spawned this agent.")
     source: str = Field(
@@ -669,8 +674,8 @@ class AgentDetailResponse(SparseModel):
     type: str = Field(description="Subagent type.")
     status: str = Field(description="Agent status.")
     date_started: datetime | None = Field(default=None, description="Timestamp when agent was spawned.")
-    input_tokens: int | None = Field(default=None, description="Total input tokens.")
-    output_tokens: int | None = Field(default=None, description="Total output tokens.")
+    input_tokens: int | None = Field(default=None, description="Lightweight browsing input estimate; use get_usage_report for accounting.")
+    output_tokens: int | None = Field(default=None, description="Lightweight browsing output estimate; use get_usage_report for reconciled accounting.")
     tools: int | None = Field(default=None, description="Total tool invocations.")
     tool_counts: dict[str, int] | None = Field(default=None, description="Tool name -> invocation count.")
     duration_ms: int | None = Field(default=None, description="Wall-clock duration in milliseconds.")
@@ -713,6 +718,7 @@ class AgentDetailResponse(SparseModel):
 
         return cls(
             session=found_session.session_id,
+            identity=f"claude:{found.agent_id.full}" if found.agent_id.full else None,
             project=found_session.project_path,
             worktree=found_session.worktree,
             date=found_session.first_timestamp,
@@ -760,6 +766,7 @@ class AgentToolCall(SparseModel):
 class AgentToolAudit(SparseModel):
     """Per-agent tool usage audit: counts, error rate, full chronological trace."""
 
+    identity: str | None = Field(default=None, description="Full Claude agent accounting identity; use in usage selectors.")
     agent_id: PrefixId = Field(description="Agent identifier.")
     source: str = Field(
         description="Whether this agent's record is complete and how it relates to the conversation. 'dispatched' — the conversation requested it and its full run is available. 'dispatch_only' — the conversation requested it but no run is available (rejected, never started, or no longer kept), so result/stats/trace will be missing. 'orphan' — it ran with a full record but the conversation didn't request it directly, typically because a workflow spawned it."

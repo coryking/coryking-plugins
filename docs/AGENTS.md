@@ -8,6 +8,7 @@ Reference documents for skill design and development. These inform how skills ar
 
 | Document | Purpose |
 |----------|---------|
+| `plans/2026-10-06-usage-accounting-design.md` | Issue #92 product boundaries, accounting architecture, and implementation acceptance criteria. |
 | `agent-researcher-orchestration.md` | Patterns for fan-out research: subagent prompts, work division, synthesis, model tiering, anti-patterns. Reference for any skill that delegates to researcher subagents. |
 | `cc-explorer-tool-split-braindump.md` | Historical design braindump for the tool split from single auto-triage `search_chat_history` into progressive zoom tools. Observations from session `4471fb60`. |
 | `chat-mining-methodology.md` | Mining methodology: three-corpora topology, research loop, vocabulary expansion spectrum. Open design questions and field test findings tracked in GitHub Issues. |
