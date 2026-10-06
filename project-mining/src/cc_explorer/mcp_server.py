@@ -677,56 +677,64 @@ def _validate_turn_id(turn: str) -> None:
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
 def get_usage_report(
-    sessions: Annotated[list[str] | None, Field(description="Explicit session/agent IDs, preferably full harness-qualified identities. Unique prefixes are accepted; unresolved or ambiguous members fail. Omit to select project/corpus scope.")] = None,
-    projects: Annotated[list[str] | None, Field(description="Paths or bare project names, worktrees pooled. Omit for all locally discoverable projects. Explicit roots include discoverable descendants across project boundaries.")] = None,
+    sessions: Annotated[list[str] | None, Field(description="Explicit session/agent IDs. Full harness-qualified identities are preferred; prefixes resolve uniquely within projects and harnesses. Omit for project/corpus scope.")] = None,
+    projects: Annotated[list[str] | None, Field(description="Paths or bare project names; worktrees pooled. Omit for all local projects. Included roots expand to evidenced descendants across project boundaries.")] = None,
     harnesses: HarnessesParam = None,
     include_descendants: bool = True,
-    start: Annotated[str | None, Field(description="Inclusive timezone-aware ISO-8601 bound. Cumulative evidence uses predecessors before this bound.")] = None,
-    end: Annotated[str | None, Field(description="Exclusive timezone-aware ISO-8601 bound.")] = None,
-    attribution: Annotated[list[Attribution] | None, Field(description="Caller labels and unit-labeled artifact measurements on full included session or observation identities. Overlapping targets are rejected. No byte-to-token conversion or inferred accepted-result count.")] = None,
-    offset: int = 0,
-    limit: Annotated[int, Field(ge=1, le=500, description="Session detail page size. Totals, membership and rollups always cover the entire selected scope.")] = 50,
+    after: Annotated[datetime | None, Field(description="Inclusive timezone-aware timestamp. Cumulative deltas read predecessors before this bound.")] = None,
+    before: Annotated[datetime | None, Field(description="Exclusive timezone-aware timestamp; selects [after,before).")] = None,
+    attribution: Annotated[list[Attribution] | None, Field(description="Caller labels and unit-labeled artifact measurements targeting full included session or observation IDs. Overlapping assignments fail; no size-to-token conversion.")] = None,
+    offset: Annotated[int, Field(ge=0, description="Session detail offset; totals and coverage cover the entire selection.")] = 0,
+    limit: Annotated[int, Field(ge=1, le=500, description="Session detail page size.")] = 20,
+    rollup_offsets: Annotated[dict[str, int] | None, Field(description="Independent offsets for model_effort/configuration/project/role/caller_labels rollups. Each defaults to zero.")] = None,
+    rollup_limit: Annotated[int, Field(ge=1, le=500, description="Maximum rows in each rollup; counts and next offsets precede detail.")] = 20,
 ) -> UsageReport:
     """Account for an agent workload's observed tokens, with coverage before detail.
 
-    Discover IDs with existing session tools, select root sessions, then inspect
-    categories, model/effort, project, role and caller-label rollups. Sources are
-    snapshotted at observed byte boundaries; inherited/conversion prefixes and
-    copied requests are reconciled. Retained execution branches are included
-    where evidenced; deleted/unrecorded work cannot be recovered. Missing usage,
-    conflicting copies, counter baselines and context-only counters stay visible.
-    No pricing, model recommendations, or subscription allowance estimates.
-    Use get_usage_observations to audit identities and physical source locators.
+    Discover full IDs with session tools, select roots, then read category semantics,
+    configuration/project/role/caller-label rollups and coverage. Retained execution
+    branches are included where evidenced; deleted or unrecorded work cannot be
+    recovered. Ambiguous copied-request ownership remains separate from measured
+    workload consumption. No prices or subscription allowance estimates.
+    Use get_usage_observations to audit native counters and source locators.
     """
     try:
         return build_usage_report(sessions=sessions, projects=projects, harnesses=harnesses,
-            include_descendants=include_descendants, start=start, end=end, attribution=attribution,
-            offset=offset, limit=limit)
+            include_descendants=include_descendants, start=after.isoformat() if after else None,
+            end=before.isoformat() if before else None, attribution=attribution,
+            offset=offset, limit=limit, rollup_offsets=rollup_offsets, rollup_limit=rollup_limit)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
 def get_usage_observations(
-    session: Annotated[str, Field(description="One session/agent identity from get_usage_report; full harness-qualified ID preferred, unique prefixes accepted.")],
-    projects: list[str] | None = None,
+    session: Annotated[str, Field(description="One session/agent identity; full harness-qualified ID preferred. Unique prefixes resolve within projects and harnesses.")],
+    projects: Annotated[list[str] | None, Field(description="Paths or bare project names used to resolve the selected identity; worktrees pooled.")] = None,
     harnesses: HarnessesParam = None,
-    start: str | None = None,
-    end: str | None = None,
-    offset: int = 0,
-    limit: Annotated[int, Field(ge=1, le=500)] = 100,
+    after: Annotated[datetime | None, Field(description="Inclusive timezone-aware timestamp; predecessors are read for cumulative deltas.")] = None,
+    before: Annotated[datetime | None, Field(description="Exclusive timezone-aware timestamp.")] = None,
+    offset: Annotated[int, Field(ge=0, description="Observation detail offset; totals cover the full selection.")] = 0,
+    limit: Annotated[int, Field(ge=1, le=500, description="Observation page size.")] = 100,
+    source_offset: Annotated[int, Field(ge=0, description="Independent source detail offset.")] = 0,
+    source_limit: Annotated[int, Field(ge=1, le=500, description="Source page size.")] = 50,
+    lifecycle_offset: Annotated[int, Field(ge=0, description="Independent lifecycle detail offset.")] = 0,
+    lifecycle_limit: Annotated[int, Field(ge=1, le=500, description="Lifecycle page size.")] = 100,
+    branch_offset: Annotated[int, Field(ge=0, description="Independent branch metadata offset.")] = 0,
+    branch_limit: Annotated[int, Field(ge=1, le=500, description="Branch metadata page size.")] = 20,
 ) -> UsageObservations:
-    """Audit normalized usage observations for one session/agent, without descendants.
+    """Audit native usage evidence for one session/agent without descendants.
 
-    Uses the report engine. Counts and totals cover the whole scope regardless of
-    detail pagination. Each observation retains native counters, category inclusion
-    semantics, derived increment, model/effort uncertainty, stable identity and
-    supporting file/line/byte locators. Null categories mean unknown, never zero.
-    Growing files can change between calls; compare observed source boundaries.
+    Counts and totals cover the full scope. Observations, lifecycle, sources
+    and branch facts have independent bounded pages. Native counters, inclusion semantics,
+    increments, uncertainty and file/line/byte locators remain visible. Null means
+    unknown. Growing sources can change between calls; compare their bounds.
     """
     try:
         return build_usage_observations(session=session, projects=projects, harnesses=harnesses,
-            start=start, end=end, offset=offset, limit=limit)
+            start=after.isoformat() if after else None, end=before.isoformat() if before else None,
+            offset=offset, limit=limit, source_offset=source_offset, source_limit=source_limit,
+            lifecycle_offset=lifecycle_offset, lifecycle_limit=lifecycle_limit, branch_offset=branch_offset, branch_limit=branch_limit)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
 
@@ -1367,11 +1375,13 @@ def list_session_agents(
         Field(description="Directory containing saved .output files."),
     ] = None,
 ) -> SessionAgentsResponse:
-    """List every subagent a session ran — type, status, token cost, duration, and whether its full record is available.
+    """Use get_usage_report for reconciled consumption accounting.
+
+    List every subagent a session ran — type, status, lightweight token estimates, duration, and whether its full record is available.
 
     Includes agents spawned by a workflow, not just ones the conversation dispatched directly, so the count reflects the session's real fan-out. Each row's `source` tells you whether to trust missing fields — and `workflow_run_id` lets you group agents from the same workflow run.
 
-    Use when you want to see a session's fan-out before drilling in: which agents ran, which errored, which burned the most tokens. Step two of agent forensics — get a session id from list_project_sessions(min_agents=1), then from here pass an agent_id to get_agent_detail for the full prompt/result/trace, or audit the whole session's tool usage with audit_session_tools.
+    Use when you want to see a session's fan-out before drilling in: which agents ran, which errored, which had the largest browsing token estimate. Step two of agent forensics — get a session id from list_project_sessions(min_agents=1), then from here pass an agent_id to get_agent_detail for the full prompt/result/trace, or audit the whole session's tool usage with audit_session_tools.
     """
     target = _resolve_session(session, projects)
 

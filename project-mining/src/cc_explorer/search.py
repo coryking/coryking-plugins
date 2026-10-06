@@ -208,6 +208,10 @@ class SessionInfo:
     harness: Harness = Harness.claude
     paths: tuple[Path, ...] = ()
 
+    def __post_init__(self):
+        if not isinstance(self.session_id, PrefixId):
+            self.session_id = PrefixId(self.session_id)
+
     @cached_property
     def agents_present(self) -> int:
         """Full discovered subagent population — parent dispatches plus on-disk

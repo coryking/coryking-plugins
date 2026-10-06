@@ -252,6 +252,7 @@ def test_session_summary_exposes_harness(session_info) -> None:
     summary = SessionSummary.from_session_info(session_info)
 
     assert summary.harness is Harness.codex
+    assert summary.identity == f"codex:{session_info.session_id.full}"
 
 
 def test_read_tools_expose_one_shared_harness_filter() -> None:

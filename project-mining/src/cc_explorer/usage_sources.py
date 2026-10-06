@@ -91,6 +91,7 @@ def snapshot(path: Path, root: Path, observed: SourceCoverage | None = None) -> 
                         raise ValueError("record envelope")
                 except (ValueError, orjson.JSONDecodeError):
                     cov.malformed_records += 1
+                    cov.malformed_lines.append(number)
                     continue
                 records.append((data, loc))
                 cov.records += 1
@@ -124,6 +125,26 @@ class SnapshotReader:
     def release_records(self):
         """Keep boundaries, free transcript content after one logical session."""
         self._snapshots = {key: (None, value[1]) for key, value in self._snapshots.items()}
+
+
+def merge_source_coverage(sources: list[SourceCoverage]) -> list[SourceCoverage]:
+    """Monotonic diagnostics across discovery, baseline and accounting reads."""
+    severity = {"observed": 0, "excluded": 1, "partial": 2, "unreadable": 3}
+    merged = {}
+    counters = ("records", "malformed_records", "unsupported_records", "excluded_records", "missing_usage_records", "read_boundary")
+    for source in sources:
+        prior = merged.get(source.path)
+        if prior is None:
+            merged[source.path] = source.model_copy(deep=True)
+            continue
+        for name in counters:
+            setattr(prior, name, max(getattr(prior, name), getattr(source, name)))
+        prior.status = max((prior.status, source.status), key=lambda s: severity.get(s, 3))
+        prior.reasons = sorted(set(prior.reasons) | set(source.reasons))
+        prior.malformed_lines = sorted(set(prior.malformed_lines) | set(source.malformed_lines))
+        prior.project = prior.project or source.project
+        prior.owning_session = prior.owning_session or source.owning_session
+    return sorted(merged.values(), key=lambda s: s.path)
 
 
 def counter(data: dict, name: str, reasons: list[str]) -> int | None:
@@ -182,6 +203,41 @@ def native_tokens(data: dict, harness: str) -> tuple[Tokens, int | None, list[st
                   reasoning_output=reasoning), prompt, reasons
 
 
+ITERATION_REASONS = {"fallback_iteration_usage_unaccounted", "additional_iteration_usage_unaccounted",
+    "iteration_usage_semantics_unavailable", "message_iteration_usage_mismatch"}
+
+
+def iteration_reasons(usage):
+    """Ordinary sampling iterations decompose totals; other types may add work.
+
+    Anthropic documents fallback as serving-attempt-only top-level usage and
+    compaction/advisor usage separately. Preserve those gaps without summing
+    arbitrary iteration payloads or inventing missing model/request identities.
+    """
+    iterations = usage.get("iterations")
+    if iterations is None or iterations == []:
+        return []
+    if not isinstance(iterations, list) or any(not isinstance(i, dict) for i in iterations):
+        return ["iteration_usage_semantics_unavailable"]
+    kinds = [i.get("type") for i in iterations]
+    if any(not isinstance(kind, str) or kind not in {"message", "fallback_message", "compaction", "advisor_message"} for kind in kinds):
+        return ["iteration_usage_semantics_unavailable"]
+    reasons = []
+    if "fallback_message" in kinds and len(iterations) > 1:
+        reasons.append("fallback_iteration_usage_unaccounted")
+    if any(kind in {"compaction", "advisor_message"} for kind in kinds):
+        reasons.append("additional_iteration_usage_unaccounted")
+    if not reasons:
+        for field in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+            values = [i.get(field) for i in iterations]
+            value = usage.get(field)
+            valid = lambda v: isinstance(v, int) and not isinstance(v, bool) and v >= 0
+            if valid(value) and all(valid(v) for v in values) and value != sum(values):
+                reasons.append("message_iteration_usage_mismatch")
+                break
+    return reasons
+
+
 def reconcile_requests(observations: list[Observation]) -> list[Observation]:
     """Reconcile multipart fragments within each file, then compare copies.
 
@@ -203,8 +259,21 @@ def reconcile_requests(observations: list[Observation]) -> list[Observation]:
             merged: dict[str, int | None] = {name: None for name in Tokens.model_fields}
             malformed = False
             native: dict[str, Any] = {}
+            tools = {}
+            configuration = {}
             for fragment in fragments:
                 native.update(fragment.native_usage)
+                for key, value in fragment.server_tool_use.items():
+                    if value is not None:
+                        tools[key] = max(tools.get(key) or 0, value)
+                    else:
+                        tools.setdefault(key, None)
+                for key in ("model", "effort", "service_tier", "speed"):
+                    value = getattr(fragment, key)
+                    if value is not None:
+                        if key in configuration and configuration[key] != value:
+                            malformed = True
+                        configuration[key] = value
                 for name, value in fragment.tokens.model_dump().items():
                     previous = merged[name]
                     if value is not None:
@@ -217,6 +286,9 @@ def reconcile_requests(observations: list[Observation]) -> list[Observation]:
                         merged[name] = value
             chosen.tokens = Tokens(**merged)
             chosen.native_usage = native
+            chosen.server_tool_use = tools
+            for key, value in configuration.items():
+                setattr(chosen, key, value)
             chosen.increment = chosen.tokens if chosen.quality != "excluded" else None
             chosen.sources = [loc for fragment in fragments for loc in fragment.sources]
             chosen.lifecycle = sorted({s for fragment in fragments for s in fragment.lifecycle})
@@ -225,6 +297,8 @@ def reconcile_requests(observations: list[Observation]) -> list[Observation]:
             if all(merged[k] is not None for k in CORE):
                 chosen.reasons = [r for r in chosen.reasons if r != "missing_usage"]
             chosen.reasons.extend(f"missing_category:{k}" for k in CORE if merged[k] is None)
+            if chosen.harness == "claude":
+                chosen.reasons = [r for r in chosen.reasons if r not in ITERATION_REASONS] + iteration_reasons(native)
             if malformed or any(r.startswith(("invalid_", "inconsistent_")) for r in chosen.reasons):
                 chosen.reasons.append("inconsistent_streaming_fragments")
                 chosen.quality = "conflict"
@@ -244,7 +318,8 @@ def reconcile_requests(observations: list[Observation]) -> list[Observation]:
                 compatible = all(a[k] is None or b[k] is None or a[k] == b[k] for k in a if k != "output")
                 if a["output"] != b["output"]:
                     compatible &= not (chosen.lifecycle and other.lifecycle)
-                compatible &= all(a is None or b is None or a == b for a, b in ((chosen.model, other.model), (chosen.effort, other.effort), (chosen.service_tier, other.service_tier)))
+                compatible &= all(a is None or b is None or a == b for a, b in ((chosen.model, other.model), (chosen.effort, other.effort), (chosen.service_tier, other.service_tier), (chosen.speed, other.speed)))
+                compatible &= all(chosen.server_tool_use.get(k) is None or other.server_tool_use.get(k) is None or chosen.server_tool_use[k] == other.server_tool_use[k] for k in chosen.server_tool_use.keys() | other.server_tool_use.keys())
                 if not compatible or other.quality == "conflict":
                     chosen.quality = "conflict"
                     chosen.increment = None
@@ -256,6 +331,8 @@ def reconcile_requests(observations: list[Observation]) -> list[Observation]:
                     chosen.model = chosen.model or other.model
                     chosen.effort = chosen.effort or other.effort
                     chosen.service_tier = chosen.service_tier or other.service_tier
+                    chosen.speed = chosen.speed or other.speed
+                    chosen.server_tool_use.update({k: v for k, v in other.server_tool_use.items() if v is not None})
         chosen.sources = sorted({(s.path, s.line): s for o in candidates for s in o.sources}.values(), key=lambda s: (s.path, s.line))
         chosen.category_reasons = {name: "native_category_unrecorded_or_underivable" for name, value in chosen.tokens.model_dump().items() if value is None}
         result.append(chosen)

@@ -24,13 +24,13 @@ class Tokens(AccountingModel):
     Cache creation is separate from uncached input. Never add TTL breakdowns to
     cache_creation, or reasoning_output to output. Null means unrecorded.
     """
-    uncached_input: StrictInt | None = None
-    cache_read_input: StrictInt | None = None
-    cache_creation_input: StrictInt | None = None
-    cache_creation_5m: StrictInt | None = None
-    cache_creation_1h: StrictInt | None = None
-    output: StrictInt | None = None
-    reasoning_output: StrictInt | None = None
+    uncached_input: StrictInt | None = Field(default=None, description="Disjoint input excluding cache reads and writes. Null means unknown.")
+    cache_read_input: StrictInt | None = Field(default=None, description="Disjoint input retrieved from cache. Null means unknown.")
+    cache_creation_input: StrictInt | None = Field(default=None, description="Disjoint input written to cache; TTL categories are included breakdowns. Null means unknown.")
+    cache_creation_5m: StrictInt | None = Field(default=None, description="Included breakdown of cache_creation_input, never an additional charge. Null means unknown.")
+    cache_creation_1h: StrictInt | None = Field(default=None, description="Included breakdown of cache_creation_input, never an additional charge. Null means unknown.")
+    output: StrictInt | None = Field(default=None, description="Output including reasoning tokens. Null means unknown.")
+    reasoning_output: StrictInt | None = Field(default=None, description="Included breakdown of output, never an additional charge. Null means unknown.")
 
     @model_validator(mode="after")
     def nonnegative(self):
@@ -56,6 +56,9 @@ class SourceCoverage(AccountingModel):
     read_boundary: int = 0
     records: int = 0
     malformed_records: int = 0
+    malformed_lines: list[int] = Field(default_factory=list)
+    project: str | None = None
+    owning_session: str | None = None
     unsupported_records: int = 0
     excluded_records: int = 0
     missing_usage_records: int = 0
@@ -72,7 +75,8 @@ class RootCoverage(AccountingModel):
 
 class Observation(AccountingModel):
     identity: str
-    session: str
+    session: str | None = Field(description="Evidenced execution owner, or null when shared history has ambiguous ownership.")
+    candidate_sessions: list[str] = Field(default_factory=list)
     harness: str
     execution: str | None
     request_id: str | None
@@ -93,6 +97,8 @@ class Observation(AccountingModel):
     input_semantics: str = "request_input_not_context_occupancy"
     interval_start: datetime | None = None
     service_tier: str | None = None
+    speed: str | None = None
+    server_tool_use: dict[str, int | None] = Field(default_factory=dict)
     sources: list[Locator]
     lifecycle: list[str] = Field(default_factory=list)
     labels: dict[str, str] = Field(default_factory=dict)
@@ -111,6 +117,7 @@ class Signal(AccountingModel):
     source: Locator
     category: str | None = None
     duration_ms: StrictInt | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class ArtifactMeasurement(AccountingModel):
@@ -120,10 +127,10 @@ class ArtifactMeasurement(AccountingModel):
 
 
 class Attribution(AccountingModel):
-    session: str | None = None
-    observation: str | None = None
-    labels: dict[Literal["run", "role", "pass", "round", "phase"], str] = Field(default_factory=dict)
-    artifacts: list[ArtifactMeasurement] = Field(default_factory=list)
+    session: str | None = Field(default=None, description="One included full harness-qualified session identity; mutually exclusive with observation.")
+    observation: str | None = Field(default=None, description="One included full normalized observation identity; mutually exclusive with session.")
+    labels: dict[Literal["run", "role", "pass", "round", "phase"], str] = Field(default_factory=dict, description="Caller facts for run/role/pass/round/phase rollups; overlapping targets are rejected.")
+    artifacts: list[ArtifactMeasurement] = Field(default_factory=list, description="Caller-supplied finite measurements with explicit units. No byte-to-token conversion.")
 
     @model_validator(mode="after")
     def one_target(self):
@@ -133,9 +140,9 @@ class Attribution(AccountingModel):
 
 
 class CategoryTotal(AccountingModel):
-    observed_subtotal: int
-    observations_measured: int
-    observations_unknown: int
+    observed_subtotal: int = Field(description="Sum of measured accountable increments; not an invented complete total.")
+    observations_measured: int = Field(description="Number of accountable observations recording this category.")
+    observations_unknown: int = Field(description="Number of accountable observations missing this category; absent is not zero.")
 
 
 class Totals(AccountingModel):
@@ -146,6 +153,7 @@ class Totals(AccountingModel):
     model_requests: int | None
     model_requests_lower_bound: int
     request_count_reason: str | None
+    server_tool_use: dict[str, CategoryTotal] = Field(default_factory=dict)
 
 
 class Bounds(AccountingModel):
@@ -195,11 +203,14 @@ class UsageReport(AccountingModel):
     totals: Totals
     coverage: dict[str, Any]
     warnings: list[str]
-    bounds: Bounds
-    rollups: dict[str, list[Rollup]]
     session_count: int
     offset: int
     next_offset: int | None
+    rollup_counts: dict[str, int]
+    rollup_next_offsets: dict[str, int | None]
+    category_semantics: dict[str, Any]
+    bounds: Bounds
+    rollups: dict[str, list[Rollup]]
     sessions: list[SessionSummary]
     artifacts: list[dict[str, Any]]
 
@@ -214,6 +225,15 @@ class UsageObservations(AccountingModel):
     source_count: int
     offset: int
     next_offset: int | None
+    source_offset: int
+    next_source_offset: int | None
+    lifecycle_offset: int
+    next_lifecycle_offset: int | None
+    branch_count: int
+    branch_offset: int
+    next_branch_offset: int | None
+    category_semantics: dict[str, Any]
+    branches: list[dict[str, Any]]
     observations: list[Observation]
     lifecycle: list[Signal]
     sources: list[SourceCoverage]

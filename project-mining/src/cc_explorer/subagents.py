@@ -92,6 +92,12 @@ class SubagentInfo:
     output_entry_count: int = 0
     compaction_events: list[CompactionEvent] = field(default_factory=list)
 
+    def __post_init__(self):
+        if not isinstance(self.agent_id, PrefixId):
+            self.agent_id = PrefixId(self.agent_id)
+        if not isinstance(self.tool_use_id, PrefixId):
+            self.tool_use_id = PrefixId(self.tool_use_id)
+
     @property
     def total_input_tokens(self) -> Optional[int]:
         """Total input tokens (input + cache_creation + cache_read)."""

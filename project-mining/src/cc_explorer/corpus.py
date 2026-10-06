@@ -175,7 +175,7 @@ def _cwd_from_transcripts(jsonls: list[Path], scan_lines: int = 20) -> Optional[
                         data = orjson.loads(line)
                     except orjson.JSONDecodeError:
                         continue
-                    cwd = data.get("cwd")
+                    cwd = data.get("cwd") if isinstance(data, dict) else None
                     if isinstance(cwd, str) and cwd:
                         return cwd
         except OSError:

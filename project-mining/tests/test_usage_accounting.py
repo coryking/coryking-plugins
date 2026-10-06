@@ -163,8 +163,8 @@ def test_invalid_conversion_boundary_exposes_gap(corpus):
     marker = {"type": "x-converter-provenance", "x_converter": {"from": {}, "lines_at_creation": None}}
     write(root / "project" / f"{PARENT}.jsonl", marker, claude())
     report = get_report(harnesses=["claude"])
-    assert subtotal(report, "output") == 0
-    assert "conversion_boundary_unavailable" in report.warnings
+    assert subtotal(report, "output") == 5
+    assert "invalid_conversion_marker" in report.warnings
 
 
 def test_codex_per_response_preferred_and_reasoning_not_added(corpus):
@@ -195,6 +195,7 @@ def test_cumulative_resets_and_model_transitions_are_uncertain(corpus):
          cumulative(200, ordinal=4), cumulative(50, ordinal=5), cumulative(100, ordinal=6))
     report = get_report(harnesses=["codex"])
     assert report.coverage["complete_observed_usage"] is False
+    assert subtotal(report, "output") == 125
     assert "counter_reset_or_rewrite" in report.warnings
     detail = get_observations(session=PARENT, harnesses=["codex"])
     transition = next(o for o in detail.observations if o.native_usage["input_tokens"] == 200)
@@ -215,7 +216,7 @@ def test_cumulative_window_uses_predecessor(corpus):
 
 def test_context_fill_is_not_consumption(corpus):
     _, codex = corpus
-    roll(codex, PARENT, None, meta(), context(), cumulative(0, total_tokens=272000))
+    roll(codex, PARENT, None, meta(), context(), cumulative(100, total_tokens=272000))
     report = get_report(harnesses=["codex"])
     assert subtotal(report, "output") == 0
     assert "context_estimate_not_consumption" in report.warnings
@@ -293,6 +294,8 @@ def test_pagination_and_drilldown_preserve_scope_totals(corpus):
     detail2 = get_usage_observations(session=a.sessions[0].identity, harnesses=["codex"], offset=1, limit=1)
     assert detail.totals == detail2.totals == a.sessions[0].totals
     assert detail.next_offset == 1
+    assert detail.observations[0].identity != detail2.observations[0].identity
+    assert a.sessions[0].identity != b.sessions[0].identity
 
 
 def test_calling_session_is_not_excluded(corpus, monkeypatch):
@@ -309,6 +312,7 @@ def test_attribution_is_a_join_not_usage_multiplier(corpus):
     labeled = get_report(harnesses=["claude"], attribution=[{"session": "claude:" + PARENT,
         "labels": {"run": "experiment-1", "phase": "draft"}, "artifacts": [{"name": "accepted", "value": 1, "unit": "result"}]}])
     assert labeled.totals == plain.totals
+    assert labeled.rollups["caller_labels"][0].totals == plain.totals
     assert labeled.rollups["caller_labels"][0].key["phase"] == "draft"
     assert labeled.artifacts[0]["unit"] == "result"
     with pytest.raises(ValueError, match="Overlapping"):
@@ -568,3 +572,391 @@ def test_nested_only_agent_report_identity_roundtrips_to_observations(corpus):
     assert detail.totals == child.totals
     assert len(detail.observations) == 1
     assert detail.observations[0].identity == "claude:request:nested-only"
+
+
+def test_shared_claude_history_has_unknown_owner_and_scope_sensitive_increment(corpus):
+    root, _ = corpus
+    # A copy's path or timestamp cannot prove which session incurred the request.
+    write(root / "z-original" / f"{PARENT}.jsonl", claude("shared"))
+    write(root / "a-copy" / f"{CHILD}.jsonl", claude("shared", sid=CHILD), claude("new", sid=CHILD))
+    copy = get_report(sessions=[CHILD], harnesses=["claude"])
+    assert subtotal(copy, "output") == 5
+    assert copy.coverage["selection_attribution_uncertain_observations"] == 1
+    assert not copy.coverage["complete_observed_usage"]
+    both = get_report(sessions=[PARENT, CHILD], harnesses=["claude"])
+    assert subtotal(both, "output") == 10
+    assert both.coverage["complete_observed_usage"]
+    assert not both.coverage["ownership_complete"]
+    unknown = next(row for row in both.rollups["role"] if row.key["role"] is None)
+    assert unknown.totals.categories["output"].observed_subtotal == 10
+    detail = get_observations(session=CHILD, harnesses=["claude"])
+    shared = next(o for o in detail.observations if o.request_id == "shared")
+    assert shared.session is None and shared.increment is None
+    assert shared.candidate_sessions == ["claude:" + PARENT, "claude:" + CHILD]
+    assert len(shared.sources) == 2
+
+
+def test_request_holder_index_refreshes_changed_and_removed_copies(corpus):
+    root, _ = corpus
+    first = write(root / "project" / f"{PARENT}.jsonl", claude("indexed"))
+    assert subtotal(get_report(sessions=[PARENT], harnesses=["claude"]), "output") == 5
+    copy = write(root / "project" / f"{CHILD}.jsonl", claude("indexed", sid=CHILD))
+    assert subtotal(get_report(sessions=[PARENT], harnesses=["claude"]), "output") == 0
+    copy.unlink()
+    assert subtotal(get_report(sessions=[PARENT], harnesses=["claude"]), "output") == 5
+    assert first.exists()
+
+
+def test_mixed_codex_native_formats_retain_preupgrade_consumption(corpus):
+    _, codex = corpus
+    roll(codex, PARENT, None, meta(), context(), cumulative(1000), response("post-upgrade", 100, 3), cumulative(1100, 4))
+    report = get_report(harnesses=["codex"])
+    assert subtotal(report, "output") == 550
+    assert subtotal(report, "uncached_input") == 770
+    assert "cumulative_before_response_record_format" in report.warnings
+    assert not report.coverage["complete_observed_usage"]
+    detail = get_observations(session=PARENT, harnesses=["codex"])
+    assert [o.increment.output if o.increment else None for o in detail.observations] == [500, 50, None]
+
+
+def test_discovery_noise_does_not_poison_narrow_coverage(corpus):
+    root, _ = corpus
+    write(root / "project" / f"{PARENT}.jsonl", claude("complete"))
+    write(root / "unrelated" / f"{CHILD}.jsonl", {"type": "system"})
+    write(root / "project" / PARENT / "workflow" / "journal.jsonl", {"type": "workflow_step", "cwd": "/repo/example"})
+    report = get_report(sessions=[PARENT], harnesses=["claude"])
+    assert report.coverage["complete_observed_usage"]
+    assert report.coverage["excluded_source_reasons"]["discovery_identity_or_layout_unavailable"] == 2
+    assert not get_report(harnesses=["claude"]).coverage["complete_observed_usage"]
+
+
+def test_large_report_is_bounded_and_summary_first(corpus):
+    root, _ = corpus
+    for index in range(300):
+        sid = f"{index:08x}-0000-4000-8000-000000000000"
+        write(root / "project" / f"{sid}.jsonl", claude(f"request-{index}", sid=sid))
+    report = get_report(harnesses=["claude"], limit=1, rollup_limit=1)
+    payload = report.model_dump_json()
+    assert report.session_count == 300 and len(report.sessions) == 1
+    assert len(payload) < 20000
+    assert "members" not in report.scope and "session" not in report.rollups
+    assert payload.index('"next_offset"') < payload.index('"rollups"')
+    assert subtotal(report, "output") == 1500
+
+
+def test_configuration_tier_speed_tool_counts_and_category_semantics(corpus):
+    root, codex = corpus
+    settings = {"type": "event_msg", "ordinal": 1, "timestamp": TS,
+        "payload": {"type": "thread_settings_applied", "thread_id": PARENT,
+                    "thread_settings": {"model": "model-b", "reasoning_effort": "high", "service_tier": "fast"}}}
+    turn = context("model-b", "high", 2)
+    turn["payload"]["turn_id"] = "turn-before-change"
+    settings2 = {**settings, "ordinal": 3, "payload": {**settings["payload"], "thread_settings": {"model": "model-c", "reasoning_effort": "low", "service_tier": "default"}}}
+    roll(codex, PARENT, None, meta(), settings, turn, settings2, response("configured", ordinal=4, turn_id="turn-before-change"))
+    c = claude("configured-claude")
+    c["message"]["usage"].update(service_tier="standard", speed="fast", server_tool_use={"web_search_requests": 2})
+    write(root / "project" / f"{CHILD}.jsonl", c)
+    report = get_report()
+    row = next(row for row in report.rollups["configuration"] if row.key["harness"] == "codex")
+    assert row.key == {"harness": "codex", "model": "model-b", "effort": "high", "service_tier": "fast", "speed": None}
+    assert report.totals.server_tool_use["web_search_requests"].observed_subtotal == 2
+    assert report.category_semantics["included_breakdowns"]["output"] == ["reasoning_output"]
+    assert sum(subtotal(report, k) for k in report.category_semantics["disjoint_token_categories"]) == 215
+
+
+def test_malformed_counter_gap_is_local_and_zero_does_not_erase_uncertainty(corpus):
+    _, codex = corpus
+    path = roll(codex, PARENT, None, meta(), context(), cumulative(100), cumulative(200, 3))
+    with path.open("a") as stream:
+        stream.write('[]\n')
+    detail = get_observations(session=PARENT, harnesses=["codex"])
+    assert detail.observations[1].model == "model-a" and detail.observations[1].increment.output == 50
+    with path.open("a") as stream:
+        stream.write(json.dumps(cumulative(200, 5)) + "\n")
+    detail = get_observations(session=PARENT, harnesses=["codex"])
+    assert detail.observations[-1].quality == "unattributed"
+    assert detail.observations[-1].increment.output == 0
+    assert detail.coverage["malformed_records"] == 1
+
+
+def test_window_ignores_sessions_without_in_window_activity_and_excludes_end(corpus):
+    root, _ = corpus
+    write(root / "project" / f"{PARENT}.jsonl", claude("earlier", timestamp="2026-10-06T11:00:00Z"))
+    write(root / "project" / f"{CHILD}.jsonl", claude("included"), claude("end", timestamp="2026-10-06T13:00:00Z"))
+    report = get_report(harnesses=["claude"], start=TS, end="2026-10-06T13:00:00Z")
+    assert subtotal(report, "output") == 5
+    assert report.coverage["complete_observed_usage"]
+    assert report.coverage["missing_usage_sessions"] == 0
+    assert report.coverage["no_in_window_activity_sessions"] == 1
+
+
+@pytest.mark.parametrize("parent,child", [(PARENT, CHILD), (CHILD, PARENT)])
+def test_dispatch_evidence_labels_children_independent_of_load_order(corpus, parent, child):
+    root, _ = corpus
+    dispatch = {"type": "user", "timestamp": TS, "cwd": "/repo/example", "uuid": "dispatch", "sessionId": parent,
+        "message": {"role": "user", "content": [{"type": "text", "text": "synthetic"}]}, "toolUseResult": {"agentId": child}}
+    write(root / "project" / f"{parent}.jsonl", claude("parent", sid=parent), dispatch)
+    write(root / "project" / parent / "subagents" / f"agent-{child}.jsonl", claude("child", sid=parent))
+    report = get_report(sessions=[parent], harnesses=["claude"])
+    child_row = next(row for row in report.sessions if row.identity == "claude:" + child)
+    assert child_row.relationship == "dispatched"
+    assert "dispatched_child_source_unavailable" not in child_row.reasons
+    assert subtotal(report, "output") == 10 and report.coverage["complete_observed_usage"]
+
+
+def test_progress_dispatch_is_measured_and_parent_drilldown_excludes_descendants(corpus):
+    root, _ = corpus
+    child = claude("nested-child", sid=PARENT)
+    progress = {"type": "progress", "timestamp": TS, "cwd": "/repo/example", "data": {"agentId": CHILD, "message": child}}
+    dispatch = {"type": "user", "timestamp": TS, "cwd": "/repo/example", "uuid": "dispatch", "sessionId": PARENT,
+        "message": {"role": "user", "content": "synthetic"}, "toolUseResult": {"agentId": CHILD}}
+    write(root / "project" / f"{PARENT}.jsonl", claude("parent"), dispatch, progress)
+    report = get_report(sessions=[PARENT], harnesses=["claude"])
+    assert subtotal(report, "output") == 10 and report.coverage["complete_observed_usage"]
+    assert get_report(sessions=[PARENT, CHILD], harnesses=["claude"]).totals == report.totals
+    detail = get_observations(session=PARENT, harnesses=["claude"])
+    assert subtotal(detail, "output") == 5
+    assert any("descendants_disabled" in o.reasons for o in detail.observations)
+
+
+@pytest.mark.parametrize("bad", [[], "bad", 7])
+def test_malformed_claude_messages_and_conversion_markers_do_not_crash(corpus, bad):
+    root, _ = corpus
+    write(root / "project" / f"{PARENT}.jsonl", [],
+        {"type": "x-converter-provenance", "x_converter": bad},
+        {"type": "assistant", "cwd": "/repo/example", "message": bad}, claude("valid"))
+    report = get_report(harnesses=["claude"])
+    assert subtotal(report, "output") == 5
+    assert report.coverage["malformed_records"] >= 2
+    assert not report.coverage["complete_observed_usage"]
+
+
+@pytest.mark.parametrize("bad", [[], {}, "wrong", True])
+def test_invalid_history_cutoff_and_payload_shapes_do_not_crash(corpus, bad):
+    _, codex = corpus
+    base_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    roll(codex, PARENT, base_id, meta(), {"type": "event_msg", "payload": []}, cumulative(100))
+    roll(codex, CHILD, None, meta(CHILD, history_base={"thread_id": base_id, "end_byte_offset": bad}, agent_role=[]),
+        {"type": "event_msg", "payload": {"type": []}}, response("safe", thread_id=CHILD))
+    report = get_report(sessions=[CHILD], harnesses=["codex"])
+    assert subtotal(report, "output") == 50
+    assert "invalid_history_cutoff" in report.warnings
+    assert report.coverage["malformed_records"] >= 2
+
+
+def test_real_rollback_lifecycle_preserves_num_turns(corpus):
+    _, codex = corpus
+    roll(codex, PARENT, None, meta(), context(), response(),
+        {"type": "event_msg", "timestamp": TS, "payload": {"type": "thread_rolled_back", "num_turns": 2}})
+    detail = get_observations(session=PARENT, harnesses=["codex"])
+    assert detail.lifecycle[0].kind == "explicit_revert"
+    assert detail.lifecycle[0].details == {"num_turns": 2}
+
+
+def test_project_scope_resolves_colliding_prefixes(corpus):
+    root, _ = corpus
+    other = PARENT[:-1] + "2"
+    write(root / "one" / f"{PARENT}.jsonl", claude("one"))
+    c = claude("two", sid=other)
+    c["cwd"] = "/repo/other"
+    write(root / "two" / f"{other}.jsonl", c)
+    report = get_report(sessions=[PARENT[:8]], projects=["/repo/example"], harnesses=["claude"])
+    assert report.sessions[0].identity == "claude:" + PARENT
+    with pytest.raises(ValueError, match="Ambiguous"):
+        get_report(sessions=[PARENT[:8]], harnesses=["claude"])
+
+
+def test_null_counter_info_child_owner_unknown_and_copy_conflicts(corpus):
+    _, codex = corpus
+    roll(codex, PARENT, None, meta(), context(), {"type": "event_msg", "payload": {"type": "token_count", "info": None}}, response("shared"))
+    copy = codex / "archived_sessions" / f"copy-{PARENT}.jsonl"
+    write(copy, meta(), context(), response("shared"))
+    assert subtotal(get_report(sessions=[PARENT], harnesses=["codex"]), "output") == 50
+    write(copy, meta(), context(), response("shared", 200))
+    report = get_report(sessions=[PARENT], harnesses=["codex"])
+    assert subtotal(report, "output") == 0 and report.coverage["conflicting_sessions"] == 1
+    roll(codex, CHILD, None, meta(CHILD, parent_thread_id=PARENT), context(), response("unknown-owner"))
+    child = get_report(sessions=[CHILD], harnesses=["codex"])
+    assert subtotal(child, "output") == 0
+    assert "inherited_request_boundary_or_owner_unavailable" in child.warnings
+
+
+def test_cumulative_counter_copy_conflict_is_not_first_wins(corpus):
+    _, codex = corpus
+    roll(codex, PARENT, None, meta(), context(), cumulative(100))
+    write(codex / "archived_sessions" / f"copy-{PARENT}.jsonl", meta(), context(), cumulative(200))
+    report = get_report(harnesses=["codex"])
+    assert subtotal(report, "output") == 0
+    assert report.totals.uncertain_observations == 1
+
+
+def test_inconsistent_streaming_fragments_stay_conflict(corpus):
+    root, _ = corpus
+    a, b = claude(output=2), claude(output=5)
+    b["message"]["usage"]["input_tokens"] = 99
+    write(root / "project" / f"{PARENT}.jsonl", a, b)
+    report = get_report(harnesses=["claude"])
+    assert subtotal(report, "output") == 0
+    assert "inconsistent_streaming_fragments" in report.warnings
+
+
+def test_time_unknown_and_fallback_iterations_are_explicit_gaps(corpus):
+    root, _ = corpus
+    c = claude("fallback", timestamp=None)
+    c["message"]["usage"]["iterations"] = [{"type": "message", "input_tokens": 50}, {"type": "fallback_message", "input_tokens": 10}]
+    write(root / "project" / f"{PARENT}.jsonl", c)
+    report = get_report(harnesses=["claude"], start=TS)
+    assert subtotal(report, "output") == 0
+    assert "window_time_unavailable" in report.warnings
+    lifetime = get_report(harnesses=["claude"])
+    assert subtotal(lifetime, "output") == 5 and not lifetime.coverage["complete_observed_usage"]
+    assert "fallback_iteration_usage_unaccounted" in lifetime.warnings
+
+
+def test_sources_merge_diagnostics_and_independent_pages(corpus, monkeypatch):
+    from cc_explorer.usage_models import SourceCoverage
+    from cc_explorer.usage_sources import merge_source_coverage
+    merged = merge_source_coverage([SourceCoverage(path="p", root="r", reasons=["x"]),
+        SourceCoverage(path="p", root="r", reasons=["x"], malformed_records=2, status="partial")])
+    assert merged[0].malformed_records == 2 and merged[0].status == "partial"
+    _, codex = corpus
+    roll(codex, PARENT, None, meta(), context(), response("a"), response("b", ordinal=3))
+    write(codex / "archived_sessions" / f"copy-{PARENT}.jsonl", meta(), context(), response("a"), response("b", ordinal=3))
+    first = get_observations(session=PARENT, harnesses=["codex"], limit=1, source_limit=1)
+    second = get_observations(session=PARENT, harnesses=["codex"], limit=1, source_limit=1, source_offset=1)
+    assert first.observations == second.observations
+    assert first.sources[0].path != second.sources[0].path
+    assert first.next_offset == first.next_source_offset == 1
+    assert first.totals == second.totals
+
+
+def test_unreadable_selected_source_affects_report_coverage(corpus, monkeypatch):
+    _, codex = corpus
+    path = roll(codex, PARENT, None, meta(), context(), response())
+    original = Path.open
+    calls = 0
+    def fail_on_snapshot(self, *args, **kwargs):
+        nonlocal calls
+        if self == path:
+            calls += 1
+            if calls > 1:
+                raise PermissionError("synthetic")
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", fail_on_snapshot)
+    report = get_report(sessions=[PARENT], harnesses=["codex"])
+    assert report.coverage["unreadable_sources"] == 1
+    assert not report.coverage["complete_observed_usage"]
+
+
+def test_prefix_and_full_id_parse_only_matching_transcripts(corpus, monkeypatch):
+    root, _ = corpus
+    from cc_explorer.providers.claude import ClaudeProvider
+    paths = []
+    for index in range(20):
+        sid = f"{index:08x}-0000-4000-8000-000000000000"
+        paths.append(write(root / "project" / f"{sid}.jsonl", claude(f"unique-{index}", sid=sid)))
+    original = ClaudeProvider.load_usage
+    parsed = []
+    def record_load(self, ref, snapshots=None):
+        parsed.extend(ref.paths)
+        return original(self, ref, snapshots)
+    monkeypatch.setattr(ClaudeProvider, "load_usage", record_load)
+    full = get_report(sessions=[paths[0].stem], harnesses=["claude"])
+    prefix = get_report(sessions=[paths[0].stem[:8]], harnesses=["claude"])
+    assert full.totals == prefix.totals
+    assert set(parsed) == {paths[0]}
+
+
+def test_mcp_schema_windows_identity_and_page_contract(corpus):
+    from datetime import datetime
+    root, _ = corpus
+    write(root / "project" / f"{PARENT}.jsonl", claude())
+    async def schema():
+        return (await mcp.get_tool("get_usage_report")).parameters
+    properties = asyncio.run(schema())["properties"]
+    assert "after" in properties and "before" in properties and "start" not in properties
+    assert properties["offset"]["minimum"] == 0
+    assert get_usage_report(harnesses=["claude"], after=datetime.fromisoformat(TS.replace("Z", "+00:00"))).totals.categories["output"].observed_subtotal == 5
+    with pytest.raises(Exception, match="timezone"):
+        get_usage_report(harnesses=["claude"], after=datetime(2026, 10, 6))
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_standard_message_iterations_are_breakdowns_not_missing_work(corpus, count):
+    root, _ = corpus
+    c = claude("iterations")
+    usage = c["message"]["usage"]
+    usage["iterations"] = [{"type": "message", "input_tokens": 10//count,
+        "cache_read_input_tokens": 20//count, "cache_creation_input_tokens": 30//count,
+        "output_tokens": 5 if count == 1 else (2 if index == 0 else 3)} for index in range(count)]
+    write(root / "project" / f"{PARENT}.jsonl", c)
+    report = get_report(harnesses=["claude"])
+    assert subtotal(report, "output") == 5 and report.coverage["complete_observed_usage"]
+
+
+@pytest.mark.parametrize("kind", ["compaction", "advisor_message", "unknown"])
+def test_separate_or_unknown_iteration_usage_remains_partial(corpus, kind):
+    root, _ = corpus
+    c = claude("separate-iteration")
+    c["message"]["usage"]["iterations"] = [{"type": kind, "input_tokens": 1000, "output_tokens": 100}]
+    write(root / "project" / f"{PARENT}.jsonl", c)
+    report = get_report(harnesses=["claude"])
+    assert subtotal(report, "output") == 5
+    assert not report.coverage["complete_observed_usage"]
+
+
+
+def test_branch_metadata_has_independent_complete_detail_pages(corpus):
+    _, codex = corpus
+    for index in range(22):
+        execution = f"{index:08x}-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        roll(codex, PARENT, execution, meta(), context(), response(f"branch-{index}"))
+    report = get_report(sessions=[PARENT], harnesses=["codex"])
+    assert len(report.sessions[0].branches) == 20 and report.sessions[0].provenance["branch_count"] == 22
+    detail = get_observations(session=PARENT, harnesses=["codex"], branch_limit=20)
+    tail = get_observations(session=PARENT, harnesses=["codex"], branch_limit=20, branch_offset=20)
+    assert detail.branch_count == 22 and detail.next_branch_offset == 20
+    assert len(tail.branches) == 2 and tail.next_branch_offset is None
+    assert {b["execution"] for b in detail.branches}.isdisjoint(b["execution"] for b in tail.branches)
+    assert detail.totals == tail.totals == report.totals
+
+
+
+@pytest.mark.parametrize("bad", [[], ["invalid"], None, 7, False, ""])
+def test_malformed_baseline_payload_is_reported_with_valid_cutoff(corpus, bad):
+    _, codex = corpus
+    base_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    base = roll(codex, PARENT, base_id, meta(), {"type": "event_msg", "payload": bad}, cumulative(100))
+    roll(codex, CHILD, None, meta(CHILD, history_base={"thread_id": base_id, "end_byte_offset": base.stat().st_size}),
+         context(), cumulative(200))
+    detail = get_observations(session=CHILD, harnesses=["codex"])
+    baseline = next(source for source in detail.sources if source.path == str(base))
+    assert baseline.malformed_records == 1
+    assert detail.coverage["malformed_records"] == 1
+    assert subtotal(detail, "output") == 50
+    assert not detail.coverage["complete_observed_usage"]
+
+
+
+def test_partial_holder_cache_diagnostics_are_scoped_to_requested_identities(corpus):
+    root, _ = corpus
+    partial = write(root / "project" / f"{PARENT}.jsonl", claude("partial-request"))
+    with partial.open("a") as stream:
+        stream.write('{"type":')
+    assert not get_report(sessions=[PARENT], harnesses=["claude"]).coverage["complete_observed_usage"]
+    write(root / "project" / f"{CHILD}.jsonl", claude("other-complete", sid=CHILD))
+    complete = get_report(sessions=[CHILD], harnesses=["claude"])
+    assert complete.coverage["complete_observed_usage"]
+    assert subtotal(complete, "output") == 5
+    assert not get_report(sessions=[PARENT], harnesses=["claude"]).coverage["complete_observed_usage"]
+
+
+def test_streaming_server_tool_count_recovers_null_fragment(corpus):
+    root, _ = corpus
+    first, last = claude(output=2), claude(output=5)
+    first["message"]["usage"]["server_tool_use"] = {"web_search_requests": None}
+    last["message"]["usage"]["server_tool_use"] = {"web_search_requests": 2}
+    write(root / "project" / f"{PARENT}.jsonl", first, last)
+    report = get_report(harnesses=["claude"])
+    assert subtotal(report, "output") == 5
+    assert report.totals.server_tool_use["web_search_requests"].observed_subtotal == 2

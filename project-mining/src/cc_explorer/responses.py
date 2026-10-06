@@ -50,6 +50,7 @@ class SparseModel(BaseModel):
 class SessionSummary(SparseModel):
     """Summary of a single conversation session."""
 
+    identity: str | None = Field(default=None, description="Full harness-qualified accounting identity; avoids ambiguous UUID prefixes.")
     session: PrefixId = Field(description="Session identifier — pass this back as the `session` param to other tools.")
     harness: Harness = Field(description="Harness that wrote this transcript: claude or codex.")
     project: str | None = Field(default=None, description="Project this session belongs to — pass to the `projects` param to scope other tools to it. Useful when results span projects.")
@@ -85,6 +86,7 @@ class SessionSummary(SparseModel):
     def from_session_info(cls, s: SessionInfo, is_current: bool = False) -> SessionSummary:
         return cls(
             session=s.session_id,
+            identity=f"{s.harness.value}:{s.session_id.full}",
             harness=s.harness,
             project=s.project_path,
             date=s.first_timestamp,
@@ -554,6 +556,7 @@ class BrowseSessionResponse(SparseModel):
 class AgentSummary(SparseModel):
     """Summary of a single subagent spawned during a session."""
 
+    identity: str | None = Field(default=None, description="Full Claude agent accounting identity; use in usage selectors.")
     agent_id: PrefixId = Field(description="Agent identifier.")
     tool_use_id: PrefixId = Field(description="Tool use ID that spawned this agent.")
     source: str = Field(
@@ -579,6 +582,7 @@ class AgentSummary(SparseModel):
     @classmethod
     def from_subagent(cls, sa: SubagentInfo) -> AgentSummary:
         return cls(
+            identity=f"claude:{sa.agent_id.full}" if sa.agent_id.full else None,
             agent_id=sa.agent_id,
             tool_use_id=sa.tool_use_id,
             source=sa.source,
@@ -657,6 +661,7 @@ class AgentDetailResponse(SparseModel):
     )
     date: datetime | None = Field(default=None, description="Timestamp of session start.")
     title: str | None = Field(default=None, description="Session title.")
+    identity: str | None = Field(default=None, description="Full Claude agent accounting identity; use in usage selectors.")
     agent_id: PrefixId = Field(description="Agent identifier.")
     tool_use_id: PrefixId = Field(description="Tool use ID that spawned this agent.")
     source: str = Field(
@@ -713,6 +718,7 @@ class AgentDetailResponse(SparseModel):
 
         return cls(
             session=found_session.session_id,
+            identity=f"claude:{found.agent_id.full}" if found.agent_id.full else None,
             project=found_session.project_path,
             worktree=found_session.worktree,
             date=found_session.first_timestamp,
@@ -760,6 +766,7 @@ class AgentToolCall(SparseModel):
 class AgentToolAudit(SparseModel):
     """Per-agent tool usage audit: counts, error rate, full chronological trace."""
 
+    identity: str | None = Field(default=None, description="Full Claude agent accounting identity; use in usage selectors.")
     agent_id: PrefixId = Field(description="Agent identifier.")
     source: str = Field(
         description="Whether this agent's record is complete and how it relates to the conversation. 'dispatched' — the conversation requested it and its full run is available. 'dispatch_only' — the conversation requested it but no run is available (rejected, never started, or no longer kept), so result/stats/trace will be missing. 'orphan' — it ran with a full record but the conversation didn't request it directly, typically because a workflow spawned it."

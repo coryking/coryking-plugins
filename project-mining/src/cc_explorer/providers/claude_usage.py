@@ -5,29 +5,27 @@ from functools import lru_cache
 from dataclasses import replace
 from pathlib import Path
 
-import orjson
 
+from ..conversion import validate_provenance
 from ..parser import _STRUCTURAL_LINE_TYPES, create_transcript_entry
 from ..models import UserOrigin, classify_failure
 from ..usage_models import Observation, Signal, SourceCoverage, SessionUsage, UsageDiscovery
-from ..usage_sources import CLAUDE_SEMANTICS, as_dict, native_tokens, snapshot, timestamp, walk_sources
+from ..usage_sources import CLAUDE_SEMANTICS, as_dict, native_tokens, snapshot, timestamp, walk_sources, iteration_reasons
 from ..utils import PrefixId
 from .base import Harness, ProviderSession, project_identity
 
 
 def discover(selectors=None) -> UsageDiscovery:
     from .._claude_paths import _get_projects_dir
-    from ..corpus import _cwd_from_transcripts
     from ..subagents import _read_agent_meta
     root = _get_projects_dir()
     paths, coverage = walk_sources(root, "claude")
     result = UsageDiscovery(roots=[coverage])
-    projects: dict[Path, str] = {}
+    by_directory: dict[Path, list[Path]] = {}
     for path in paths:
         if path.parent.parent == root:
-            projects.setdefault(path.parent, "")
-    for directory in projects:
-        projects[directory] = _cwd_from_transcripts([p for p in paths if p.parent == directory]) or ""
+            by_directory.setdefault(path.parent, []).append(path)
+    projects = {directory: _cached_cwd(tuple(files), tuple(_version(p) for p in files)) for directory, files in by_directory.items()}
     grouped: dict[str, ProviderSession] = {}
     identity = lru_cache(None)(project_identity)
     for path in paths:
@@ -38,7 +36,7 @@ def discover(selectors=None) -> UsageDiscovery:
         cwd = projects.get(encoded, "")
         # Standalone orphans may be the only retained source for a project.
         if not cwd:
-            cwd = _cwd_from_transcripts([path]) or ""
+            cwd = _cached_cwd((path,), (_version(path),))
         if not cwd:
             result.sources.append(SourceCoverage(path=str(path), root=str(root), status="excluded", reasons=["project_metadata_unavailable"]))
             continue
@@ -50,17 +48,17 @@ def discover(selectors=None) -> UsageDiscovery:
             sid = path.stem[len("agent-"):]
             parent = f"claude:{relative.parts[1]}"
             meta = _read_agent_meta(path)
-            role = meta.get("agentType") or None
+            role = meta.get("agentType") if isinstance(meta.get("agentType"), str) else None
             relation = "nested_file_dispatch_unverified"
         elif path.parent == encoded:
             sid = path.stem
         else:
-            result.sources.append(SourceCoverage(path=str(path), root=str(root), status="excluded", reasons=["unsupported_source_layout"]))
+            result.sources.append(SourceCoverage(path=str(path), root=str(root), status="excluded", project=project, owning_session=f"claude:{relative.parts[1]}" if len(relative.parts)>2 else None, reasons=["unsupported_source_layout"]))
             continue
         prior = grouped.get(sid)
         if prior is None:
             grouped[sid] = ProviderSession(PrefixId(sid), (path,), project, Harness.claude,
-                worktree, parent, role, relation, (root,), {"cwd": cwd})
+                worktree, parent, role, relation, (root,), {"cwd": cwd, "invalid_role": relation == "nested_file_dispatch_unverified" and meta.get("agentType") is not None and role is None})
         else:
             grouped[sid] = replace(prior, paths=prior.paths + (path,))
             if (project, parent) != (prior.project_path, prior.parent_id):
@@ -73,24 +71,38 @@ def discover(selectors=None) -> UsageDiscovery:
         if sep and harness != "claude":
             continue
         value = raw if sep else selector
-        if value not in grouped and len(value) >= 6:
+        if not any(sid.startswith(value) for sid in grouped) and len(value) >= 6:
             wanted.append(value)
     if wanted:
-        for parent in list(grouped.values()):
-            if parent.parent_id:
-                continue
-            for path in parent.paths:
-                records, _ = snapshot(path, root)
-                for record, _ in records:
-                    if record.get("type") != "progress":
-                        continue
-                    data = as_dict(record.get("data"))
-                    nested = as_dict(data.get("message"))
-                    agent = data.get("agentId") or record.get("agentId")
-                    if nested.get("type") == "assistant" and isinstance(agent, str) and any(agent.startswith(value) for value in wanted) and agent not in grouped:
-                        grouped[agent] = replace(parent, session_id=PrefixId(agent),
-                            parent_id=f"claude:{parent.session_id.full}", relationship="nested_progress",
-                            role=None, metadata={"nested_only_agent_id": agent, "parent_session_id": parent.session_id.full})
+        from ..corpus import make_scanner, ScannerError
+        import re
+        parent_paths = {path: parent for parent in grouped.values() if not parent.parent_id for path in parent.paths}
+        try:
+            hits = make_scanner().files_with_match([re.escape(value) for value in wanted], list(parent_paths))
+        except ScannerError:
+            hits = parent_paths
+        for path in hits:
+            parent = parent_paths[path]
+            records, _ = snapshot(path, root)
+            for record, _ in records:
+                if record.get("type") != "progress":
+                    continue
+                data = as_dict(record.get("data"))
+                nested = as_dict(data.get("message"))
+                agent = data.get("agentId") or record.get("agentId")
+                if nested.get("type") == "assistant" and isinstance(agent, str) and any(agent.startswith(value) for value in wanted) and agent not in grouped:
+                    grouped[agent] = replace(parent, session_id=PrefixId(agent), parent_id=f"claude:{parent.session_id.full}",
+                        relationship="nested_progress", role=None, metadata={"nested_only_agent_id": agent, "parent_session_id": parent.session_id.full})
+    unsupported = [Path(s.path) for s in result.sources if "unsupported_source_layout" in s.reasons]
+    if unsupported:
+        from ..corpus import make_scanner, ScannerError
+        try:
+            possible = make_scanner().files_with_match([r'"type"\s*:\s*"assistant"'], unsupported)
+        except ScannerError:
+            possible = unsupported
+        for source in result.sources:
+            if Path(source.path) in possible:
+                source.reasons.append("unsupported_layout_usage_possible")
     result.sessions = list(grouped.values())
     return result
 
@@ -109,6 +121,7 @@ def _assistant(usage: SessionUsage, record: dict, loc, *, excluded: str | None =
     tokens, prompt, reasons = native_tokens(raw, "claude")
     if not raw:
         reasons.append("missing_usage")
+    reasons.extend(iteration_reasons(raw))
     if not request:
         reasons.append("request_identity_unavailable")
     model = message.get("model")
@@ -135,7 +148,9 @@ def _assistant(usage: SessionUsage, record: dict, loc, *, excluded: str | None =
         configuration_reasons=(["model_unrecorded"] if model is None else []) + (["effort_unrecorded"] if effort is None else []),
         counter_kind="request", native_usage=raw, tokens=tokens, increment=tokens if quality in {"exact", "partial"} else None,
         quality=quality, reasons=reasons, semantics=CLAUDE_SEMANTICS, input_observation=prompt,
-        service_tier=raw.get("service_tier") if isinstance(raw.get("service_tier"), str) else None, sources=[loc], lifecycle=[f"request_stop:{stop}"] if stop else [])
+        service_tier=raw.get("service_tier") if isinstance(raw.get("service_tier"), str) else None,
+        speed=raw.get("speed") if isinstance(raw.get("speed"), str) else None,
+        server_tool_use={k: v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None for k, v in as_dict(raw.get("server_tool_use")).items()}, sources=[loc], lifecycle=[f"request_stop:{stop}"] if stop else [])
     usage.observations.append(obs)
     return bool(raw)
 
@@ -146,18 +161,21 @@ def load(ref: ProviderSession, snapshots=None) -> SessionUsage:
     for path in ref.paths:
         root = next((r for r in ref.source_roots if path.is_relative_to(r)), path.parent)
         records, cov = snapshots.read(path, root) if snapshots else snapshot(path, root)
+        cov.project = ref.project_path
+        cov.owning_session = result.identity
         result.sources.append(cov)
         boundary = None
         marker = next((r for r, _ in records[:8] if r.get("type") == "x-converter-provenance"), None)
         if marker:
-            provenance = marker.get("x_converter") or {}
-            candidate = provenance.get("lines_at_creation")
-            if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate > 0:
+            provenance = validate_provenance(marker)
+            if provenance is not None:
+                candidate = provenance["lines_at_creation"]
                 boundary = candidate
                 result.provenance["conversion"] = provenance
                 result.reasons.append("conversion_prefix_excluded")
             else:
-                result.reasons.append("conversion_boundary_unavailable")
+                cov.malformed_records += 1
+                result.reasons.append("invalid_conversion_marker")
         for record, loc in records:
             kind = record["type"]
             nested_only = ref.metadata.get("nested_only_agent_id")
@@ -166,7 +184,9 @@ def load(ref: ProviderSession, snapshots=None) -> SessionUsage:
                 if kind != "progress" or (data.get("agentId") or record.get("agentId")) != nested_only:
                     continue
             time = timestamp(record.get("timestamp"))
-            excluded = "conversion_copied_prefix" if boundary is not None and loc.line <= boundary else "conversion_boundary_unavailable" if marker and boundary is None else None
+            if record.get("forkedFrom") is not None:
+                result.branches.append({"kind": "recorded_fork_lineage", "forked_from": record["forkedFrom"], "path": str(path), "line": loc.line})
+            excluded = "conversion_copied_prefix" if boundary is not None and loc.line <= boundary else None
             if time is not None and excluded is None:
                 result.times.append(time)
             if kind == "assistant":
@@ -174,12 +194,12 @@ def load(ref: ProviderSession, snapshots=None) -> SessionUsage:
                 if excluded is None:
                     if not has_usage:
                         cov.missing_usage_records += 1
-                    result.count("assistant_turns", str((record.get("message") or {}).get("id") or record.get("uuid") or f"line:{loc.line}"), time)
+                    result.count("assistant_turns", str(as_dict(record.get("message")).get("id") or record.get("uuid") or f"line:{loc.line}"), time)
             elif kind == "progress":
                 data = as_dict(record.get("data"))
                 nested = data.get("message") or {}
                 if isinstance(nested, dict) and nested.get("type") == "assistant":
-                    _assistant(result, nested, loc, excluded=excluded, nested_id=data.get("agentId") or record.get("agentId"))
+                    _assistant(result, nested, loc, excluded=excluded, nested_id=(data.get("agentId") or record.get("agentId")) if isinstance(data.get("agentId") or record.get("agentId"), str) else None)
             elif kind not in _STRUCTURAL_LINE_TYPES and kind not in {"user", "summary", "system", "queue-operation", "file-history-snapshot"}:
                 cov.unsupported_records += 1
             if excluded:
@@ -217,11 +237,30 @@ def load(ref: ProviderSession, snapshots=None) -> SessionUsage:
                         result.signals.append(Signal(identity=f"{result.identity}:tool_error:{block.tool_use_id.full}", kind="tool_error", time=time, source=loc, category=failure.category.value))
             if kind == "system":
                 subtype = record.get("subtype")
+                subtype = subtype if isinstance(subtype, str) else None
                 if subtype in {"api_error", "retry", "turn_duration"}:
                     signal = "model_error" if subtype == "api_error" else "retry" if subtype == "retry" else "turn_duration_observed"
                     duration = record.get("durationMs")
                     duration = duration if isinstance(duration, int) and not isinstance(duration, bool) and duration >= 0 and subtype == "turn_duration" else None
                     result.signals.append(Signal(identity=f"{result.identity}:{signal}:{record.get('uuid') or loc.line}", kind=signal, time=time, source=loc, duration_ms=duration))
+    if ref.metadata.get("invalid_role"):
+        result.reasons.append("malformed_agent_role_metadata")
+        for source in result.sources:
+            source.malformed_records += 1
     if ref.metadata.get("discovery_conflict"):
         result.reasons.append("conflicting_session_metadata")
     return result
+
+
+@lru_cache(maxsize=2048)
+def _cached_cwd(paths, versions):
+    from ..corpus import _cwd_from_transcripts
+    return _cwd_from_transcripts(list(paths)) or ""
+
+
+def _version(path):
+    try:
+        stat = path.stat()
+        return stat.st_size, stat.st_mtime_ns
+    except OSError:
+        return None
