@@ -9,7 +9,7 @@ from pathlib import Path
 from ..conversion import validate_provenance
 from ..parser import _STRUCTURAL_LINE_TYPES, create_transcript_entry
 from ..models import UserOrigin, classify_failure
-from ..usage_models import Observation, Signal, SourceCoverage, SessionUsage, UsageDiscovery
+from ..usage_models import ChildLink, Observation, Signal, SourceCoverage, SessionUsage, UsageDiscovery
 from ..usage_sources import CLAUDE_SEMANTICS, as_dict, native_tokens, snapshot, timestamp, walk_sources, iteration_reasons
 from ..utils import PrefixId
 from .base import Harness, ProviderSession, project_identity
@@ -58,9 +58,12 @@ def discover(selectors=None) -> UsageDiscovery:
         prior = grouped.get(sid)
         if prior is None:
             grouped[sid] = ProviderSession(PrefixId(sid), (path,), project, Harness.claude,
-                worktree, parent, role, relation, (root,), {"cwd": cwd, "invalid_role": relation == "nested_file_dispatch_unverified" and meta.get("agentType") is not None and role is None})
+                worktree, parent, role, relation, (root,), {"cwd": cwd, "storage_parents": [parent] if parent else [], "invalid_role": relation == "nested_file_dispatch_unverified" and meta.get("agentType") is not None and role is None})
         else:
-            grouped[sid] = replace(prior, paths=prior.paths + (path,))
+            parents = sorted(set(prior.metadata.get("storage_parents", [])) | ({parent} if parent else set()))
+            prior.metadata["storage_parents"] = parents
+            grouped[sid] = replace(prior, paths=prior.paths + (path,), parent_id=parents[0] if len(parents) == 1 else None,
+                relationship="ambiguous_storage_parent" if len(parents) > 1 else prior.relationship)
             if (project, parent) != (prior.project_path, prior.parent_id):
                 grouped[sid].metadata["discovery_conflict"] = True
     # A progress-only agent has no standalone filename. Explicit accounting
@@ -199,6 +202,9 @@ def load(ref: ProviderSession, snapshots=None) -> SessionUsage:
                 data = as_dict(record.get("data"))
                 nested = data.get("message") or {}
                 if isinstance(nested, dict) and nested.get("type") == "assistant":
+                    agent = data.get("agentId") or record.get("agentId")
+                    if not excluded and isinstance(agent, str) and agent:
+                        _child_link(result, record, loc, agent, "progress", nested)
                     _assistant(result, nested, loc, excluded=excluded, nested_id=(data.get("agentId") or record.get("agentId")) if isinstance(data.get("agentId") or record.get("agentId"), str) else None)
             elif kind not in _STRUCTURAL_LINE_TYPES and kind not in {"user", "summary", "system", "queue-operation", "file-history-snapshot"}:
                 cov.unsupported_records += 1
@@ -216,8 +222,7 @@ def load(ref: ProviderSession, snapshots=None) -> SessionUsage:
                 dispatch = as_dict(record.get("toolUseResult"))
                 agent = dispatch.get("agentId")
                 if isinstance(agent, str) and agent:
-                    result.related_sessions.append(replace(ref, session_id=PrefixId(agent), paths=(),
-                        parent_id=result.identity, relationship="dispatch_only", role=None))
+                    _child_link(result, record, loc, agent, "dispatch")
                 try:
                     entry = create_transcript_entry(record)
                 except Exception:
@@ -264,3 +269,13 @@ def _version(path):
         return stat.st_size, stat.st_mtime_ns
     except OSError:
         return None
+
+
+def _child_link(result, record, loc, agent, kind, nested=None):
+    candidates = [record.get("uuid"), as_dict(record.get("message")).get("id")]
+    if nested:
+        candidates.extend([nested.get("uuid"), as_dict(nested.get("message")).get("id")])
+    event_id = next((value for value in candidates if isinstance(value, str) and value), None)
+    parent_id = result.ref.metadata.get("parent_session_id") if result.ref.metadata.get("nested_only_agent_id") else None
+    result.child_links.append(ChildLink(identity=f"claude:childlink:{event_id}" if event_id else None,
+        parent=f"claude:{parent_id}" if parent_id else result.identity, child=f"claude:{agent}", kind=kind, source=loc))

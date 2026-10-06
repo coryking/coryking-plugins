@@ -960,3 +960,122 @@ def test_streaming_server_tool_count_recovers_null_fragment(corpus):
     report = get_report(harnesses=["claude"])
     assert subtotal(report, "output") == 5
     assert report.totals.server_tool_use["web_search_requests"].observed_subtotal == 2
+
+
+@pytest.mark.parametrize("original,resumed", [(PARENT, CHILD), (CHILD, PARENT)])
+def test_copied_dispatch_cannot_claim_original_child(corpus, original, resumed):
+    root, _ = corpus
+    dispatch = {"type": "user", "timestamp": TS, "cwd": "/repo/example",
+        "uuid": "original-dispatch", "sessionId": original,
+        "message": {"role": "user", "content": "synthetic"}, "toolUseResult": {"agentId": THIRD}}
+    write(root / "project" / f"{original}.jsonl", claude("original", sid=original), dispatch)
+    write(root / "project" / original / "subagents" / f"agent-{THIRD}.jsonl",
+        claude("child-request", output=7, sid=original))
+    write(root / "project" / f"{resumed}.jsonl", claude("original", sid=resumed),
+        {**dispatch, "sessionId": resumed}, claude("new", output=3, sid=resumed))
+
+    copy = get_report(sessions=[resumed], harnesses=["claude"])
+    assert subtotal(copy, "output") == 3
+    assert copy.session_count == 1
+    assert "child_parent_conflicts_with_storage" in copy.warnings
+    assert not copy.coverage["complete_observed_usage"]
+    original_only = get_report(sessions=[original], harnesses=["claude"])
+    assert subtotal(original_only, "output") == 7  # Shared original request has unknown owner.
+    both = get_report(sessions=[original, resumed], harnesses=["claude"])
+    assert subtotal(both, "output") == 15
+    assert both.coverage["complete_observed_usage"]
+    assert not both.coverage["ownership_complete"]
+    child = next(row for row in both.sessions if row.identity == "claude:" + THIRD)
+    assert child.parent == "claude:" + original
+    assert child.relationship == "dispatched"
+
+
+@pytest.mark.parametrize("progress_only", [False, True])
+def test_copied_child_links_without_storage_parent_preserve_ambiguity(corpus, progress_only):
+    root, _ = corpus
+    child = claude("child-request", output=7)
+    link = {"type": "progress", "timestamp": TS, "cwd": "/repo/example",
+        "data": {"agentId": THIRD, "message": child}} if progress_only else {
+        "type": "user", "uuid": "original-dispatch", "timestamp": TS, "cwd": "/repo/example",
+        "message": {"role": "user", "content": "synthetic"}, "toolUseResult": {"agentId": THIRD}}
+    write(root / "project" / f"{PARENT}.jsonl", claude("original"), link)
+    write(root / "project" / f"{CHILD}.jsonl", claude("original", sid=CHILD), link,
+        claude("new", output=3, sid=CHILD))
+    if not progress_only:
+        write(root / "project" / f"{THIRD}.jsonl", child)
+    copy = get_report(sessions=[CHILD], harnesses=["claude"])
+    assert subtotal(copy, "output") == 3
+    assert copy.session_count == 1
+    assert "copied_child_link_outside_selected_workload" in copy.warnings
+    both = get_report(sessions=[PARENT, CHILD], harnesses=["claude"])
+    assert subtotal(both, "output") == 15
+    child_row = next(row for row in both.sessions if row.identity == "claude:" + THIRD)
+    assert child_row.parent is None
+    assert child_row.relationship == "ambiguous_dispatch_parent"
+    assert any(branch.get("candidate_parents") == ["claude:" + PARENT, "claude:" + CHILD]
+        for branch in child_row.branches)
+
+
+def test_child_link_without_stable_identity_cannot_expand_workload(corpus):
+    root, _ = corpus
+    link = {"type": "user", "timestamp": TS, "cwd": "/repo/example",
+        "message": {"role": "user", "content": "synthetic"}, "toolUseResult": {"agentId": THIRD}}
+    write(root / "project" / f"{PARENT}.jsonl", claude(), link)
+    write(root / "project" / f"{THIRD}.jsonl", claude("unattributed-child", output=7))
+    report = get_report(sessions=[PARENT], harnesses=["claude"])
+    assert subtotal(report, "output") == 5
+    assert report.session_count == 1
+    assert "child_link_identity_unavailable" in report.warnings
+    assert not report.coverage["complete_observed_usage"]
+
+
+def test_conflicting_child_storage_parents_cannot_be_resolved_by_one_dispatch(corpus):
+    root, _ = corpus
+    dispatch = {"type": "user", "timestamp": TS, "cwd": "/repo/example", "uuid": "dispatch",
+        "message": {"role": "user", "content": "synthetic"}, "toolUseResult": {"agentId": THIRD}}
+    write(root / "project" / f"{PARENT}.jsonl", claude("parent"), dispatch)
+    write(root / "project" / f"{CHILD}.jsonl", claude("other-parent", sid=CHILD))
+    for parent in (PARENT, CHILD):
+        write(root / "project" / parent / "subagents" / f"agent-{THIRD}.jsonl",
+            claude("child-request", output=7, sid=parent))
+    one = get_report(sessions=[PARENT], harnesses=["claude"])
+    assert subtotal(one, "output") == 5
+    assert one.session_count == 1
+    assert "copied_child_link_outside_selected_workload" in one.warnings
+    both = get_report(sessions=[PARENT, CHILD], harnesses=["claude"])
+    assert subtotal(both, "output") == 17
+    child_row = next(row for row in both.sessions if row.identity == "claude:" + THIRD)
+    assert child_row.parent is None
+    assert child_row.relationship == "ambiguous_dispatch_parent"
+
+
+def test_holder_cache_refresh_patterns_are_bounded_to_current_ids(corpus, monkeypatch, tmp_path):
+    import cc_explorer.usage_index as usage_index
+
+    root, _ = corpus
+    monkeypatch.setenv("CC_EXPLORER_USAGE_INDEX", str(tmp_path / "bounded-cache.sqlite3"))
+    history = [claude(f"historical-{index}") for index in range(50)]
+    original = write(root / "project" / f"{PARENT}.jsonl", *history)
+    current = write(root / "project" / f"{CHILD}.jsonl", claude("current-only", sid=CHILD))
+    assert subtotal(get_report(sessions=[PARENT], harnesses=["claude"]), "output") == 250
+    assert subtotal(get_report(sessions=[CHILD], harnesses=["claude"]), "output") == 5
+    scanner, pattern_calls = usage_index.make_scanner, []
+
+    class RecordedScanner:
+        def files_with_match(self, patterns, files):
+            pattern_calls.append(patterns)
+            return scanner().files_with_match(patterns, files)
+
+    monkeypatch.setattr(usage_index, "make_scanner", RecordedScanner)
+    write(original, *history, claude("unrelated-new"))
+    assert subtotal(get_report(sessions=[CHILD], harnesses=["claude"]), "output") == 5
+    assert pattern_calls and all(patterns == ["current\\-only"] for patterns in pattern_calls)
+    pattern_calls.clear()
+    # The historic query's invalidation survives the intervening unrelated query:
+    # a new copy must still find its original holder in the previously changed file.
+    write(current, claude("current-only", sid=CHILD), claude("historical-0", sid=CHILD))
+    report = get_report(sessions=[CHILD], harnesses=["claude"])
+    assert subtotal(report, "output") == 5
+    assert report.coverage["selection_attribution_uncertain_observations"] == 1
+    assert pattern_calls and max(map(len, pattern_calls)) <= 2
+    assert all(set(patterns) <= {"current\\-only", "historical\\-0"} for patterns in pattern_calls)

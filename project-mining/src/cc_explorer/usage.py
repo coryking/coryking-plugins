@@ -15,7 +15,7 @@ from .usage_models import (
     SessionUsage, Tokens, Totals, UsageObservations, UsageReport,
 )
 from .usage_sources import SnapshotReader, reconcile_requests, timestamp, merge_source_coverage
-from .usage_index import holders
+from .usage_index import holders, child_link_holders
 from .utils import PrefixId
 
 CATEGORY_SEMANTICS = {
@@ -27,7 +27,8 @@ CATEGORY_SEMANTICS = {
 }
 SESSION_GAPS = {"dispatched_child_source_unavailable", "conflicting_session_metadata", "history_base_source_unavailable",
     "inherited_history_boundary_unrecorded", "inherited_ordinal_unavailable", "conflicting_history_baseline_copies",
-    "invalid_history_cutoff", "invalid_conversion_marker", "malformed_agent_role_metadata"}
+    "invalid_history_cutoff", "invalid_conversion_marker", "malformed_agent_role_metadata",
+    "copied_child_link_outside_selected_workload", "child_link_identity_unavailable", "child_parent_conflicts_with_storage"}
 EXCLUSION_GAPS = {"window_time_unavailable", "counter_interval_crosses_window_start", "shared_request_outside_selected_workload",
     "inherited_request_boundary_or_owner_unavailable", "context_estimate_not_consumption"}
 COUNT_KINDS = ("assistant_turns", "human_turns", "injected_user_messages", "tool_invocations", "tool_results")
@@ -79,6 +80,12 @@ def _resolve(value: str, refs: dict[str, ProviderSession]) -> str:
     return matches[0]
 
 
+def _physical_parent(ref):
+    if ref and ref.paths and not ref.metadata.get("nested_only_agent_id"):
+        return ref.parent_id
+    return None
+
+
 class Accounting:
     """One call's provider discovery, bounded snapshots and normalized evidence."""
     def __init__(self, sessions=None, projects=None, harnesses=None, include_descendants=True,
@@ -111,7 +118,8 @@ class Accounting:
         self.loaded: dict[str, SessionUsage] = {}
         snapshots = SnapshotReader()
         raw: list[Observation] = []
-        dispatches = {}
+        dispatches = defaultdict(set)
+        self.holder_reasons = []
         pending = list(sorted(selected))
         while pending:
             key = pending.pop()
@@ -121,49 +129,88 @@ class Accounting:
             snapshots.release_records()
             self.loaded[key] = usage
             self.refs[key] = usage.ref
-            # Discover progress before dispatch placeholders; preserve physical
-            # references and apply dispatch labels once all evidence is loaded.
+            allowed, blocked = {}, set()
+            if include_descendants:
+                uncertain_links = [link for link in usage.child_links
+                    if _physical_parent(self.refs.get(link.child)) is None
+                    and not (self.refs.get(link.child) and self.refs[link.child].metadata.get("storage_parents"))]
+                copies, reasons = child_link_holders({link.identity for link in uncertain_links},
+                    [r for r in self.refs.values() if r.harness.value == "claude"], self.providers["claude"]) if uncertain_links else ([], [])
+                self.holder_reasons.extend(reasons)
+                parent_holders = defaultdict(set)
+                for link in copies + uncertain_links:
+                    parent_holders[link.identity, link.child].add(link.parent)
+                for link in usage.child_links:
+                    child_ref = self.refs.get(link.child)
+                    parent = _physical_parent(child_ref)
+                    storage_parents = set(child_ref.metadata.get("storage_parents", [])) if child_ref else set()
+                    parents = storage_parents or ({parent} if parent else parent_holders[link.identity, link.child])
+                    reason = None
+                    if parent and parent != key:
+                        reason = "inherited_child_link" if parent in self.membership else "child_parent_conflicts_with_storage"
+                    elif not storage_parents and parent is None and link.identity is None:
+                        reason = "child_link_identity_unavailable"
+                    elif not parents <= self.membership.keys():
+                        reason = "copied_child_link_outside_selected_workload"
+                    if reason:
+                        blocked.add(link.child)
+                        usage.reasons.append(reason)
+                        usage.branches.append({"kind": "excluded_child_link", "child": link.child,
+                            "observed_parent": link.parent, "candidate_parents": sorted(parents),
+                            "identity": link.identity, "source": link.source.model_dump(), "reason": reason})
+                    else:
+                        allowed.setdefault(link.child, set()).update(parents)
+                for child in blocked:
+                    allowed.pop(child, None)
+            # Relationship ownership is resolved before either dispatch or
+            # progress can expand the workload. Explicit child selections remain
+            # eligible, even if an unrelated copied link is rejected.
             for observation in usage.observations:
                 child = observation.session
                 if child != key and child not in self.membership:
-                    if include_descendants and child:
-                        if child not in self.refs:
-                            self.refs[child] = replace(usage.ref, session_id=PrefixId(child.split(":", 1)[1]), paths=(),
-                                parent_id=key, relationship="nested_progress", role=None)
+                    if include_descendants and child and child in allowed:
+                        self.refs.setdefault(child, replace(usage.ref, session_id=PrefixId(child.split(":", 1)[1]), paths=(),
+                            parent_id=next(iter(allowed[child])) if len(allowed[child]) == 1 else None,
+                            relationship="nested_progress", role=None, metadata={}))
                         self.membership[child] = f"nested_progress_of:{key}"
                         if self.refs[child].paths:
                             pending.append(child)
                         else:
                             self.loaded[child] = SessionUsage(self.refs[child])
                     else:
-                        observation.quality = "excluded"
-                        observation.increment = None
-                        observation.reasons.append("descendants_disabled")
+                        observation.quality, observation.increment = "excluded", None
+                        observation.reasons.append("copied_child_link_outside_selected_workload" if include_descendants else "descendants_disabled")
                 raw.append(observation)
-            if include_descendants:
-                for related in usage.related_sessions:
-                    child = f"{related.harness.value}:{related.session_id.full}"
-                    dispatches[child] = key
-                    if child not in self.membership:
-                        self.membership[child] = f"dispatch_of:{key}"
-                        self.refs.setdefault(child, related)
-                        if self.refs[child].paths:
-                            pending.append(child)
-                        else:
-                            self.loaded[child] = SessionUsage(related)
+            for child, parents in allowed.items():
+                dispatches[child].update(parents)
+                if child not in self.membership:
+                    parent = next(iter(parents)) if len(parents) == 1 else None
+                    self.membership[child] = f"dispatch_of:{key}"
+                    self.refs.setdefault(child, replace(usage.ref, session_id=PrefixId(child.split(":", 1)[1]), paths=(),
+                        parent_id=parent, relationship="dispatch_only", role=None, metadata={}))
+                    if self.refs[child].paths:
+                        pending.append(child)
+                    else:
+                        self.loaded[child] = SessionUsage(self.refs[child])
         observed_owners = {o.session for o in raw}
-        for child, parent in dispatches.items():
+        for child, parents in dispatches.items():
             usage = self.loaded[child]
             present = bool(usage.ref.paths or child in observed_owners)
-            usage.ref = replace(usage.ref, parent_id=parent, relationship="dispatched" if present else "dispatch_only")
+            parent = _physical_parent(usage.ref) or (next(iter(parents)) if len(parents) == 1 else None)
+            usage.ref = replace(usage.ref, parent_id=parent,
+                relationship="ambiguous_dispatch_parent" if parent is None else "dispatched" if present else "dispatch_only")
             self.refs[child] = usage.ref
+            if parent is None:
+                usage.reasons.append("child_parent_ambiguous")
+                usage.branches.append({"kind": "ambiguous_child_parent", "child": child,
+                    "candidate_parents": sorted(parents)})
             if not present:
                 usage.reasons.append("dispatched_child_source_unavailable")
         requests = [o for o in raw if o.counter_kind == "request"]
-        self.holder_reasons = []
         if "claude" in self.providers:
-            copies, self.holder_reasons = holders({o.identity for o in requests if o.quality != "excluded"},
+            copies, reasons = holders({o.identity for o in requests if o.quality != "excluded"},
                 [r for r in self.refs.values() if r.harness.value == "claude"], self.providers["claude"])
+            self.holder_reasons.extend(reasons)
             # Cached evidence can repeat selected locators. Collapse those before
             # stream reconciliation; ownership candidates use only active records.
             requests = list({(o.identity, o.sources[0].path, o.sources[0].line): o for o in copies + requests}.values())

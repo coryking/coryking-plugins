@@ -110,6 +110,15 @@ class Observation(AccountingModel):
         return self
 
 
+class ChildLink(AccountingModel):
+    """Native relationship evidence; never a token observation or inferred origin."""
+    identity: str | None
+    parent: str
+    child: str
+    kind: Literal["dispatch", "progress"]
+    source: Locator
+
+
 class Signal(AccountingModel):
     identity: str
     kind: str
@@ -258,7 +267,7 @@ class SessionUsage:
     branches: list[dict[str, Any]] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     provenance: dict[str, Any] = field(default_factory=dict)
-    related_sessions: list[ProviderSession] = field(default_factory=list)
+    child_links: list[ChildLink] = field(default_factory=list)
 
     @property
     def identity(self) -> str:
