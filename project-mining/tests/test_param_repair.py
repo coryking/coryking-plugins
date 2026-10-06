@@ -32,6 +32,7 @@ from cc_explorer.models import (
 from cc_explorer.param_repair import (
     ALIASES,
     ID_LIST_PARAMS,
+    STRUCTURED_LIST_PARAMS,
     _accepts_array,
     argument_error_message,
     repair_arguments,
@@ -220,7 +221,7 @@ class TestAliasMapping:
         unclassified = set()
         for schema in SCHEMAS.values():
             for name, prop in (schema.get("properties") or {}).items():
-                if _accepts_array(prop) and name not in ID_LIST_PARAMS | regex_params:
+                if _accepts_array(prop) and name not in ID_LIST_PARAMS | regex_params | STRUCTURED_LIST_PARAMS:
                     unclassified.add(name)
         assert not unclassified, f"array params neither id-list nor regex: {unclassified}"
 

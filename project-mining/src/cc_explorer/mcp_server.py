@@ -28,6 +28,8 @@ from pydantic import ValidationError as PydanticValidationError
 
 from ._claude_paths import _get_projects_dir
 from .activity import build_activity_timeline
+from .usage import get_report as build_usage_report, get_observations as build_usage_observations
+from .usage_models import Attribution, UsageReport, UsageObservations
 from .conversion import (
     conversion_age_seconds,
     convert_codex_session_to_subagent,
@@ -145,7 +147,12 @@ bodies; Codex subagents are independent rollout sessions linked by metadata.
    at once, peaks, hands-on vs autonomous time). Session ids and projects it
    returns pass straight back to the tools above.
 
-5. Interview — ask a past session what it meant, when grep can't answer.
+5. Usage accounting — get_usage_report selects an observed workload, includes
+   discoverable descendants, and reports tokens/coverage before detail. Audit
+   native counters and source locators with get_usage_observations. No rates or
+   prices are calculated; unknown categories/configuration stay explicit.
+
+6. Interview — ask a past session what it meant, when grep can't answer.
    convert_session copies the session into a resumable subagent; SendMessage
    resumes it (no agent-teams needed — if SendMessage is not in your toolset it
    is deferred, so load it with ToolSearch query "select:SendMessage"); send ONE
@@ -666,6 +673,62 @@ def _validate_turn_id(turn: str) -> None:
 # =============================================================================
 # Conversation tools
 # =============================================================================
+
+
+@mcp.tool(annotations=_TOOL_ANNOTATIONS)
+def get_usage_report(
+    sessions: Annotated[list[str] | None, Field(description="Explicit session/agent IDs, preferably full harness-qualified identities. Unique prefixes are accepted; unresolved or ambiguous members fail. Omit to select project/corpus scope.")] = None,
+    projects: Annotated[list[str] | None, Field(description="Paths or bare project names, worktrees pooled. Omit for all locally discoverable projects. Explicit roots include discoverable descendants across project boundaries.")] = None,
+    harnesses: HarnessesParam = None,
+    include_descendants: bool = True,
+    start: Annotated[str | None, Field(description="Inclusive timezone-aware ISO-8601 bound. Cumulative evidence uses predecessors before this bound.")] = None,
+    end: Annotated[str | None, Field(description="Exclusive timezone-aware ISO-8601 bound.")] = None,
+    attribution: Annotated[list[Attribution] | None, Field(description="Caller labels and unit-labeled artifact measurements on full included session or observation identities. Overlapping targets are rejected. No byte-to-token conversion or inferred accepted-result count.")] = None,
+    offset: int = 0,
+    limit: Annotated[int, Field(ge=1, le=500, description="Session detail page size. Totals, membership and rollups always cover the entire selected scope.")] = 50,
+) -> UsageReport:
+    """Account for an agent workload's observed tokens, with coverage before detail.
+
+    Discover IDs with existing session tools, select root sessions, then inspect
+    categories, model/effort, project, role and caller-label rollups. Sources are
+    snapshotted at observed byte boundaries; inherited/conversion prefixes and
+    copied requests are reconciled. Retained execution branches are included
+    where evidenced; deleted/unrecorded work cannot be recovered. Missing usage,
+    conflicting copies, counter baselines and context-only counters stay visible.
+    No pricing, model recommendations, or subscription allowance estimates.
+    Use get_usage_observations to audit identities and physical source locators.
+    """
+    try:
+        return build_usage_report(sessions=sessions, projects=projects, harnesses=harnesses,
+            include_descendants=include_descendants, start=start, end=end, attribution=attribution,
+            offset=offset, limit=limit)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool(annotations=_TOOL_ANNOTATIONS)
+def get_usage_observations(
+    session: Annotated[str, Field(description="One session/agent identity from get_usage_report; full harness-qualified ID preferred, unique prefixes accepted.")],
+    projects: list[str] | None = None,
+    harnesses: HarnessesParam = None,
+    start: str | None = None,
+    end: str | None = None,
+    offset: int = 0,
+    limit: Annotated[int, Field(ge=1, le=500)] = 100,
+) -> UsageObservations:
+    """Audit normalized usage observations for one session/agent, without descendants.
+
+    Uses the report engine. Counts and totals cover the whole scope regardless of
+    detail pagination. Each observation retains native counters, category inclusion
+    semantics, derived increment, model/effort uncertainty, stable identity and
+    supporting file/line/byte locators. Null categories mean unknown, never zero.
+    Growing files can change between calls; compare observed source boundaries.
+    """
+    try:
+        return build_usage_observations(session=session, projects=projects, harnesses=harnesses,
+            start=start, end=end, offset=offset, limit=limit)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)

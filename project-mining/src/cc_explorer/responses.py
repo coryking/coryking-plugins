@@ -65,12 +65,12 @@ class SessionSummary(SparseModel):
     team_role: str | None = Field(default=None, description="This worker's role in the team (agentName), e.g. 'reviewer-3'. Absent outside agent-team sessions.")
     agents: int = Field(description="Subagents dispatched directly by the parent transcript (Task/Agent/TaskCreate blocks). Top-down view — does NOT count workflow-orchestrated agents.")
     agents_present: int = Field(description="Full discovered subagent population — direct dispatches plus on-disk orphans (notably workflow-orchestrated agents). Matches list_session_agents' total_agents. When this exceeds `agents`, the session ran workflows. The min_agents filter matches on this number.")
-    context_tokens: int = Field(description="Last assistant turn's input tokens (context window size).")
+    context_tokens: int = Field(description="Lightweight last observed request input estimate; not exact context occupancy. Use get_usage_report for consumption accounting.")
     compactions: int | None = Field(
         default=None,
         description="Context compactions detected in this session (a >30% drop from peak input tokens). Absent when there were none. A nonzero count means the early conversation was summarized away: the session can no longer quote its own beginning, so anything it says about how it started is reconstruction, not recall — verify that part against the transcript rather than asking the session.",
     )
-    output_tokens: int = Field(description="Total output tokens across all turns.")
+    output_tokens: int = Field(description="Lightweight sum of browsing assistant-record output; may include streaming fragments. Use get_usage_report for reconciled execution consumption.")
     tools: int = Field(description="Total tool_use invocations.")
     is_current: bool | None = Field(
         default=None,
@@ -571,8 +571,8 @@ class AgentSummary(SparseModel):
     type: str = Field(description="Subagent type (e.g. 'general-purpose', 'Explore').")
     status: str = Field(description="Agent status: completed, error, async_launched, unknown.")
     description: str = Field(description="Short description passed to the agent.")
-    input_tokens: int | None = Field(default=None, description="Total input tokens (input + cache).")
-    output_tokens: int | None = Field(default=None, description="Total output tokens.")
+    input_tokens: int | None = Field(default=None, description="Lightweight browsing input-plus-cache estimate; use get_usage_report for accounting.")
+    output_tokens: int | None = Field(default=None, description="Lightweight browsing output estimate; use get_usage_report for reconciled accounting.")
     tools: int | None = Field(default=None, description="Total tool invocations.")
     duration_ms: int | None = Field(default=None, description="Wall-clock duration in milliseconds.")
 
@@ -669,8 +669,8 @@ class AgentDetailResponse(SparseModel):
     type: str = Field(description="Subagent type.")
     status: str = Field(description="Agent status.")
     date_started: datetime | None = Field(default=None, description="Timestamp when agent was spawned.")
-    input_tokens: int | None = Field(default=None, description="Total input tokens.")
-    output_tokens: int | None = Field(default=None, description="Total output tokens.")
+    input_tokens: int | None = Field(default=None, description="Lightweight browsing input estimate; use get_usage_report for accounting.")
+    output_tokens: int | None = Field(default=None, description="Lightweight browsing output estimate; use get_usage_report for reconciled accounting.")
     tools: int | None = Field(default=None, description="Total tool invocations.")
     tool_counts: dict[str, int] | None = Field(default=None, description="Tool name -> invocation count.")
     duration_ms: int | None = Field(default=None, description="Wall-clock duration in milliseconds.")

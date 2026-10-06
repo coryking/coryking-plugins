@@ -833,9 +833,9 @@ class TranscriptStats:
     Works on any transcript — main sessions and subagent .output files
     share the same JSONL format.
 
-    context_tokens: last assistant turn's input (actual context window size)
-    input_tokens: total input across all turns
-    output_tokens: total output across all turns (new tokens generated)
+    context_tokens: last observed request input estimate, not exact context occupancy
+    input_tokens: lightweight sum of browsing records, not accounting authority
+    output_tokens: lightweight sum of browsing records, not reconciled consumption
     duration_ms: elapsed time from first to last entry timestamp
     compaction_events: detected context window compactions (>30% drop from peak)
     """

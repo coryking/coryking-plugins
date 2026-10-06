@@ -6,6 +6,7 @@ description: >
   Triggers on: "search my chats", "what did that agent do", "trace that session", "look at my
   conversations", "check my chat history", "find where we talked about X", "which sessions used
   agents", "ask a past session", "convert a session into a subagent", "question that old conversation".
+  Also use for token consumption, agent-workload accounting, and auditing usage observations.
   Covers both direct tool use and dispatching the session-researcher agent for question-shaped
   investigations. Do NOT use for behavioral evidence mining or evidence-document work — that's the
   project-mining skill.
@@ -68,6 +69,10 @@ Tools for tracing subagent execution — a separate axis from conversation conte
 - **`audit_session_tools`** — for every subagent in a session, tool counts + error rates + chronological tool-call traces. Use this to answer "are my agents using my tools right?" — see which tools land vs fail, where retries happened, which agents over-call.
 
 Use when tracing what an agent did, correlating outputs with sessions, or building timelines that distinguish "discussed doing X" from "dispatched agents to do X."
+
+## Workload token accounting
+
+`get_usage_report` measures observed workload tokens across selected sessions and discoverable children, with coverage, category semantics, configuration and role/phase rollups. `get_usage_observations` audits the same engine's native records and physical source locators. These tools accept no rates and calculate no prices. Read [usage accounting](references/usage-accounting.md) before interpreting consumption, cumulative counters, branches, coverage or caller attribution.
 
 ## The failure tools
 

@@ -390,3 +390,11 @@ class CodexProvider:
                 content=content,
             ),
         )
+
+    def discover_usage(self):
+        from .codex_usage import discover
+        return discover(self.home)
+
+    def load_usage(self, session: ProviderSession, snapshots=None):
+        from .codex_usage import load
+        return load(session, snapshots)

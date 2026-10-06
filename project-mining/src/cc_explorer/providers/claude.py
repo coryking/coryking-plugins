@@ -33,3 +33,11 @@ class ClaudeProvider:
     def load_transcript(self, paths: Sequence[Path]) -> list[TranscriptEntry]:
         return load_transcript(paths[-1]) if paths else []
 
+
+    def discover_usage(self):
+        from .claude_usage import discover
+        return discover()
+
+    def load_usage(self, session: ProviderSession, snapshots=None):
+        from .claude_usage import load
+        return load(session, snapshots)
