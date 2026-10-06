@@ -15,7 +15,7 @@ from ..utils import PrefixId
 from .base import Harness, ProviderSession, project_identity
 
 
-def discover() -> UsageDiscovery:
+def discover(selectors=None) -> UsageDiscovery:
     from .._claude_paths import _get_projects_dir
     from ..corpus import _cwd_from_transcripts
     from ..subagents import _read_agent_meta
@@ -62,10 +62,35 @@ def discover() -> UsageDiscovery:
             grouped[sid] = ProviderSession(PrefixId(sid), (path,), project, Harness.claude,
                 worktree, parent, role, relation, (root,), {"cwd": cwd})
         else:
-            from dataclasses import replace
             grouped[sid] = replace(prior, paths=prior.paths + (path,))
             if (project, parent) != (prior.project_path, prior.parent_id):
                 grouped[sid].metadata["discovery_conflict"] = True
+    # A progress-only agent has no standalone filename. Explicit accounting
+    # drilldown can locate its evidenced identity in parent progress records.
+    wanted = []
+    for selector in selectors or []:
+        harness, sep, raw = selector.partition(":")
+        if sep and harness != "claude":
+            continue
+        value = raw if sep else selector
+        if value not in grouped and len(value) >= 6:
+            wanted.append(value)
+    if wanted:
+        for parent in list(grouped.values()):
+            if parent.parent_id:
+                continue
+            for path in parent.paths:
+                records, _ = snapshot(path, root)
+                for record, _ in records:
+                    if record.get("type") != "progress":
+                        continue
+                    data = as_dict(record.get("data"))
+                    nested = as_dict(data.get("message"))
+                    agent = data.get("agentId") or record.get("agentId")
+                    if nested.get("type") == "assistant" and isinstance(agent, str) and any(agent.startswith(value) for value in wanted) and agent not in grouped:
+                        grouped[agent] = replace(parent, session_id=PrefixId(agent),
+                            parent_id=f"claude:{parent.session_id.full}", relationship="nested_progress",
+                            role=None, metadata={"nested_only_agent_id": agent, "parent_session_id": parent.session_id.full})
     result.sessions = list(grouped.values())
     return result
 
@@ -135,6 +160,11 @@ def load(ref: ProviderSession, snapshots=None) -> SessionUsage:
                 result.reasons.append("conversion_boundary_unavailable")
         for record, loc in records:
             kind = record["type"]
+            nested_only = ref.metadata.get("nested_only_agent_id")
+            if nested_only:
+                data = as_dict(record.get("data"))
+                if kind != "progress" or (data.get("agentId") or record.get("agentId")) != nested_only:
+                    continue
             time = timestamp(record.get("timestamp"))
             excluded = "conversion_copied_prefix" if boundary is not None and loc.line <= boundary else "conversion_boundary_unavailable" if marker and boundary is None else None
             if time is not None and excluded is None:

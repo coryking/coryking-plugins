@@ -34,9 +34,9 @@ class ClaudeProvider:
         return load_transcript(paths[-1]) if paths else []
 
 
-    def discover_usage(self):
+    def discover_usage(self, selectors=None):
         from .claude_usage import discover
-        return discover()
+        return discover(selectors)
 
     def load_usage(self, session: ProviderSession, snapshots=None):
         from .claude_usage import load

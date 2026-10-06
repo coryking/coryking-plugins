@@ -391,7 +391,7 @@ class CodexProvider:
             ),
         )
 
-    def discover_usage(self):
+    def discover_usage(self, selectors=None):
         from .codex_usage import discover
         return discover(self.home)
 

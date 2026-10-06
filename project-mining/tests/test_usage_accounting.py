@@ -554,3 +554,17 @@ def test_unmeasured_failure_attempt_does_not_claim_exact_request_count(corpus):
     assert report.totals.model_requests_lower_bound == 1
     assert report.coverage["unmeasured_failure_attempts_present"] is True
     assert report.coverage["complete_observed_usage"] is False
+
+
+def test_nested_only_agent_report_identity_roundtrips_to_observations(corpus):
+    root, _ = corpus
+    nested = claude("nested-only", sid=PARENT)
+    progress = {"type": "progress", "timestamp": TS, "cwd": "/repo/example",
+                "data": {"type": "agent_progress", "agentId": CHILD, "message": nested}}
+    write(root / "project" / f"{PARENT}.jsonl", claude(), progress)
+    report = get_report(sessions=[PARENT], harnesses=["claude"])
+    child = next(s for s in report.sessions if s.identity == "claude:" + CHILD)
+    detail = get_observations(session=child.identity, harnesses=["claude"])
+    assert detail.totals == child.totals
+    assert len(detail.observations) == 1
+    assert detail.observations[0].identity == "claude:request:nested-only"

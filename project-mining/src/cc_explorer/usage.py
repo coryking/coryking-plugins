@@ -71,7 +71,7 @@ class Accounting:
         self.discovery_sources = []
         self.refs: dict[str, ProviderSession] = {}
         for provider in self.providers.values():
-            discovery = provider.discover_usage()
+            discovery = provider.discover_usage(sessions)
             self.roots.extend(discovery.roots)
             self.discovery_sources.extend(discovery.sources)
             for ref in discovery.sessions:
