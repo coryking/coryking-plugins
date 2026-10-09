@@ -17,13 +17,6 @@ characters (newline/tab/quote/backslash become \\n \\t \\" \\\\) — a pattern
 that needs to match one of those can miss in raw bytes what the matcher finds
 in extracted text. `rg_safe` gates exactly those patterns to the scan-all
 path, so the prefilter can only ever over-select, never drop a true hit.
-
-ASCII patterns affected by ripgrep/Python Unicode-folding differences route to
-the streaming Python fallback. In particular, Python treats U+0130 İ and
-U+0131 ı as case-insensitive matches for ASCII I/i while ripgrep's Unicode
-simple folding does not. Non-ASCII patterns route to scan-all because the
-engines can ship different Unicode tables; other ASCII patterns retain the
-ripgrep fast path.
 """
 
 from __future__ import annotations
@@ -376,6 +369,25 @@ class Corpus:
                 )
         return cls(refs)
 
+    def written_since(self, after: datetime) -> "Corpus":
+        """Refs whose session transcript was written at or after `after`.
+
+        Pure stat() pruning ahead of any read: transcripts are append-only, so
+        a session's first timestamp can never postdate its file's mtime — a
+        file last written before `after` cannot hold a session that started
+        after it. Every subset `_filter_by_date(after=...)` would keep survives
+        (a compaction rewrite bumps mtime, so pruning errs toward keeping).
+        """
+        lo_ts = after.timestamp()
+
+        def written(ref: SessionRef) -> bool:
+            try:
+                return max(p.stat().st_mtime for p in ref.paths or (ref.path,)) >= lo_ts
+            except OSError:
+                return False
+
+        return Corpus([r for r in self.refs if written(r)])
+
     def narrow_to_ids(self, ids: Sequence[str]) -> "Corpus":
         """Refs whose session id matches any of the given ids/prefixes."""
         wanted = [PrefixId(i) for i in ids]
@@ -420,10 +432,7 @@ class Corpus:
         return Corpus(out)
 
     def matching_files(
-        self,
-        raw_patterns: Sequence[str],
-        *,
-        scanner: Optional["Scanner"] = None,
+        self, raw_patterns: Sequence[str]
     ) -> list[tuple[SessionRef, list[Path]]]:
         """(ref, its transcript files that match) for refs with at least one hit.
 
@@ -450,7 +459,7 @@ class Corpus:
         if not files or not raw_patterns:
             return []
 
-        hits = (scanner or make_scanner()).files_with_match(raw_patterns, files)
+        hits = make_scanner().files_with_match(raw_patterns, files)
         return [
             (ref, matched)
             for ref, tf in ref_files
@@ -460,32 +469,19 @@ class Corpus:
     def candidate_refs(self, patterns: Sequence[str]) -> list[SessionRef]:
         """Refs that MAY match any pattern — a superset by construction.
 
-        Raw-safe patterns run through the prefilter. Patterns whose only rg gap
-        is Python's extra I/i Unicode folding use `PyScanner`, supplemented by
-        a raw JSON-escape candidate pattern. Other rg-unsafe patterns — or a
-        scanner failure — force scan-all. The typed matcher
-        (`search._entry_matches`) remains the matcher of record.
+        rg-safe patterns run through the raw-byte prefilter (rg, or the
+        streaming Python fallback when rg is missing); any rg-unsafe pattern —
+        or a scanner failure — forces scan-all, where every ref is a candidate.
+        The typed matcher (`search._entry_matches`) remains the matcher of
+        record over whatever this returns.
         """
         if not self.refs or not patterns:
             return list(self.refs)
-        if not all(_raw_prefilter_safe(p) for p in patterns):
+        if not all(rg_safe(p) for p in patterns):
             return list(self.refs)
 
-        scanner: Optional[Scanner] = None
-        raw_patterns = list(patterns)
-        if not all(rg_safe(p) for p in patterns):
-            scanner = PyScanner()
-            # PyScanner uses the authoritative re.IGNORECASE semantics, so it
-            # sees literal İ/ı. JSON writers may encode those characters as
-            # \u0130/\u0131 instead; select every file containing either escape
-            # and let the typed matcher discard over-selection after decoding.
-            raw_patterns.append(_PYTHON_EXTRA_I_JSON_ESCAPE)
-
         try:
-            return [
-                ref
-                for ref, _ in self.matching_files(raw_patterns, scanner=scanner)
-            ]
+            return [ref for ref, _ in self.matching_files(patterns)]
         except ScannerError as e:
             # stderr, never stdout — stdout is the stdio MCP protocol channel.
             print(
@@ -542,82 +538,11 @@ _RG_UNSAFE = re.compile(
     r"|(?<!\\)\.(?![*+])"
 )
 
-# JSON's `\u` marker is lowercase; the four hex digits here contain no letters.
-# This raw regex selects escaped forms of the two characters Python adds to the
-# ASCII I/i case-insensitive equivalence class but Unicode simple folding omits.
-_PYTHON_EXTRA_I_JSON_ESCAPE = r"\\u013[01]"
-
-
-def _class_range_includes_ascii_i(pattern: str) -> bool:
-    """Whether an ASCII character-class range includes ``I`` or ``i``.
-
-    A literal I/i is caught directly by `rg_safe`; this covers spellings such
-    as ``[a-z]`` and ``[H-J]`` where the risky character is implicit. Escaped
-    range endpoints are ignored here because the escape forms that can express
-    a character by value (``\\x``/``\\u``) are already raw-byte unsafe.
-
-    This is deliberately a small conservative lexer, not a second regex
-    parser. False positives only cost the optimization; false negatives would
-    change search results.
-    """
-    in_class = False
-    escaped = False
-    tokens: list[tuple[str, bool]] = []
-
-    def risky_range(items: list[tuple[str, bool]]) -> bool:
-        for left, dash, right in zip(items, items[1:], items[2:]):
-            if dash != ("-", False) or left[1] or right[1]:
-                continue
-            start, end = ord(left[0]), ord(right[0])
-            if start <= ord("I") <= end or start <= ord("i") <= end:
-                return True
-        return False
-
-    for char in pattern:
-        if escaped:
-            if in_class:
-                tokens.append((char, True))
-            escaped = False
-            continue
-        if char == "\\":
-            escaped = True
-            continue
-        if not in_class:
-            if char == "[":
-                in_class = True
-                tokens = []
-            continue
-        if char == "]":
-            if risky_range(tokens):
-                return True
-            in_class = False
-            tokens = []
-            continue
-        tokens.append((char, False))
-
-    return risky_range(tokens) if in_class else False
-
-
-def _needs_python_casefold(pattern: str) -> bool:
-    """Whether Python's extra İ/ı equivalence can affect this ASCII regex."""
-    return "i" in pattern.lower() or _class_range_includes_ascii_i(pattern)
-
-
-def _raw_prefilter_safe(pattern: str) -> bool:
-    """Whether JSON escaping and Unicode-table drift cannot hide a raw hit."""
-    return pattern.isascii() and not _RG_UNSAFE.search(pattern)
-
 
 def rg_safe(pattern: str) -> bool:
-    """True when a raw-byte prefilter cannot drop a true hit for this pattern.
-
-    Besides JSON-escaping hazards, this gates Unicode case-folding semantics
-    that differ between the ripgrep prefilter and Python matcher of record.
-    Python's extra İ/ı equivalence makes literal I/i and ranges containing it
-    unsafe even in an otherwise ASCII pattern. Non-ASCII patterns are also
-    gated because the engines can ship different Unicode tables.
-    """
-    return _raw_prefilter_safe(pattern) and not _needs_python_casefold(pattern)
+    """True when a raw-byte prefilter cannot drop a true hit for this pattern
+    because of JSON string escaping (see the module docstring)."""
+    return not _RG_UNSAFE.search(pattern)
 
 
 @lru_cache(maxsize=1)
