@@ -466,6 +466,40 @@ class Corpus:
             if (matched := [f for f in tf if f in hits])
         ]
 
+    def matching_lines(
+        self, patterns: Sequence[str]
+    ) -> Optional[list[tuple[SessionRef, dict[Path, list[int]]]]]:
+        """(ref, {file: byte offsets of matching lines}) for refs with a hit.
+
+        LINE-granular prefilter for cross-session search: a JSONL line is one
+        entry, so only these lines need parsing. A superset of the matching
+        entries under the same `rg_safe` argument as `candidate_refs`.
+
+        Returns None when a line-level answer can't be trusted — an rg-unsafe
+        pattern, no rg on PATH, or a scan failure — and the caller falls back
+        to the file-level path.
+        """
+        if not patterns or not all(rg_safe(p) for p in patterns):
+            return None
+        rg = _rg_path()
+        if rg is None:
+            return None
+        ref_files = [(ref, ref.transcript_files()) for ref in self.refs]
+        files = [f for _, tf in ref_files for f in tf]
+        try:
+            hits = RgScanner(rg).lines_with_match(patterns, files)
+        except ScannerError as e:
+            print(
+                f"[cc-explorer corpus] line prefilter failed ({e}); falling back",
+                file=sys.stderr,
+            )
+            return None
+        return [
+            (ref, matched)
+            for ref, tf in ref_files
+            if (matched := {f: hits[f] for f in tf if f in hits})
+        ]
+
     def candidate_refs(self, patterns: Sequence[str]) -> list[SessionRef]:
         """Refs that MAY match any pattern — a superset by construction.
 
@@ -572,16 +606,42 @@ class RgScanner:
         self, patterns: Sequence[str], files: Sequence[Path]
     ) -> set[Path]:
         hits: set[Path] = set()
-        if not files or not patterns:
-            return hits
+        for line in self._run(["--files-with-matches"], patterns, files):
+            if line:
+                hits.add(Path(line))
+        return hits
 
-        base = [
-            self._rg,
-            "--files-with-matches",
-            "--ignore-case",
-            "--no-messages",
-            "--no-config",
-        ]
+    def lines_with_match(
+        self, patterns: Sequence[str], files: Sequence[Path]
+    ) -> dict[Path, list[int]]:
+        """{file: byte offsets where its matching lines start}.
+
+        `--max-columns 1` replaces every (always longer) JSONL line with an
+        omission notice, so output stays one short row per matching line no
+        matter how large the line is; `--byte-offset` without `--only-matching`
+        reports the line's start, which is where the parser seeks.
+        """
+        hits: dict[Path, list[int]] = {}
+        flags = ["--byte-offset", "--null", "--no-heading", "--with-filename",
+                 "--max-columns", "1"]
+        for line in self._run(flags, patterns, files):
+            path, sep, rest = line.partition("\0")
+            if not sep:
+                continue
+            offset, _, _ = rest.partition(":")
+            if offset.isdigit():
+                hits.setdefault(Path(path), []).append(int(offset))
+        return hits
+
+    def _run(
+        self, flags: list[str], patterns: Sequence[str], files: Sequence[Path]
+    ) -> list[str]:
+        """rg's stdout lines over `files`, batched under the argv budget."""
+        out: list[str] = []
+        if not files or not patterns:
+            return out
+
+        base = [self._rg, *flags, "--ignore-case", "--no-messages", "--no-config"]
         for p in patterns:
             base += ["--regexp", p]
         base.append("--")
@@ -603,9 +663,7 @@ class RgScanner:
                 raise ScannerError(
                     f"rg exited {proc.returncode}: {proc.stderr.strip()[:500]}"
                 )
-            for line in proc.stdout.splitlines():
-                if line:
-                    hits.add(Path(line))
+            out.extend(proc.stdout.splitlines())
 
         batch: list[str] = []
         size = 0
@@ -617,7 +675,7 @@ class RgScanner:
                 run(batch)
                 batch, size = [], 0
         run(batch)
-        return hits
+        return out
 
 
 class PyScanner:

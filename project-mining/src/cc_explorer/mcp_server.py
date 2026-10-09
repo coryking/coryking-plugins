@@ -16,7 +16,7 @@ import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal, Optional, TypeVar
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -89,6 +89,7 @@ from .responses import (
 from .search import (
     ENTRY_TYPE_MAP,
     ConversationRole,
+    SessionHead,
     SessionInfo,
     browse_session_turns,
     conversation_types_for,
@@ -96,6 +97,7 @@ from .search import (
     promote_refs,
     search_multi,
     sort_sessions_newest_first,
+    triage_lines,
     triage_multi,
 )
 from .subagents import (
@@ -538,11 +540,14 @@ def _as_utc(dt: datetime) -> datetime:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 
+_Session = TypeVar("_Session", SessionInfo, SessionHead)
+
+
 def _filter_by_date(
-    sessions: list[SessionInfo],
+    sessions: list[_Session],
     after: datetime | None,
     before: datetime | None,
-) -> list[SessionInfo]:
+) -> list[_Session]:
     """Filter sessions by date range. Naive datetimes treated as UTC."""
     if after:
         after = _as_utc(after)
@@ -594,8 +599,8 @@ def _current_claude_session_id() -> str | None:
 
 
 def _exclude_current_session(
-    sessions: list[SessionInfo], include_current: bool
-) -> tuple[list[SessionInfo], PrefixId | None]:
+    sessions: list[_Session], include_current: bool
+) -> tuple[list[_Session], PrefixId | None]:
     """Drop the calling session from a list unless the caller opted to keep it.
 
     Returns (kept_sessions, excluded_id). excluded_id is set only when a
@@ -894,36 +899,59 @@ def search_projects(
         if not corpus.refs:
             raise no_match_error
 
-    # Raw-byte prefilter: cost scales with the answer, not the corpus. The
-    # candidate set is a SUPERSET of true hits (rg-unsafe patterns or scanner
-    # failure fall back to scan-all); only candidates are parsed, and the typed
-    # matcher below (triage_multi -> _entry_matches) remains matcher of record.
-    candidates = corpus.candidate_refs(patterns)
-    if not candidates:
-        raise no_match_error
+    base_types = ENTRY_TYPE_MAP[role]
 
-    sessions = promote_refs(candidates)
-    sort_sessions_newest_first(sessions)
-
-    sessions = _filter_by_date(sessions, after, before)
-    sessions, excluded = _exclude_current_session(sessions, include_current_session)
-    if not sessions and excluded:
+    def only_current_session_error(excluded: PrefixId) -> ToolError:
         # The calling conversation was the only session in scope. Don't blame
         # the patterns — point at the exclusion and how to override it.
-        raise ToolError(
+        return ToolError(
             f"The only session in scope is the calling conversation ({excluded}), "
             f"excluded by default. Pass include_current_session=true to search it."
         )
 
-    base_types = ENTRY_TYPE_MAP[role]
-
-    all_results = triage_multi(
-        sessions,
-        patterns,
-        base_types=base_types,
-        example_width=excerpt_width,
-        errors_only=errors_only,
-    )
+    # Line-level prefilter: rg names the matching LINES, and since one JSONL
+    # line is one entry only those get parsed — cost scales with the hits, not
+    # with the size of the files they live in. Session dates come from the head
+    # of each transcript. The typed matcher (_entry_matches) stays the matcher
+    # of record over the (superset) candidate lines.
+    line_hits = corpus.matching_lines(patterns)
+    if line_hits is not None:
+        if not line_hits:
+            raise no_match_error
+        heads = [SessionHead.load(ref) for ref, _ in line_hits]
+        sort_sessions_newest_first(heads)
+        heads = _filter_by_date(heads, after, before)
+        heads, excluded = _exclude_current_session(heads, include_current_session)
+        if not heads and excluded:
+            raise only_current_session_error(excluded)
+        offsets = {f: o for _, files in line_hits for f, o in files.items()}
+        all_results = triage_lines(
+            heads,
+            offsets,
+            patterns,
+            base_types=base_types,
+            example_width=excerpt_width,
+            errors_only=errors_only,
+        )
+    else:
+        # File-level fallback (rg-unsafe pattern, no rg, or scan failure):
+        # promote candidate sessions and parse them whole.
+        candidates = corpus.candidate_refs(patterns)
+        if not candidates:
+            raise no_match_error
+        sessions = promote_refs(candidates)
+        sort_sessions_newest_first(sessions)
+        sessions = _filter_by_date(sessions, after, before)
+        sessions, excluded = _exclude_current_session(sessions, include_current_session)
+        if not sessions and excluded:
+            raise only_current_session_error(excluded)
+        all_results = triage_multi(
+            sessions,
+            patterns,
+            base_types=base_types,
+            example_width=excerpt_width,
+            errors_only=errors_only,
+        )
 
     # Check if anything matched
     if not any(r for _, results in all_results for r in results):

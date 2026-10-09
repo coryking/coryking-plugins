@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol, Sequence, TYPE_CHECKING
+from datetime import datetime
+from typing import Any, Mapping, Protocol, Sequence, TYPE_CHECKING
 
 from ..models import TranscriptEntry
 from ..utils import PrefixId
@@ -51,6 +52,17 @@ class TranscriptProvider(Protocol):
     ) -> list[ProviderSession]: ...
 
     def load_transcript(self, paths: Sequence[Path]) -> list[TranscriptEntry]: ...
+
+    def load_entries_at(
+        self, paths: Sequence[Path], offsets: Mapping[Path, Sequence[int]]
+    ) -> list[TranscriptEntry]:
+        """The entries `load_transcript(paths)` would yield for just the lines
+        starting at `offsets[path]` — line-level parsing for search."""
+        ...
+
+    def first_timestamp(self, paths: Sequence[Path]) -> datetime | None:
+        """The first entry's timestamp, read from the head of the transcript."""
+        ...
 
     def discover_usage(self, selectors: Sequence[str] | None = None) -> UsageDiscovery: ...
 

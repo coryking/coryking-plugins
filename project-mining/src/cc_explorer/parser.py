@@ -15,6 +15,7 @@ import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator, Optional, Sequence, Union, cast
 
@@ -25,6 +26,7 @@ from pydantic import BaseModel
 from .utils import PrefixId
 from .models import (
     AssistantTranscriptEntry,
+    BaseTranscriptEntry,
     ContentItem,
     FileSnapshotEntry,
     HumanEntry,
@@ -406,29 +408,16 @@ def _load_transcript(path: Path) -> CachedTranscript:
     unsupported = 0
     with open(resolved, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
-            line = line.strip()
-            if not line:
-                continue
             try:
-                data = orjson.loads(line)
-            except orjson.JSONDecodeError:
-                malformed += 1
-                continue
-            if (
-                not isinstance(data, dict)
-                or not isinstance(data.get("type"), str)
-                or not data["type"]
-            ):
-                malformed += 1
-                continue
-            if data["type"] in _STRUCTURAL_LINE_TYPES:
-                continue
-            try:
-                entries.append(create_transcript_entry(data))
+                entry = parse_line(line)
             except UnsupportedTranscriptType:
                 unsupported += 1
-            except Exception:
+                continue
+            except MalformedLine:
                 malformed += 1
+                continue
+            if entry is not None:
+                entries.append(entry)
 
     cached = CachedTranscript(
         mtime=mtime,
@@ -439,6 +428,86 @@ def _load_transcript(path: Path) -> CachedTranscript:
     )
     _cache.put(resolved, cached)
     return cached
+
+
+class MalformedLine(ValueError):
+    """A JSONL line that is not a well-formed transcript record."""
+
+
+def parse_line(line: str | bytes) -> Optional[TranscriptEntry]:
+    """Parse one JSONL line into its typed entry — one line is one entry.
+
+    Returns None for blank lines and structural headers. Raises
+    UnsupportedTranscriptType for record types the parser does not model and
+    MalformedLine for anything else that fails to parse.
+    """
+    if isinstance(line, bytes):
+        line = line.decode("utf-8", errors="replace")
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        data = orjson.loads(line)
+    except orjson.JSONDecodeError:
+        raise MalformedLine("invalid JSON")
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("type"), str)
+        or not data["type"]
+    ):
+        raise MalformedLine("record without a type")
+    if data["type"] in _STRUCTURAL_LINE_TYPES:
+        return None
+    try:
+        return create_transcript_entry(data)
+    except UnsupportedTranscriptType:
+        raise
+    except Exception as e:
+        raise MalformedLine(str(e))
+
+
+def load_entries_at(path: Path, offsets: Sequence[int]) -> list[TranscriptEntry]:
+    """Parse only the lines that start at `offsets` (byte offsets, any order).
+
+    The line-level counterpart of `load_transcript` for cross-session search:
+    a raw-byte scan names the matching lines and only those get parsed.
+    Unparseable lines are skipped — the same lines `load_transcript` drops —
+    and counted in the parser diagnostics (for the lines read, not the file).
+    Bypasses the transcript cache (it holds whole files, and these are not).
+    """
+    entries: list[TranscriptEntry] = []
+    malformed = 0
+    unsupported = 0
+    with open(path, "rb") as f:
+        for offset in sorted(set(offsets)):
+            f.seek(offset)
+            try:
+                entry = parse_line(f.readline())
+            except UnsupportedTranscriptType:
+                unsupported += 1
+                continue
+            except MalformedLine:
+                malformed += 1
+                continue
+            if entry is not None:
+                entries.append(entry)
+    with collect_parser_diagnostics() as diagnostics:
+        diagnostics.record(path.resolve(), malformed, unsupported)
+    return entries
+
+
+def first_timestamp(path: Path) -> Optional[datetime]:
+    """Timestamp of the first timestamped entry — `SessionInfo.first_timestamp`
+    read from the head of the file instead of a full parse."""
+    with open(path, "rb") as f:
+        for line in f:
+            try:
+                entry = parse_line(line)
+            except (UnsupportedTranscriptType, MalformedLine):
+                continue
+            if isinstance(entry, BaseTranscriptEntry):
+                return entry.timestamp
+    return None
 
 
 @dataclass(frozen=True)

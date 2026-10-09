@@ -47,9 +47,12 @@ def test_search_result_survives_capture_cap(tmp_path, monkeypatch, capsys, file_
         assert captured.out == ""
         assert len(captured.err.splitlines()) == 1
         assert len(captured.err) < 512
+        # search_projects parses only the lines rg matched: per file, the
+        # matching entry plus the unsupported agent-setting record that also
+        # names the target. The malformed lines never match, so never parse.
         assert f"{file_count} transcript(s)" in captured.err
-        assert f"{file_count * 2} malformed" in captured.err
-        assert f"{file_count * 2} unsupported" in captured.err
+        assert "0 malformed" in captured.err
+        assert f"{file_count} unsupported" in captured.err
         serialized = json.dumps(result.structured_content)
         visible = (captured.err + serialized)[:20_000]
         assert serialized in visible
