@@ -13,7 +13,7 @@ from datetime import datetime
 from enum import Enum
 from functools import cached_property
 from pathlib import Path
-from typing import Iterable, Optional, TypeGuard
+from typing import Iterable, Mapping, Optional, Sequence, TypeGuard
 
 from .models import (
     AssistantTranscriptEntry,
@@ -49,7 +49,9 @@ class ConversationRole(str, Enum):
     all = "all"
 
 
-def sort_sessions_newest_first(sessions: list["SessionInfo"]) -> None:
+def sort_sessions_newest_first(
+    sessions: list["SessionInfo"] | list["SessionHead"],
+) -> None:
     """Sort sessions in place, newest first; None timestamps sort last."""
     sessions.sort(key=lambda s: s.first_timestamp or _EPOCH, reverse=True)
 
@@ -317,6 +319,44 @@ class SessionInfo:
         )
 
 
+@dataclass(frozen=True)
+class SessionHead:
+    """A session as cross-session search needs it: its identity plus its first
+    timestamp, read from the head of the transcript instead of a full parse.
+
+    Exposes the attributes search results, date filtering, and current-session
+    exclusion read off a SessionInfo, so either can label a TriageResult.
+    """
+
+    ref: SessionRef
+    first_timestamp: Optional[datetime]
+
+    @classmethod
+    def load(cls, ref: SessionRef) -> "SessionHead":
+        return cls(
+            ref=ref,
+            first_timestamp=provider_for(ref.harness).first_timestamp(
+                ref.paths or (ref.path,)
+            ),
+        )
+
+    @property
+    def session_id(self) -> PrefixId:
+        return self.ref.session_id
+
+    @property
+    def path(self) -> Path:
+        return self.ref.path
+
+    @property
+    def project_path(self) -> str:
+        return self.ref.project_path
+
+    @property
+    def harness(self) -> Harness:
+        return self.ref.harness
+
+
 @dataclass
 class TriageResult:
     """Match count for a single session.
@@ -326,7 +366,7 @@ class TriageResult:
     (the count itself sums across the session's whole corpus).
     """
 
-    session: SessionInfo
+    session: SessionInfo | SessionHead
     count: int
     first_match_example: str = ""  # example excerpt from first matching entry
     agent_id: Optional[PrefixId] = None
@@ -653,6 +693,56 @@ def triage(
     return results
 
 
+_Accum = dict[int, dict[int, tuple[int, str, Optional[PrefixId]]]]
+
+
+def _tally(
+    accum: _Accum,
+    si: int,
+    entries: Iterable[TranscriptEntry],
+    agent_id: Optional[PrefixId],
+    compiled: list[tuple[str, re.Pattern]],
+    search_types: tuple[type, ...],
+    hide: frozenset[str],
+    errors_only: bool,
+    example_width: int,
+) -> None:
+    """Count every pattern hit in `entries` into accum[pattern][session]."""
+    for entry in entries:
+        if not _is_searchable(entry, search_types):
+            continue
+        for pi, (_, regex) in enumerate(compiled):
+            if _entry_matches(entry, regex, hide, errors_only):
+                count, example, first_agent = accum[pi].get(si, (0, "", None))
+                if not example:
+                    example = _match_example(
+                        entry.display(truncate=0, hide=hide), regex, width=example_width
+                    )
+                    first_agent = agent_id
+                accum[pi][si] = (count + 1, example, first_agent)
+
+
+def _triage_results(
+    accum: _Accum,
+    compiled: list[tuple[str, re.Pattern]],
+    sessions: list[SessionInfo] | list[SessionHead],
+) -> PatternTriageResults:
+    results: PatternTriageResults = []
+    for pi, (pat, _) in enumerate(compiled):
+        session_results = [
+            TriageResult(
+                session=sessions[si],
+                count=count,
+                first_match_example=example,
+                agent_id=agent_id,
+            )
+            for si, (count, example, agent_id) in accum[pi].items()
+        ]
+        session_results.sort(key=lambda r: r.count, reverse=True)
+        results.append((pat, session_results))
+    return results
+
+
 def triage_multi(
     sessions: list[SessionInfo],
     patterns: list[str],
@@ -669,47 +759,56 @@ def triage_multi(
     """
     compiled = [(pat, re.compile(pat, re.IGNORECASE)) for pat in patterns]
     search_types = search_types_for(hide, base_types, errors_only)
-
-    # Per-pattern accumulators: {pattern_index: {session_index: (count, first_example, first_agent_id)}}
-    accum: dict[int, dict[int, tuple[int, str, Optional[PrefixId]]]] = {
-        i: {} for i in range(len(compiled))
-    }
+    accum: _Accum = {i: {} for i in range(len(compiled))}
 
     for si, session in enumerate(sessions):
         if session.is_conversion_artifact:
             continue
         # Search the whole corpus: main transcript + every subagent body (#22).
         for source in session_sources(session):
-            entries = load_source_transcript(source)
-            for entry in entries:
-                if not _is_searchable(entry, search_types):
-                    continue
-                for pi, (_, regex) in enumerate(compiled):
-                    if _entry_matches(entry, regex, hide, errors_only):
-                        count, example, agent_id = accum[pi].get(si, (0, "", None))
-                        if not example:
-                            example = _match_example(
-                                entry.display(truncate=0, hide=hide), regex, width=example_width
-                            )
-                            agent_id = source.agent_id
-                        accum[pi][si] = (count + 1, example, agent_id)
-
-    results: PatternTriageResults = []
-    for pi, (pat, _) in enumerate(compiled):
-        session_results: list[TriageResult] = []
-        for si, (count, example, agent_id) in accum[pi].items():
-            session_results.append(
-                TriageResult(
-                    session=sessions[si],
-                    count=count,
-                    first_match_example=example,
-                    agent_id=agent_id,
-                )
+            _tally(
+                accum, si, load_source_transcript(source), source.agent_id,
+                compiled, search_types, hide, errors_only, example_width,
             )
-        session_results.sort(key=lambda r: r.count, reverse=True)
-        results.append((pat, session_results))
 
-    return results
+    return _triage_results(accum, compiled, sessions)
+
+
+def triage_lines(
+    sessions: list[SessionHead],
+    line_hits: Mapping[Path, Sequence[int]],
+    patterns: list[str],
+    base_types: tuple[type, ...] = (HumanEntry,),
+    example_width: int = 150,
+    hide: frozenset[str] = frozenset(),
+    errors_only: bool = False,
+) -> PatternTriageResults:
+    """`triage_multi` that parses only the lines a raw-byte scan matched.
+
+    `line_hits` maps each transcript file to the byte offsets of its matching
+    lines (`Corpus.matching_lines`). One JSONL line is one entry and the
+    raw-byte scan over-selects, so the typed matcher over just these entries
+    produces the same counts as a full parse — at a cost proportional to the
+    hits rather than the size of the files they live in.
+    """
+    compiled = [(pat, re.compile(pat, re.IGNORECASE)) for pat in patterns]
+    search_types = search_types_for(hide, base_types, errors_only)
+    accum: _Accum = {i: {} for i in range(len(compiled))}
+
+    for si, head in enumerate(sessions):
+        if read_provenance(head.path) is not None:
+            continue
+        for source in session_sources(head.ref):
+            files = source.paths or (source.path,)
+            if not any(f in line_hits for f in files):
+                continue
+            entries = provider_for(source.harness).load_entries_at(files, line_hits)
+            _tally(
+                accum, si, entries, source.agent_id,
+                compiled, search_types, hide, errors_only, example_width,
+            )
+
+    return _triage_results(accum, compiled, sessions)
 
 
 def search_multi(

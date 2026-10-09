@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import orjson
 
@@ -167,8 +167,21 @@ class CodexProvider:
         return thread_id, cwd, plan
 
     @staticmethod
+    def _in_window(data: Any, start_ordinal: int | None) -> bool:
+        """Whether a decoded rollout line belongs to the session's own history."""
+        if not isinstance(data, dict):
+            return False
+        # A child rollout's own session_meta sits before its history
+        # cutoff; it describes the child, so it is never inherited prefix.
+        return (
+            start_ordinal is None
+            or data.get("type") == "session_meta"
+            or data.get("ordinal", 0) >= start_ordinal
+        )
+
+    @classmethod
     def _records(
-        path: Path, byte_limit: int | None, start_ordinal: int | None
+        cls, path: Path, byte_limit: int | None, start_ordinal: int | None
     ) -> Iterator[dict[str, Any]]:
         """Parsed records of one rollout within its planned byte/ordinal window."""
         with path.open("rb") as stream:
@@ -180,17 +193,32 @@ class CodexProvider:
                     data = orjson.loads(line)
                 except orjson.JSONDecodeError:
                     continue
-                if not isinstance(data, dict):
+                if cls._in_window(data, start_ordinal):
+                    yield data
+
+    def _first_turn_context(
+        self, path: Path, byte_limit: int | None, start_ordinal: int | None
+    ) -> int | None:
+        """Byte offset of the first in-window turn_context record, or None.
+
+        User messages before it are harness scaffolding (see `_iter_file`).
+        A raw-byte probe, so only candidate lines are decoded.
+        """
+        with path.open("rb") as probe:
+            while byte_limit is None or probe.tell() < byte_limit:
+                offset = probe.tell()
+                line = probe.readline()
+                if not line:
+                    break
+                if b'"type":"turn_context"' not in line and b'"type": "turn_context"' not in line:
                     continue
-                # A child rollout's own session_meta sits before its history
-                # cutoff; it describes the child, so it is never inherited prefix.
-                if (
-                    start_ordinal is not None
-                    and data.get("type") != "session_meta"
-                    and data.get("ordinal", 0) < start_ordinal
-                ):
+                try:
+                    data = orjson.loads(line)
+                except orjson.JSONDecodeError:
                     continue
-                yield data
+                if self._in_window(data, start_ordinal) and data.get("type") == "turn_context":
+                    return offset
+        return None
 
     def session_records(self, paths: Sequence[Path]) -> list[dict[str, Any]]:
         """Every raw rollout record belonging to a session, in order.
@@ -205,28 +233,63 @@ class CodexProvider:
         thread_id, cwd, plan = self._plan(paths)
         entries: list[TranscriptEntry] = []
         for path, limit, start in plan:
-            entries.extend(self._parse_file(path, thread_id, cwd, limit, start))
+            entries.extend(self._iter_file(path, thread_id, cwd, limit, start))
         return entries
 
-    def _parse_file(
+    def load_entries_at(
+        self, paths: Sequence[Path], offsets: Mapping[Path, Sequence[int]]
+    ) -> list[TranscriptEntry]:
+        """`load_transcript` restricted to the lines starting at `offsets`.
+
+        Honors the same plan: revert-chain byte limits, the child-history
+        ordinal window, and the turn_context gate on user messages.
+        """
+        thread_id, cwd, plan = self._plan(paths)
+        entries: list[TranscriptEntry] = []
+        for path, limit, start in plan:
+            wanted = sorted(
+                o for o in set(offsets.get(path, ())) if limit is None or o < limit
+            )
+            if not wanted:
+                continue
+            gate = self._first_turn_context(path, limit, start)
+            with path.open("rb") as stream:
+                for offset in wanted:
+                    stream.seek(offset)
+                    try:
+                        data = orjson.loads(stream.readline())
+                    except orjson.JSONDecodeError:
+                        continue
+                    if not self._in_window(data, start) or data.get("type") == "turn_context":
+                        continue
+                    entry = self._normalize(
+                        data, thread_id, cwd, allow_user=gate is None or gate < offset
+                    )
+                    if entry is not None:
+                        entries.append(entry)
+        return entries
+
+    def first_timestamp(self, paths: Sequence[Path]) -> datetime | None:
+        thread_id, cwd, plan = self._plan(paths)
+        for path, limit, start in plan:
+            for entry in self._iter_file(path, thread_id, cwd, limit, start):
+                return entry.timestamp
+        return None
+
+    def _iter_file(
         self,
         path: Path,
         thread_id: str,
         cwd: str,
         byte_limit: int | None,
         start_ordinal: int | None,
-    ) -> list[TranscriptEntry]:
-        entries: list[TranscriptEntry] = []
-        has_turn_context = False
-        with path.open("rb") as probe:
-            while byte_limit is None or probe.tell() < byte_limit:
-                line = probe.readline()
-                if not line:
-                    break
-                if b'"type":"turn_context"' in line or b'"type": "turn_context"' in line:
-                    has_turn_context = True
-                    break
-        turn_context_seen = not has_turn_context
+    ) -> Iterator[TranscriptEntry]:
+        # Codex injects environment/AGENTS.md text as user messages before the
+        # first turn_context; when a rollout has one, user items before it are
+        # scaffolding, not the human.
+        turn_context_seen = (
+            self._first_turn_context(path, byte_limit, start_ordinal) is None
+        )
         for data in self._records(path, byte_limit, start_ordinal):
             if data.get("type") == "turn_context":
                 turn_context_seen = True
@@ -235,8 +298,7 @@ class CodexProvider:
                 data, thread_id, cwd, allow_user=turn_context_seen
             )
             if entry is not None:
-                entries.append(entry)
-        return entries
+                yield entry
 
     @staticmethod
     def _text_blocks(content: Any) -> str:
