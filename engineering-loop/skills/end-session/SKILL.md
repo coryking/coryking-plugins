@@ -25,11 +25,10 @@ for assessment only still means assessment only.
 
 ## Release their attention, then do the work
 
-Explicitly acknowledge when end-session is engaged. If the user gives a playful
-send-off, respond with a brief, fitting retort and connect it to the action—for
-example: “Helmets on—end-session engaged. I'll put everything away.” Match their
-tone; don't force a joke when there's no cue. This acknowledgment announces the
-start of closeout; the final status still follows verification.
+Explicitly acknowledge when end-session is engaged. When the user gives a playful
+send-off, answer in kind: recognize the reference and give a short retort in the
+same style, then say you're starting closeout. The final status still follows
+verification.
 
 Use the assignment, the conversation, and relevant observable state to judge whether
 you can close this out. The boundary is this session's contribution: it may be one
