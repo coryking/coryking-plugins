@@ -92,12 +92,14 @@ actually need. Substantive unfinished work warrants a concrete answer, not a fal
 
 ## Leave a receipt
 
-Always begin the final message with an explicit end-session status so the user can
+Always end the final message with an explicit end-session status so the user can
 recognize the closeout when returning to the conversation later. After verified
 closeout, say **“End-session complete — this session is ready to close.”** If
 closeout is blocked, say **“End-session blocked — this session is not ready to
 close.”** For an assessment-only request, say **“End-session assessment only”**
 and state whether the session is ready; do not imply cleanup was performed.
+Make this status the very last line of the turn, after the receipt and any other
+details. Do not place anything after it.
 
 Verify the resulting state and leave a short final confirmation: what was delivered
 and backed up, what was cleaned up, and anything intentionally remaining or blocked.
