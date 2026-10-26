@@ -109,59 +109,18 @@ from .subagents import (
     scan_output_file_stats,
 )
 
-_INSTRUCTIONS = """\
-cc-explorer explores Claude Code and Codex transcript history stored as local
-JSONL files. Search/list/read tools span both harnesses by default; pass
-`harnesses=["claude"]` or `harnesses=["codex"]` to narrow them. Projects are
-selected with `projects` (paths or bare names; git
-worktrees are flattened into one project). Omit `projects` to search across ALL
-projects — the recall path when you remember a conversation but not where it
-happened. Every result names its harness. Claude search includes nested subagent
-bodies; Codex subagents are independent rollout sessions linked by metadata.
-
-1. Conversations — find and read what was discussed.
-   When you don't know the project, start with search_projects (omit `projects`)
-   to find which project/session a phrase lives in, or list_projects to see what
-   exists. Within a project, orient with list_project_sessions (like `ls`), then
-   zoom in: grep_session / grep_sessions for matches-in-context, read_turn /
-   browse_session to read at full fidelity. Every result carries its `project`,
-   so pass that back to scope follow-ups. In agent-team sessions, a user turn
-   that is a teammate DM (orchestration, not the human) renders labeled as
-   `[teammate: sender -> recipient] ...` rather than raw <teammate-message> XML.
-
-2. Claude agent forensics — see what a session's subagents actually did.
-   Start from list_project_sessions(min_agents=1) to find sessions that spawned
-   agents, then list_session_agents to see every agent the session ran (workflow
-   ones included), get_agent_detail for one agent's prompt / result / tool-trace,
-   and audit_session_tools to check whether the agents used their tools correctly
-   (per-tool counts, error rates, retries).
-
-3. Failures — what broke, without guessing what the errors said.
-   survey_failures is the landing page: every failed tool call in a window,
-   classified by kind and category, counted per tool and per session. Then
-   drill in with grep_session / grep_sessions / search_projects using
-   errors_only=true, which restricts hits to failed tool calls so the pattern
-   narrows the TOPIC ("ssh", "psql") rather than the error vocabulary.
-
-4. Attention reconstruction — what a window of agent-driving looked like.
-   get_activity_timeline rolls every project's transcripts over a time window
-   into a turn-count grid plus pre-computed attention rollups (sessions running
-   at once, peaks, hands-on vs autonomous time). Session ids and projects it
-   returns pass straight back to the tools above.
-
-5. Usage accounting — get_usage_report selects an observed workload, includes
-   discoverable descendants, and reports tokens/coverage before detail. Audit
-   native counters and source locators with get_usage_observations. No rates or
-   prices are calculated; unknown categories/configuration stay explicit.
-
-6. Interview — ask a past session what it meant, when grep can't answer.
-   convert_session copies the session into a resumable subagent; SendMessage
-   resumes it (no agent-teams needed — if SendMessage is not in your toolset it
-   is deferred, so load it with ToolSearch query "select:SendMessage"); send ONE
-   batched message with every question (splitting re-bills the replayed
-   context); then delete_conversions(ids=[created_id], force=true).
-   For a question-shaped investigation rather than a single lookup, dispatch the
-   session-researcher agent and let it drive this loop in its own context.
+_INSTRUCTIONS = """Read Claude Code and Codex conversation history through search, grep and turn reads.
+Search spans both harnesses and all projects unless narrowed; list_project_sessions
+instead defaults to the server's current project. Search/grep role defaults to all.
+Use absolute project paths and returned identifiers for follow-ups; prefer full
+identities when supplied. Short prefixes can be ambiguous.
+Entry lines are turn_id|timestamp|role|full_length|display (U user/orchestration,
+A assistant, T tool result); full_length is characters, not token consumption.
+Excerpt limits preserve hit counts and expose omitted matches; widen specific reads
+when context matters. Empty discovery results are successful results. Agent-forensic
+tools inspect Claude children; Codex children are separate sessions. Usage reports
+measure observed tokens, not money. Conversion tools create or mutate marked copies
+only; they never modify original sessions. Resume support depends on the harness.
 """
 
 # =============================================================================
@@ -800,27 +759,13 @@ def list_project_sessions(
         Field(description="Only sessions before this datetime."),
     ] = None,
 ) -> SessionListResponse:
-    """List conversations in a project with stats: dates, message counts, human prompts, token usage, tool calls, agent dispatches.
-
-    This is the orientation step — like `ls -la` on the project's chat history. Use it to see what exists before searching. Each row carries its `project` plus two agent counts: `agents` (dispatched directly) and `agents_present` (the full population including workflow orphans) — a gap between them means the session orchestrated workflows. `user_turns` (human prompts) against a high message/agent count flags a single prompt that fanned out into a long autonomous run. Pass min_agents=1 to narrow to sessions that ran subagents — the starting point for agent forensics (then drill in with list_session_agents / get_agent_detail / audit_session_tools). The calling conversation, if present, is kept but flagged `is_current: true` so you can tell which row is the session you're in.
-
-    Defaults to the CURRENT project (CWD). Pass `projects` to list one or more named projects instead; to enumerate the projects themselves use list_projects, and to find a conversation when you don't know its project use search_projects.
-    """
+    """List sessions and statistics. Defaults to the current project; empty filters return an empty list. agents counts direct dispatches; agents_present includes discovered workflow children. Browsing token estimates are not usage accounting."""
     proj_sel = projects if projects else [resolve_project(None)]
     sessions, _ = _load_all_sessions(proj_sel, harnesses, after)
-    if not sessions:
-        raise ToolError(
-            f"No conversations found for {', '.join(proj_sel)}"
-            + (f" written since {after.isoformat()}" if after else "")
-        )
-
     sessions = [s for s in sessions if s.message_count >= min_messages]
     sessions = [s for s in sessions if s.stats.tool_use_count >= min_tools]
     sessions = [s for s in sessions if s.agents_present >= min_agents]
     sessions = _filter_by_date(sessions, after, before)
-
-    if not sessions:
-        raise ToolError("No conversations match filters")
 
     return SessionListResponse.from_sessions(sessions, current_session=_current_session_id())
 
@@ -838,9 +783,9 @@ def search_projects(
     role: Annotated[
         ConversationRole,
         Field(
-            description="Which side of the conversation to search: 'user' for human messages, 'assistant' for agent responses, 'all' for both."
+            description="Role filter, default 'all': 'user' includes human and orchestration messages; 'assistant' includes agent actions and results; 'all' includes both."
         ),
-    ] = ConversationRole.user,
+    ] = ConversationRole.all,
     after: Annotated[
         datetime | None,
         Field(description="Only search sessions after this datetime."),
@@ -864,32 +809,19 @@ def search_projects(
         Field(description=_ERRORS_ONLY_DESC),
     ] = False,
 ) -> SearchProjectsResponse:
-    """Scan chat history across one or many projects for patterns, grouped by pattern with hit counts and per-project/session breakdowns.
-
-    This is the cross-project recall surface: omit `projects` to search EVERY project at once when you remember a conversation but not where it happened. Each example hit names the `project` (and the `agent`, if the hit was inside a subagent body) so you can switch to that project and drill in. Pass `projects` to scope to specific ones.
-
-    Search is exhaustive by default and spans the whole corpus: conversation text, tool inputs (Bash commands, file paths, grep patterns), tool outputs, assistant thinking — and subagent transcripts, not just the main session. The pattern is the precision tool — use tight regex to narrow noisy searches.
-
-    Pass all your candidate search terms at once — each gets its own hit count and breakdown so you can see which terms are useful. Use separate patterns rather than regex OR pipes (e.g. ["facebook.*scrape", "fb_capture"] not "facebook.*scrape|fb_capture"). Results are sorted by hit count (hottest first). Follow up with grep_session (scoped to the returned project) or get_agent_detail (for an `agent` hit).
-
-    Set errors_only=true to search only FAILED tool calls — the pattern then narrows the topic instead of having to guess the error's wording.
-    """
+    """Search case-insensitive regex patterns across projects and both harnesses. Defaults to role='all' and excludes the calling session. Returns per-pattern counts and bounded example locators; zero matches is a normal empty result. Follow examples with grep or read_turn."""
+    if not patterns:
+        raise ToolError("patterns must contain at least one pattern")
     proj_paths = resolve_projects(projects)
     corpus = Corpus.discover(proj_paths, harnesses=harnesses)
-    if not corpus.refs:
-        raise ToolError(f"No conversations found for: {', '.join(proj_paths) or '(no projects)'}")
-    # mtime prune before the raw-byte scan and parse: with `after` set, files
-    # untouched since then are never read. `_filter_by_date` below stays the
-    # filter of record (and handles `before`, which mtime cannot prune).
     if after:
         corpus = corpus.written_since(_as_utc(after))
 
-    no_match_error = ToolError(
-        f"No matches for: {', '.join(patterns)} across {len(proj_paths)} project(s)"
-        + (" (errors_only)" if errors_only else "")
-        + ". Patterns are case-insensitive regex — try shorter or broader terms, set "
-        "role='all' to search both sides, or widen the date range."
-    )
+    def empty_result(excluded=None):
+        return SearchProjectsResponse(
+            total_hits=0, projects_searched=len(proj_paths), matches=[],
+            excluded_current_session=excluded,
+        )
 
     # errors_only narrows the corpus BEFORE the pattern prefilter: `is_error` is
     # a literal in the raw JSONL, so it names the ~40% of files that can hold a
@@ -897,17 +829,9 @@ def search_projects(
     if errors_only:
         corpus, _ = narrow_to_error_sessions(corpus)
         if not corpus.refs:
-            raise no_match_error
+            return empty_result()
 
     base_types = ENTRY_TYPE_MAP[role]
-
-    def only_current_session_error(excluded: PrefixId) -> ToolError:
-        # The calling conversation was the only session in scope. Don't blame
-        # the patterns — point at the exclusion and how to override it.
-        return ToolError(
-            f"The only session in scope is the calling conversation ({excluded}), "
-            f"excluded by default. Pass include_current_session=true to search it."
-        )
 
     # Line-level prefilter: rg names the matching LINES, and since one JSONL
     # line is one entry only those get parsed — cost scales with the hits, not
@@ -917,13 +841,13 @@ def search_projects(
     line_hits = corpus.matching_lines(patterns)
     if line_hits is not None:
         if not line_hits:
-            raise no_match_error
+            return empty_result()
         heads = [SessionHead.load(ref) for ref, _ in line_hits]
         sort_sessions_newest_first(heads)
         heads = _filter_by_date(heads, after, before)
         heads, excluded = _exclude_current_session(heads, include_current_session)
         if not heads and excluded:
-            raise only_current_session_error(excluded)
+            return empty_result(excluded)
         offsets = {f: o for _, files in line_hits for f, o in files.items()}
         all_results = triage_lines(
             heads,
@@ -938,13 +862,13 @@ def search_projects(
         # promote candidate sessions and parse them whole.
         candidates = corpus.candidate_refs(patterns)
         if not candidates:
-            raise no_match_error
+            return empty_result()
         sessions = promote_refs(candidates)
         sort_sessions_newest_first(sessions)
         sessions = _filter_by_date(sessions, after, before)
         sessions, excluded = _exclude_current_session(sessions, include_current_session)
         if not sessions and excluded:
-            raise only_current_session_error(excluded)
+            return empty_result(excluded)
         all_results = triage_multi(
             sessions,
             patterns,
@@ -955,7 +879,7 @@ def search_projects(
 
     # Check if anything matched
     if not any(r for _, results in all_results for r in results):
-        raise no_match_error
+        return empty_result(excluded)
 
     return SearchProjectsResponse.from_triage(
         all_results,
@@ -991,9 +915,9 @@ def grep_session(
     role: Annotated[
         ConversationRole,
         Field(
-            description="Which side of the conversation to search: 'user' for human messages, 'assistant' for agent responses, 'all' for both."
+            description="Role filter, default 'all': 'user' includes human and orchestration messages; 'assistant' includes agent actions and results; 'all' includes both."
         ),
-    ] = ConversationRole.user,
+    ] = ConversationRole.all,
     limit: Annotated[
         int,
         Field(
@@ -1016,17 +940,12 @@ def grep_session(
         bool,
         Field(description=_ERRORS_ONLY_DESC),
     ] = False,
+    max_chars: Annotated[
+        int,
+        Field(description="Total rendered excerpt-character budget across all patterns/sessions, excluding JSON and metadata. Default 12000; omitted blocks retain hit counts and overflow markers.", ge=1000, le=100000),
+    ] = 12000,
 ) -> GrepSessionResponse:
-    """Show matches for one or more patterns within a single conversation, with surrounding context.
-
-    Like `rg -C3` on a single file, but pattern-centric: pass all your candidate terms in one call and each gets its own hit count and match blocks. Zero-hit patterns are kept in the response so you see them as dead weight rather than guessing why they're missing.
-
-    Search is exhaustive by default across text, tool inputs, tool outputs, and thinking blocks. Each entry includes its full character length so you can gauge size before calling read_turn.
-
-    Match blocks have three fields: `before` (context turns before), `match` (the matching entry, excerpted on the hit so it stays visible even when truncated), and `after` (context turns after).
-
-    Set errors_only=true to see only the FAILED tool calls in this session — the drill-in after survey_failures names a hot session.
-    """
+    """Search one session (including Claude children) for patterns and return bounded context blocks. Defaults to role='all'. Zero hits retain per-pattern counts. limit caps matches per pattern; max_chars caps all rendered excerpts together. Use read_turn for a specific original."""
     if not patterns:
         raise ToolError("patterns must contain at least one pattern")
 
@@ -1049,14 +968,6 @@ def grep_session(
     )
     pattern_results = multi_results[target.session_id]
 
-    if not any(matches for _, matches, _ in pattern_results):
-        scope = " among failed tool calls" if errors_only else ""
-        raise ToolError(
-            f"No matches for any pattern{scope}: {', '.join(patterns)}. Try shorter "
-            f"or broader regex, set role='all', or use browse_session to read the "
-            f"session directly."
-        )
-
     return GrepSessionResponse.from_pattern_results(
         session_id=target.session_id,
         results=pattern_results,
@@ -1065,7 +976,7 @@ def grep_session(
         worktree=target.worktree,
         project=target.project_path,
         harness=target.harness,
-    )
+    ).bound_excerpts(max_chars)
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -1095,9 +1006,9 @@ def grep_sessions(
     role: Annotated[
         ConversationRole,
         Field(
-            description="Which side of the conversation to search: 'user' for human messages, 'assistant' for agent responses, 'all' for both."
+            description="Role filter, default 'all': 'user' includes human and orchestration messages; 'assistant' includes agent actions and results; 'all' includes both."
         ),
-    ] = ConversationRole.user,
+    ] = ConversationRole.all,
     limit: Annotated[
         int,
         Field(
@@ -1120,15 +1031,12 @@ def grep_sessions(
         bool,
         Field(description=_ERRORS_ONLY_DESC),
     ] = False,
+    max_chars: Annotated[
+        int,
+        Field(description="Total rendered excerpt-character budget across all patterns/sessions, excluding JSON and metadata. Default 12000; omitted blocks retain hit counts and overflow markers.", ge=1000, le=100000),
+    ] = 12000,
 ) -> GrepSessionsResponse:
-    """Fan out grep across multiple sessions in one call.
-
-    Use this when you've already identified your hot sessions (via `search_projects`) and want context blocks across all of them for the same patterns. One call replaces N `grep_session` calls.
-
-    Returns one entry per session that had at least one match (zero-hit sessions are omitted). Each entry has the same shape as `grep_session` output: per-pattern hit counts and match blocks with surrounding context. Sort order preserves the order of `sessions`.
-
-    Set errors_only=true to see only FAILED tool calls — the fan-out drill-in after survey_failures names several hot sessions.
-    """
+    """Search several sessions for the same patterns in one call. Defaults to role='all'. Zero-hit sessions are omitted; unresolved ids appear in not_found, with an error only when no requested id resolves. Hit counts survive excerpt limits; max_chars bounds all sessions together."""
     if not sessions:
         raise ToolError("sessions must contain at least one session id")
     if not patterns:
@@ -1185,30 +1093,13 @@ def grep_sessions(
             )
         )
 
-    if not session_responses:
-        # Distinguish two failure modes in the error text so the caller
-        # can tell a typo (all prefixes unresolved) from a clean miss
-        # (every prefix resolved but no patterns matched anything).
-        #
-        # Note: in the partial-resolve + all-miss case, `not_found` is
-        # intentionally discarded — we raise the clean-miss ToolError so
-        # the caller gets a single consistent "nothing to return" signal,
-        # matching every other empty-result tool in this file. If you want
-        # the typo diagnostic surfaced even on all-miss, switch this branch
-        # to return an empty-sessions response with not_found populated.
-        if not_found and len(not_found) == len(sessions):
-            raise ToolError(f"No sessions matched: {', '.join(not_found)}")
-        scope = " among failed tool calls" if errors_only else ""
-        raise ToolError(
-            f"No matches in any session{scope} for any pattern: {', '.join(patterns)}. "
-            f"Try shorter or broader regex, set role='all', or confirm the session "
-            f"ids with list_project_sessions."
-        )
+    if not_found and len(not_found) == len(sessions):
+        raise ToolError(f"No sessions matched: {', '.join(not_found)}")
 
     return GrepSessionsResponse(
         sessions=session_responses,
         not_found=not_found or None,
-    )
+    ).bound_excerpts(max_chars)
 
 
 @mcp.tool(annotations=_TOOL_ANNOTATIONS)
@@ -1418,14 +1309,7 @@ def list_session_agents(
         Field(description="Directory containing saved .output files."),
     ] = None,
 ) -> SessionAgentsResponse:
-    """Use get_usage_report for reconciled consumption accounting.
-
-    List every subagent a session ran — type, status, lightweight token estimates, duration, and whether its full record is available.
-
-    Includes agents spawned by a workflow, not just ones the conversation dispatched directly, so the count reflects the session's real fan-out. Each row's `source` tells you whether to trust missing fields — and `workflow_run_id` lets you group agents from the same workflow run.
-
-    Use when you want to see a session's fan-out before drilling in: which agents ran, which errored, which had the largest browsing token estimate. Step two of agent forensics — get a session id from list_project_sessions(min_agents=1), then from here pass an agent_id to get_agent_detail for the full prompt/result/trace, or audit the whole session's tool usage with audit_session_tools.
-    """
+    """List Claude children, including workflow-orchestrated agents, with dispatch/result availability and tool counts. A dispatch-only record does not establish execution; inspect get_agent_detail for prompt, result and trace. Use usage reports for token accounting."""
     target = _resolve_session(session, projects)
 
     agents = discover_subagents(target.path)
@@ -1463,16 +1347,11 @@ def get_agent_detail(
     truncate: Annotated[
         int,
         Field(
-            description="Truncate each content piece (text, tool inputs) to N chars. 0 = full content.",
+            description="Maximum characters per prompt, result and trace piece. Default 1500; 0 returns full content.",
         ),
-    ] = 80,
+    ] = 1500,
 ) -> AgentDetailResponse | AgentListResponse:
-    """Get one or more subagents' full story: the prompt they were given, the result they returned, token/tool stats, and (with trace=true) a chronological tool-by-tool timeline of what they did.
-
-    Works for any agent list_session_agents returns, including ones a workflow spawned rather than the conversation requesting directly. Find agent_ids with list_session_agents.
-
-    Use when you need what an agent was actually told and how it reached its answer — debugging why an agent went off the rails, recovering a result that scrolled out of context, or comparing what several parallel agents concluded. For a session-wide view of whether agents used their tools correctly (rather than one agent's full transcript), use audit_session_tools instead.
-    """
+    """Read Claude child prompts, results and optional chronological tool traces. Use ids from list_session_agents. Availability/source fields distinguish dispatched records from missing or orphaned runs; a recorded launch status alone does not establish completion."""
     if session:
         # Session known → resolve and promote just that session.
         sessions = [_resolve_session(session, projects)]
@@ -1879,13 +1758,7 @@ def convert_session(
         Field(description="subagent_to_session only: project (path or bare name) to write the new session into. Default: the source's own project."),
     ] = None,
 ) -> ConvertSessionResponse:
-    """Convert a session into a subagent, or a subagent into a session. Always a copy — the source transcript is never modified, moved, or deleted.
-
-    direction='session_to_subagent': copy a session (any project, Claude Code or Codex) into a new subagent parented under dest_parent_session (default: the calling session). A Codex session arrives as text turns: its tool calls become [Codex tool: …] blocks with truncated output, and its private reasoning does not carry over. The conversation continues as a subagent: resume it like any completed background agent — SendMessage with the returned created_id — and ask it what you need; its whole history is in its context window. Use this when grep answers aren't enough: questions of reasoning, synthesis, or meaning; summaries at any altitude; judgment calls briefed with new evidence; or using a past session as a domain expert whose context you don't want to rebuild. SendMessage does NOT require agent-teams — it resumes any background subagent by id, and a conversion artifact is one. If SendMessage is not in your toolset it is deferred, not absent: load it with ToolSearch query "select:SendMessage", then convert and resume as normal.
-
-    direction='subagent_to_session': copy a subagent out to a top-level session a human can open — the response carries the exact `claude -r` command. Use when the user wants to read or continue an agent's run interactively.
-
-    The response includes what you need to compose the first message: suggested_handoff (a converted conversation has no way to know its interlocutor changed — message senders are not labeled on the wire), the original environment (cwd and whether it still exists, git branch, Claude Code version, age), model history, turn count, and tail state. It also carries the source's headroom facts — source_context_tokens (how full its window already was, i.e. what each resume replays and how little room is left) and source_compactions (how much of its early memory is a summary rather than the original turns) — so you can size the interview before you start it. Conversion artifacts carry lineage, are excluded from search, and are labeled in agent listings; remove them with delete_conversions."""
+    """Copy a session to a Claude subagent, or a Claude subagent to a top-level session. Originals are untouched. Codex session sources convert as text, omitting private reasoning and shortening tool output. The response supplies created identity, provenance, environment and handoff instructions. Resuming requires a compatible harness operation; creating a copy does not guarantee that capability. Interview replies are generated testimony, not original records."""
     if direction == "session_to_subagent":
         src = _resolve_session_ref_for_convert(src_id, src_project)
 

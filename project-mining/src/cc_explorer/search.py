@@ -611,6 +611,8 @@ def _get_context(
     errors_only: bool = False,
 ) -> tuple[list[TranscriptEntry], list[TranscriptEntry]]:
     """Get context entries around a match, filtered to visible conversation types."""
+    if context <= 0:
+        return [], []
     conv_types = context_types_for(hide, base_types, errors_only)
 
     before: list[TranscriptEntry] = []
@@ -1005,29 +1007,8 @@ def get_turn_context(
                 if entry.uuid != turn_uuid:
                     continue
 
-                # Found it — gather context
-                result: list[TranscriptEntry] = []
-
-                # Before
-                count = 0
-                before_start = idx
-                for i in range(idx - 1, -1, -1):
-                    if isinstance(entries[i], conv_types):
-                        before_start = i
-                        count += 1
-                        if count >= context:
-                            break
-
-                # Collect from before_start through context after
-                # Always include the target turn even if it's not in conv_types
-                count_after = 0
-                for i in range(before_start, len(entries)):
-                    if i == idx or isinstance(entries[i], conv_types):
-                        result.append(entries[i])
-                        if i > idx:
-                            count_after += 1
-                            if count_after >= context:
-                                break
+                before, after = _get_context(entries, idx, context, conv_types, hide)
+                result = before + [entry] + after
 
                 return session, result, source.agent_id
 

@@ -16,6 +16,8 @@ def smart_truncate(text: str, width: int, placeholder: str = "...") -> str:
     """
     if not width or len(text) <= width:
         return text
+    if 0 < width < len(placeholder):
+        return text[:width]
     result = textwrap.shorten(text, width=width, placeholder=placeholder)
     if result != placeholder:
         return result

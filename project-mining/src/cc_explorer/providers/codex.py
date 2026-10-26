@@ -385,8 +385,9 @@ class CodexProvider:
 
         if kind == "agent_message":
             text = self._text_blocks(payload.get("content"))
-            if not text:
-                return None
+            # Retain the orchestration event even when its source has no text.
+            # HumanEntry's teammate rendering makes that limitation explicit;
+            # an unavailable payload must not silently erase the DM itself.
             author = payload.get("author") or "agent"
             recipient = payload.get("recipient") or "agent"
             wrapped = (
