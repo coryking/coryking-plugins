@@ -15,7 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import cc_explorer._claude_paths as paths
-from cc_explorer.corpus import discover_projects, resolve_projects
+from cc_explorer.corpus import ProjectInfo, discover_projects, resolve_project, resolve_projects
 
 
 @pytest.fixture(autouse=True)
@@ -132,3 +132,50 @@ def test_resolve_projects_empty_calls_discover():
     with patch("cc_explorer.corpus.discover_projects", return_value=fake):
         assert resolve_projects(None) == ["/x", "/y"]
         assert resolve_projects([]) == ["/x", "/y"]
+
+
+def test_historical_name_uses_corpus_path_without_live_directory(tmp_path):
+    historical = tmp_path / "old-location" / "renamed-project"
+    projects_dir = tmp_path / "transcripts"
+    _write_jsonl(projects_dir / "encoded-old" / "s1.jsonl", [{"cwd": str(historical)}])
+    p = _patch_paths(projects_dir, {})
+
+    with p[0], p[1], p[2]:
+        assert resolve_project("renamed-project") == str(historical)
+        assert resolve_projects(["renamed-project", str(historical)]) == [str(historical)]
+    assert not historical.exists()
+
+
+def test_corpus_identity_precedes_unrelated_existing_local_directory(tmp_path, monkeypatch):
+    local = tmp_path / "projects" / "example"
+    local.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    known = [ProjectInfo(path="/historic/example", name="example")]
+
+    assert resolve_project("example", known_projects=known) == "/historic/example"
+
+
+def test_duplicate_historical_names_require_explicit_path():
+    known = [
+        ProjectInfo(path="/first/example", name="example"),
+        ProjectInfo(path="/second/example", name="example"),
+    ]
+    with pytest.raises(ValueError, match="Ambiguous project name.*explicit path") as error:
+        resolve_project("example", known_projects=known)
+    assert "/first/example" in str(error.value)
+    assert "/second/example" in str(error.value)
+    assert resolve_project("/first/example", known_projects=known) == "/first/example"
+
+
+def test_unknown_name_has_absolute_conventional_path_even_when_deleted(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert resolve_project("unknown", known_projects=[]) == str(tmp_path / "projects/unknown")
+
+
+def test_multiple_names_discover_once_and_keep_explicit_relative_paths():
+    known = [ProjectInfo(path="/historical/example", name="example")]
+    with patch("cc_explorer.corpus.discover_projects", return_value=known) as discover:
+        assert resolve_projects(["example", "./another", ".", "..", "example"]) == [
+            "/historical/example", "./another", ".", "..",
+        ]
+    discover.assert_called_once_with()

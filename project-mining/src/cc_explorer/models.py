@@ -404,6 +404,21 @@ class TeammateMessage(BaseModel):
     summary: Optional[str] = None
     body: str = ""
 
+    @property
+    def missing_payload(self) -> bool:
+        """A recorded Codex orchestration envelope with no retained payload text.
+
+        This reports a source limitation, not that the dispatched agent received
+        an empty assignment. The body remains verbatim for source inspection.
+        """
+        return bool(_CODEX_EMPTY_PAYLOAD_RE.fullmatch(self.body))
+
+
+_CODEX_EMPTY_PAYLOAD_RE = re.compile(
+    r"Message Type: (?:NEW_TASK|MESSAGE|FINAL_ANSWER)\r?\n"
+    r"Task name: [^\r\n]+\r?\nSender: [^\r\n]+\r?\nPayload:\s*"
+)
+
 
 # `<teammate-message teammate_id="..." [color="..."] [summary="..."]>BODY[</teammate-message>]`
 # The closing tag is optional in the wild; body is everything after the opening
@@ -603,6 +618,10 @@ class HumanEntry(BaseTranscriptEntry):
             recipient = self.agentName or "?"
             head = f"[teammate: {tm.teammate_id} → {recipient}]"
             body = f"{tm.summary} — {tm.body}".strip(" —") if tm.summary else tm.body
+            if tm.missing_payload:
+                body = f"[Payload text unavailable in retained record]\n{body}"
+            elif not tm.body:
+                body = f"{body}\n[Message text unavailable in retained record]".strip()
             line = f"{head} {body}".strip() if body else head
             return smart_truncate(line, truncate)
         text = extract_text(self)

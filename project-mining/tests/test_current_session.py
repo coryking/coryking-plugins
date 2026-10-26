@@ -144,8 +144,7 @@ def test_search_response_omits_marker_when_nothing_excluded():
 
 
 def test_search_projects_only_self_points_at_exclusion(monkeypatch):
-    """When the calling session is the only session in scope, the error names
-    the exclusion (and the override) rather than blaming the patterns."""
+    """An empty search still names the excluded caller instead of failing."""
     import cc_explorer.mcp_server as srv
     from cc_explorer.corpus import Corpus
     from fastmcp.exceptions import ToolError
@@ -158,8 +157,23 @@ def test_search_projects_only_self_points_at_exclusion(monkeypatch):
     monkeypatch.setattr(Corpus, "candidate_refs", lambda self, patterns: list(self.refs))
 
     with patch_session_corpus([_session(CALLER_ID)]):
-        with pytest.raises(ToolError) as exc:
-            srv.search_projects(patterns=["anything"])
-    msg = str(exc.value)
-    assert "include_current_session" in msg
-    assert CALLER_ID[:8] in msg  # names the excluded session by short id
+        result = srv.search_projects(patterns=["anything"])
+    assert result.total_hits == 0
+    assert result.excluded_current_session == PrefixId(CALLER_ID)
+
+
+def test_search_projects_keeps_exclusion_when_typed_matches_are_empty(monkeypatch):
+    """Raw candidates can survive while role/hide filters remove every match."""
+    import cc_explorer.mcp_server as srv
+    from cc_explorer.corpus import Corpus
+    from tests.conftest import patch_session_corpus
+
+    monkeypatch.setattr(srv, "_current_session_id", lambda: CALLER_ID)
+    monkeypatch.setattr(srv, "resolve_projects", lambda projects=None: ["/tmp/fake"])
+    monkeypatch.setattr(Corpus, "matching_lines", lambda self, patterns: None)
+    monkeypatch.setattr(Corpus, "candidate_refs", lambda self, patterns: list(self.refs))
+    monkeypatch.setattr(srv, "triage_multi", lambda *args, **kwargs: [("needle", [])])
+    with patch_session_corpus([_session(CALLER_ID), _session(OTHER_ID)]):
+        result = srv.search_projects(patterns=["needle"])
+    assert result.total_hits == 0
+    assert result.excluded_current_session == PrefixId(CALLER_ID)

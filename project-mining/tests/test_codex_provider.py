@@ -7,7 +7,11 @@ import inspect
 import os
 from pathlib import Path
 
-from cc_explorer.models import AssistantTranscriptEntry, HumanEntry, ToolResultEntry
+import pytest
+
+from cc_explorer.models import (
+    AssistantTranscriptEntry, HumanEntry, ToolResultEntry, ToolUseContent, UserOrigin,
+)
 from cc_explorer.corpus import Corpus, SessionRef
 from cc_explorer.corpus import discover_projects
 from cc_explorer.providers import Harness
@@ -380,3 +384,75 @@ def test_codex_worktree_sessions_pool_into_main_project(monkeypatch, tmp_path: P
     assert len(refs) == 1
     assert refs[0].project_path == "/repo/main"
     assert refs[0].worktree == "worktree"
+
+
+def test_bare_historical_codex_project_reaches_sessions_after_directory_removal(monkeypatch, tmp_path: Path) -> None:
+    thread = "01a04576-fee2-7ee0-a898-58bb50387cc5"
+    historical = tmp_path / "old-projects" / "gone-project"
+    rollout = tmp_path / "sessions/2026/08/27" / f"rollout-date-{thread}.jsonl"
+    _write_rollout(rollout, _meta(thread, str(historical)))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr("cc_explorer._claude_paths._get_projects_dir", lambda: tmp_path / "none")
+    monkeypatch.setattr("cc_explorer._claude_paths._get_worktree_paths", lambda cwd: [])
+
+    corpus = Corpus.discover(projects=["gone-project"], harnesses=["codex"])
+
+    assert not historical.exists()
+    assert [(ref.session_id.full, ref.project_path) for ref in corpus.refs] == [(thread, str(historical))]
+
+
+@pytest.mark.parametrize("message_type", ["NEW_TASK", "MESSAGE", "FINAL_ANSWER"])
+def test_header_only_agent_payload_is_explicitly_unavailable(tmp_path: Path, message_type: str) -> None:
+    provider = CodexProvider(tmp_path)
+    header = f"Message Type: {message_type}\nTask name: /root/worker\nSender: /root\nPayload:"
+    entry = provider._normalize(_line("2026-08-27T12:00:00Z", 1, "response_item", {
+        "type": "agent_message", "author": "/root", "recipient": "/root/worker",
+        "content": [{"type": "input_text", "text": header}],
+    }), "synthetic-thread", "/repo/example")
+
+    assert isinstance(entry, HumanEntry)
+    assert entry.origin is UserOrigin.teammate
+    assert entry.teammate_message.body == header
+    assert "[Payload text unavailable in retained record]" in entry.display(0)
+    assert "Payload text unavailable" in entry.display(90)
+
+
+def test_plaintext_agent_payload_survives_including_markup_and_multiple_blocks(tmp_path: Path) -> None:
+    provider = CodexProvider(tmp_path)
+    header = "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:"
+    prompt = "Read <system-reminder>this literal example</system-reminder> and report."
+    entry = provider._normalize(_line("2026-08-27T12:00:00Z", 1, "response_item", {
+        "type": "agent_message", "author": "/root", "recipient": "/root/worker",
+        "content": [{"type": "input_text", "text": header}, {"type": "input_text", "text": prompt}],
+    }), "synthetic-thread", "/repo/example")
+
+    assert isinstance(entry, HumanEntry)
+    assert entry.teammate_message.body == f"{header}\n{prompt}"
+    assert prompt in entry.display(0)
+    assert "unavailable" not in entry.display(0)
+
+
+@pytest.mark.parametrize("content", [None, [], [{"type": "input_text", "text": ""}]])
+def test_agent_message_without_retained_text_is_not_dropped(tmp_path: Path, content) -> None:
+    entry = CodexProvider(tmp_path)._normalize(_line("2026-08-27T12:00:00Z", 1, "response_item", {
+        "type": "agent_message", "author": "/root", "recipient": "/root/worker", "content": content,
+    }), "synthetic-thread", "/repo/example")
+
+    assert isinstance(entry, HumanEntry)
+    assert entry.origin is UserOrigin.teammate
+    assert "[Message text unavailable in retained record]" in entry.display(0)
+
+
+def test_opaque_dispatch_argument_is_preserved_without_claiming_recovery(tmp_path: Path) -> None:
+    opaque = "gAAAA_synthetic_opaque_dispatch_not_plaintext"
+    entry = CodexProvider(tmp_path)._normalize(_line("2026-08-27T12:00:00Z", 1, "response_item", {
+        "type": "function_call", "name": "spawn_agent", "call_id": "dispatch",
+        "arguments": json.dumps({"message": opaque, "task_name": "worker"}),
+    }), "synthetic-thread", "/repo/example")
+
+    assert isinstance(entry, AssistantTranscriptEntry)
+    call = entry.message.content[0]
+    assert isinstance(call, ToolUseContent)
+    assert call.input["message"] == opaque
+    assert opaque in entry.display(0)
+    assert "unavailable" not in entry.display(0)

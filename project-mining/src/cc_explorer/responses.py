@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .formatting import format_entry_line, format_session_date, render_trace
 from .providers import Harness
-from .utils import PrefixId
+from .utils import PrefixId, smart_truncate, smart_truncate
 
 if TYPE_CHECKING:
     from .corpus import ProjectInfo
@@ -298,7 +298,8 @@ class MatchBlock(SparseModel):
 
     `before` and `after` are context turns (pipe-delimited entry lines) on
     either side of the match. `match` is the matching entry itself, rendered
-    with a centered excerpt when truncated so the hit is always visible.
+    with a centered excerpt when truncated. The shared output budget may shorten
+    it further; follow its turn id with read_turn for the complete source.
     """
 
     agent: PrefixId | None = Field(
@@ -310,12 +311,42 @@ class MatchBlock(SparseModel):
         description="Context turns before the match (pipe-delimited entry lines).",
     )
     match: str = Field(
-        description="The matching entry (pipe-delimited entry line). Truncated with a centered excerpt so the pattern hit is visible.",
+        description="The matching entry (pipe-delimited entry line). Initially centered on the hit; the shared excerpt budget may shorten it further. The full_length field retains the original entry length.",
     )
     after: list[str] = Field(
         default_factory=list,
         description="Context turns after the match (pipe-delimited entry lines).",
     )
+
+    @property
+    def excerpt_chars(self) -> int:
+        """Rendered line characters, excluding JSON framing and metadata."""
+        return sum(map(len, self.before)) + len(self.match) + sum(map(len, self.after))
+
+    def bound_match(self, max_chars: int) -> MatchBlock | None:
+        """Keep a source locator from an oversized first block when it fits.
+
+        Context is dropped first. Further shortening changes only the display
+        field; turn id, timestamp, role and original full_length stay intact.
+        A budget too small for that prefix cannot carry an actionable excerpt.
+        """
+        if max_chars <= 0:
+            return None
+        line = self.match
+        if len(line) > max_chars:
+            fields = line.split("|", 4)
+            if len(fields) != 5:
+                return None
+            prefix = "|".join(fields[:4]) + "|"
+            available = max_chars - len(prefix)
+            if available < 0:
+                return None
+            display = (
+                smart_truncate(fields[4], available)
+                if available >= 3 else "." * available
+            )
+            line = prefix + display
+        return self.model_copy(update={"before": [], "match": line, "after": []})
 
 
 class GrepPatternResult(SparseModel):
@@ -328,10 +359,10 @@ class GrepPatternResult(SparseModel):
 
     pattern: str = Field(description="The regex pattern that was searched.")
     hits: int = Field(description="Total matches in this session for this pattern.")
-    showing: int = Field(description="Number of match blocks returned (after limit).")
+    showing: int = Field(description="Number of match blocks returned after limit and the shared excerpt budget.")
     overflow: str | None = Field(
         default=None,
-        description="Hint when results were truncated — narrow this pattern or use read_turn.",
+        description="Hint when limits or the shared excerpt budget omitted blocks or shortened excerpts — narrow this pattern or use read_turn.",
     )
     matches: list[MatchBlock] = Field(
         default_factory=list,
@@ -348,6 +379,10 @@ class GrepSessionResponse(SparseModel):
     dead weight rather than guessing why they're missing.
     """
 
+    output_truncated: bool | None = Field(
+        default=None,
+        description="True when the shared excerpt-character budget omitted blocks or shortened context/display. Hit counts remain complete. Budget counts before/match/after string characters, excluding JSON framing and metadata.",
+    )
     session: PrefixId = Field(description="Session identifier.")
     harness: Harness = Field(description="Harness that wrote this transcript.")
     project: str | None = Field(
@@ -361,6 +396,45 @@ class GrepSessionResponse(SparseModel):
     patterns: list[GrepPatternResult] = Field(
         description="Per-pattern results, sorted by hit count descending.",
     )
+
+    @property
+    def excerpt_chars(self) -> int:
+        return sum(block.excerpt_chars for pattern in self.patterns for block in pattern.matches)
+
+    def bound_excerpts(self, max_chars: int) -> GrepSessionResponse:
+        """Mutate and return self with at most max_chars of excerpt strings.
+
+        The budget spans every pattern; metadata and JSON framing are excluded.
+        Preserve full hit counts and input ordering. If the first available
+        block is oversized, keep its match locator with shortened display when
+        possible; subsequent oversized blocks are omitted.
+        """
+        if max_chars < 0:
+            raise ValueError("max_chars must be non-negative")
+        remaining = max_chars
+        have_excerpt = False
+        for pattern in self.patterns:
+            kept: list[MatchBlock] = []
+            reduced = False
+            for block in pattern.matches:
+                if remaining > 0 and block.excerpt_chars <= remaining:
+                    kept.append(block)
+                    remaining -= block.excerpt_chars
+                    have_excerpt = True
+                    continue
+                reduced = True
+                if not have_excerpt and remaining > 0:
+                    bounded = block.bound_match(remaining)
+                    if bounded is not None:
+                        kept.append(bounded)
+                        remaining -= bounded.excerpt_chars
+                        have_excerpt = True
+            pattern.matches = kept
+            pattern.showing = len(kept)
+            if reduced:
+                pattern.overflow = "excerpt budget reached; narrow this pattern or use read_turn for specific entries"
+                self.output_truncated = True
+        return self
 
     @classmethod
     def from_pattern_results(
@@ -434,6 +508,10 @@ class GrepSessionsResponse(SparseModel):
     from an empty result).
     """
 
+    output_truncated: bool | None = Field(
+        default=None,
+        description="True when the shared excerpt-character budget shortened or omitted excerpts across sessions. Session identities and hit counts remain complete. Budget counts before/match/after string characters, excluding JSON framing and metadata.",
+    )
     sessions: list[GrepSessionResponse] = Field(
         description="Per-session results, in the order the caller passed them. Only sessions with at least one match across the given patterns are included.",
     )
@@ -441,6 +519,18 @@ class GrepSessionsResponse(SparseModel):
         default=None,
         description="Session prefixes the caller passed that did not resolve to any session. Present only when at least one prefix failed to resolve and at least one resolved — when every prefix fails the tool raises ToolError instead.",
     )
+
+    def bound_excerpts(self, max_chars: int) -> GrepSessionsResponse:
+        """Mutate and return self, sharing one excerpt budget across sessions."""
+        if max_chars < 0:
+            raise ValueError("max_chars must be non-negative")
+        remaining = max_chars
+        for session in self.sessions:
+            session.bound_excerpts(remaining)
+            remaining -= session.excerpt_chars
+            if session.output_truncated:
+                self.output_truncated = True
+        return self
 
 
 # =============================================================================
@@ -736,8 +826,8 @@ class AgentDetailResponse(SparseModel):
             tool_counts=found.tool_name_counts or None,
             duration_ms=found.total_duration_ms,
             output_file=output_file,
-            prompt=found.prompt or None,
-            result=found.result_text or None,
+            prompt=smart_truncate(found.prompt, truncate) if found.prompt else None,
+            result=smart_truncate(found.result_text, truncate) if found.result_text else None,
             trace=trace_lines,
         )
 

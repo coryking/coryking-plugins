@@ -1239,15 +1239,16 @@ def test_min_agents_filter_excludes_conversion_only_sessions(fake_claude):
     """A session with only a conversion artifact is absent from min_agents=1 listings.
 
     Since agents_present==0 for that session, min_agents=1 filters it out.
-    With no other sessions matching, list_project_sessions raises (nothing to return).
+    With no other sessions matching, list_project_sessions returns an empty list.
     """
     fake_claude.write_session(SID_PARENT, _simple_session_lines())
     conv_agent = "a" + "d" * 16
     _lay_down_subagent(fake_claude, conv_agent, is_conversion_artifact=True)
 
     # With min_agents=1, the session (agents_present==0) doesn't match — nothing returned.
-    with pytest.raises(ToolError):
-        srv.list_project_sessions(projects=[PROJECT], min_agents=1, min_messages=1)
+    empty = srv.list_project_sessions(projects=[PROJECT], min_agents=1, min_messages=1)
+    assert empty.total == 0
+    assert empty.sessions == []
 
     # With min_agents=0, the session is present (no filtering on agents).
     resp = srv.list_project_sessions(projects=[PROJECT], min_agents=0, min_messages=1)

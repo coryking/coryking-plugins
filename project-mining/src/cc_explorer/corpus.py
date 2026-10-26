@@ -55,23 +55,45 @@ MIN_ID_LEN = 6
 # =============================================================================
 
 
-def resolve_project(project: Optional[str] = None) -> str:
+def resolve_project(
+    project: Optional[str] = None,
+    *,
+    known_projects: Sequence[ProjectInfo] | None = None,
+) -> str:
     """Resolve project path: explicit value or CWD.
 
     Accepts:
     - None → CWD
     - Full/relative path → resolved as-is
-    - Bare name (no slashes) → expanded to ~/projects/<name> if that directory exists
+    - Bare name → the unique corpus project with that name, including deleted
+      or renamed directories. Ambiguous names require an explicit path.
+    - A name unknown to the corpus → ~/projects/<name>, without requiring that
+      directory to exist. Transcript identity outlives the working directory.
     """
     if not project:
         return str(Path.cwd())
 
-    if "/" not in project and "\\" not in project:
-        expanded = Path.home() / "projects" / project
-        if expanded.exists():
-            return str(expanded)
+    if _is_project_name(project):
+        discovered = discover_projects() if known_projects is None else known_projects
+        matches = sorted({p.path for p in discovered if p.name == project})
+        if len(matches) > 1:
+            raise ValueError(
+                f"Ambiguous project name {project!r}; use an explicit path: "
+                + ", ".join(matches)
+            )
+        if matches:
+            return matches[0]
+        return str(Path.home() / "projects" / project)
 
     return project
+
+
+def _is_project_name(project: str) -> bool:
+    return (
+        project not in {".", "..", "~"}
+        and "/" not in project
+        and "\\" not in project
+    )
 
 
 def resolve_projects(projects: Optional[list[str]] = None) -> list[str]:
@@ -79,16 +101,17 @@ def resolve_projects(projects: Optional[list[str]] = None) -> list[str]:
 
     Empty / None ⇒ every project on disk (cross-project search), discovered and
     flattened across git worktrees by `discover_projects`. A non-empty list ⇒
-    those projects, each run through `resolve_project` (bare name → ~/projects/<name>,
-    path as-is). De-duplicates while preserving order.
+    those projects, each run through `resolve_project` (bare name → corpus
+    identity, path as-is). De-duplicates while preserving order.
     """
     if not projects:
         return [p.path for p in discover_projects()]
 
     seen: set[str] = set()
     resolved: list[str] = []
+    known = discover_projects() if any(_is_project_name(p) for p in projects) else []
     for p in projects:
-        path = resolve_project(p)
+        path = resolve_project(p, known_projects=known)
         if path not in seen:
             seen.add(path)
             resolved.append(path)
