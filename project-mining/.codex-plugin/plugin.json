@@ -1,7 +1,7 @@
 {
   "name": "project-mining",
-  "version": "2.54.4+codex.20261009235727",
-  "description": "Mine project histories for behavioral evidence. Search chat logs, git history, docs, and code for concrete examples of specific patterns, values, or skills.",
+  "version": "3.0.0",
+  "description": "Read agent history and gather original evidence for project and attention analysis.",
   "author": {
     "name": "Cory King",
     "email": "me@coryk.ing",

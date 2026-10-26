@@ -16,7 +16,7 @@ The rest of the toolbox grew out of the same itch: tools to mine a project's his
 /plugin marketplace add coryking/coryking-plugins
 ```
 
-That registers the marketplace. Then enable whichever plugins you want (`/plugin`). Jump to **[Install](#install)** for the full path — including the one env var the session-interrogation feature genuinely needs.
+That registers the marketplace. Then enable whichever plugins you want (`/plugin`). Jump to **[Install](#install)** for the full path — including how optional session interviews differ from ordinary retrieval.
 
 ---
 
@@ -49,7 +49,7 @@ Here's the thing about chat history: keyword search finds what was *said*, but t
 
 **Convert a past session into a subagent and *put it to work*.** This is the one I'm proudest of, and it's the thing I tell colleagues about first: cc-explorer can take a prior session, *clone it*, and reconnect it as a subagent — and then you talk to it. Ask it what it meant. Ask it to synthesize its own arc. Or hand it a job: it still carries everything that session knew, so it makes a sharp reviewer for a design or code review on the work it lived through. The way I described it when I was inventing it: *"a converter that can take something and move between an agent you can latch onto and interrogate and an agent that can be converted into a session I can attach to... the reason I want this is to let an agent attach to some other one and get it to answer questions about itself."* Use it as an **oracle, not just keyword grep** — pull the why from the horse's mouth. (`rewind_transcript` truncates a cloned artifact back to an earlier turn so you can replay from a known point; `delete_conversions` cleans up the forks when you're done.)
 
-> ⚠️ **Session interrogation requires agent teams.** Cloning a session is harmless without it, but *resuming* the cloned subagent (`SendMessage`) only exists when the calling session was started with `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. Without it you get *"no transcript to resume."* Quick check: if `SendMessage` is in your toolset, you're good. See **[Install](#install)** for the one-line settings change.
+> Session interviews are optional. Check that the current harness can resume a converted Claude subagent before creating one. The history skill keeps the conversion and cleanup procedure in a focused reference; generated retellings are distinct from original records.
 
 Every cc-explorer tool is read-only except the conversion tools, and the conversion tools refuse to touch anything but their own artifacts — a real session or a dispatched subagent is never mutated, period.
 
@@ -63,7 +63,9 @@ Point it at a project and a *lens* — `"find where I demonstrated technical lea
 
 The trick is that evidence is rarely labeled with the lens's vocabulary. *"Systems thinking at scale"* isn't found by grepping `"systems thinking"` — it's the architecture decision in `dispatcher.py` plus the session where you said *"wait, this won't hold at 50k events an hour."* Making that inferential leap — from abstract frame to concrete observable — is the whole point, and it's why you ask a model instead of grep.
 
-Under the hood it's an Opus orchestrator that runs an alignment conversation with you first (it *will* ask questions before dispatching — that's a hard gate, because a sharp lens is where all the quality lives), then fans out researcher agents across three corpora: the **process** (chat + git), the **codebase** (source + docs), and the **output** (what the running system actually produces). Findings get woven, not stapled.
+The caller owns the question and synthesis. One economical evidence worker locates relevant originals across history, source and outputs, then returns excerpts, locators, corrections and coverage. It can judge relevance without turning its interpretation into the source. The caller reopens consequential originals before drawing conclusions. There is no mandatory scout, analyst trio or planning approval gate for a clear assignment.
+
+Claude Code registers the evidence worker directly. Codex reads the same plugin-local prompt and dispatches it through a generic subagent interface. The skill describes the available path and economical defaults without assuming both harnesses register the same agents.
 
 ### activity-reflection — the herding tax
 
@@ -115,19 +117,9 @@ Then open `/plugin`, pick the plugins you want, and enable them. Restart Claude 
 
 That's the whole story for everything except one feature.
 
-### Turning on session interrogation (one env var)
+### Session interviews
 
-cc-explorer's marquee trick — cloning a past session into a subagent you can *talk to* — needs the agent-teams runtime, which is gated behind an experimental flag. Add it to `settings.json` (project `.claude/settings.json`, `.claude/settings.local.json`, or `~/.claude/settings.json`) and **restart** (env is read at session start):
-
-```json
-{
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
-  }
-}
-```
-
-Everything else — search, grep, agent forensics, the activity timeline, the converter's *write* side — works without it. Only the resume path (`SendMessage`) needs it. If `SendMessage` shows up in your toolset, you're set.
+Search, original turn reads and agent inspection work without conversion. To interview or continue a copied conversation, check the current harness's resume capability first. A converted Claude subagent is resumed with a compatible Claude operation, not a generic cross-harness message. The bundled history skill explains context headroom, testimony, provenance and cleanup.
 
 ### Requirements
 

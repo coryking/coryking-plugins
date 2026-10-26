@@ -1,199 +1,39 @@
 ---
 name: cc-explorer
-description: >
-  Explore Claude Code and Codex transcript history via MCP tools. Use when the user wants to search conversations,
-  find what was discussed, trace subagent execution, inspect what an agent did, or browse chat logs.
-  Triggers on: "search my chats", "what did that agent do", "trace that session", "look at my
-  conversations", "check my chat history", "find where we talked about X", "which sessions used
-  agents", "ask a past session", "convert a session into a subagent", "question that old conversation".
-  Also use for token consumption, agent-workload accounting, and auditing usage observations.
-  Covers both direct tool use and dispatching the session-researcher agent for question-shaped
-  investigations. Do NOT use for behavioral evidence mining or evidence-document work — that's the
-  project-mining skill.
+description: Search and inspect Claude Code and Codex history for decisions, original wording, agent prompts, tool actions, and usage. Use for questions about past conversations or agent runs.
 ---
 
-# cc-explorer
+# Read conversation history
 
-Explores Claude Code and Codex history stored as local JSONL transcripts. MCP tools handle all interaction — call them directly, no CLI commands needed. Search/list/read tools span both harnesses by default; pass `harnesses=["claude"]` or `harnesses=["codex"]` to narrow them. `convert_session` accepts Codex sessions as a source (they arrive as text turns), and the resulting subagent is an ordinary conversion artifact that `rewind_transcript` and `delete_conversions` handle like any other. `subagent_to_session` and the agent-forensics tools are Claude-specific.
+Use the cc-explorer MCP tools for history. A known turn or quick lookup can stay inline. For an investigation, delegate discovery using the [evidence worker](../../agents/evidence-worker.md); keep interpretation and the answer in the calling session. Project evidence reports use the project-mining workflow; attention reports use activity-reflection, both in this plugin.
 
-## Delegate or DIY
+## Delegate with the original question
 
-Two ways to use this toolset:
+Pass the user's request and relevant clarifications verbatim, known project/session/time scope, intended use, and any excluded sources. Label your working interpretation and hypotheses separately. Give a concrete inquiry, not a proposed conclusion. If several workers help, divide by questions or subsystems and share existing source locators; avoid mandatory parallel passes over the same sources.
 
-- **Dispatch the `session-researcher` agent** (Agent tool, `subagent_type: "project-mining:session-researcher"`) when the ask is a *question* about past sessions — what happened, what was decided, why — and answering it means an investigation rather than a single lookup. The agent owns the full retrieval craft, including the decision this skill's tools make hard to get right inline: when to stop grepping and instead convert the source session and interview it. The investigation burns the agent's context; you get back a cited answer. Dispatch with the question, any known scope (project, session, timeframe), and the answer shape you need — nothing else; it finds its own way.
-- **Call the tools directly** (everything below) when you know where the answer lives and need one or two calls — a quick grep, reading a specific turn, listing sessions — or when you're the session-researcher.
+- **Claude Code:** dispatch `project-mining:evidence-worker` with the assignment. Its configured default is Haiku; use Sonnet when conflicting sources or ambiguous relevance require stronger judgement.
+- **Codex:** read the evidence-worker file linked above and give its body plus the assignment to a generic `spawn_agent`. Use `model: "gpt-6-luna"`, `reasoning_effort: "high"`, `fork_turns: "none"` when those controls/models are available. Codex does not register this plugin's Claude agent names. Use Sol high for synthesis or a difficult follow-up. These defaults are starting points, not a claim that Haiku and Luna have equal quality.
+- **Other harnesses:** inject that same worker body into an available generic subagent with fresh context and a suitable economical model. If delegation or the named model is unavailable, perform the investigation inline with the same evidence contract. Do not invent a tool or model name.
 
-If you catch yourself three pattern-batches deep with nothing landing, that's the tell you're in investigation territory: hand the question to the agent instead of guessing more vocabulary.
+Inspect available tool names first; load only needed descriptions. In code-mode tool orchestration, print `structuredContent` when present, otherwise the text content once. Printing whole MCP envelopes or every tool description duplicates large payloads.
 
-## The conversation exploration tools
+## Retrieve enough context
 
-Tools for exploring chat content, each operating at a different scope — like `ls`, `rg -c`, `rg -C3`, and `sed -n` on a set of JSONL files:
+`search_projects` finds candidate projects/sessions; `grep_sessions` searches several candidates together; `grep_session` and `read_turn` inspect specific moments. `browse_session` supplies a continuous window when keyword matches miss the arc. Use the absolute project and identifiers returned by tools when narrowing; prefer full identities when provided. Short prefixes can be ambiguous, in which case use a longer id from session listings. Search spans both harnesses unless filtered; Claude nested agents are included, while Codex children appear as separate sessions.
 
-| Tool | Scope | Job |
-|------|-------|-----|
-| `list_projects` | all projects | Orient — which projects exist (one row per repo, worktrees flattened) |
-| `list_project_sessions` | project(s) | Orient — what conversations exist, with stats (defaults to CWD) |
-| `search_projects` | projects (all by default) | Scan — which patterns hit, in which project/session |
-| `grep_session` | session | Examine — matches with context inside one conversation |
-| `grep_sessions` | sessions | Fan out — same patterns across N sessions in one call |
-| `read_turn` | turn | Read — full fidelity text around a specific moment |
-| `get_activity_timeline` | projects (all by default) | Reconstruct — cross-project attention over a time window (a bucket_minutes-grain grid, default 5 min, of turn counts + pre-computed rollups) |
+Choose `role` deliberately: `user` for human/orchestration messages, `assistant` for agent actions/results, `all` for both. A user-role turn may be a teammate message; it is not automatically a human instruction. Search defaults to `all`. Use `hide` to exclude categories and `truncate`, `limit`, and `max_chars` to bound excerpts. Zero matches are useful information, not a reason to repeat the same call.
 
-Project selection is uniform: every tool takes a `projects` list (paths or bare names). Omit it and the search/locate tools sweep **all** projects — the recall path when you remember a conversation but not where it happened. `list_project_sessions` is the exception: it defaults to the current project (use `list_projects` for the cross-project overview). Each result carries its `project` and `harness`, so pass those back to scope follow-ups when useful.
+Adapt the next read to the remaining uncertainty. A correction, pronoun, conflicting account, or quoted earlier answer calls for wider context. Stop when the question is supported or the missing evidence is clear; no fixed call count determines when to stop or escalate. Escalate with the actual conflict, failed approach, and source packet, so a stronger model can inspect rather than restart blindly.
 
-**The search corpus is complete.** Search reads subagent transcripts too — `<sessionId>/subagents/agent-*.jsonl`, including workflow-orchestrated orphans — not just the main session. A subagent's own tool calls, thinking, and Bash are searchable, and any match that came from a subagent body names the `agent` it lives in (drill in with `get_agent_detail`).
+## Verify and answer
 
-Each step narrows scope and increases fidelity. No tool switches modes or changes output shape based on hit volume.
+The worker returns bounded originals with locators and relevance notes. Read that packet before synthesising; reopen the original prompt/result and surrounding turns for consequential claims, ambiguous excerpts, or suspected omissions. Increase depth on demand. Worker summaries and agent self-reports are leads, not substitute originals.
 
-Entry text in `grep_session`, `read_turn`, and `browse_session` output uses pipe-delimited format: `turn_id|timestamp|role|full_length|display`. `turn_id` leads so it's the first field to grab when feeding `read_turn`. Roles: `U` = user, `A` = assistant, `T` = tool result (output from a tool call). The tool descriptions document this format in detail. In agent-team sessions, a `U` turn that is a teammate DM (orchestration, not the human) renders labeled as `[teammate: <sender> → <recipient>] ...` rather than as raw `<teammate-message>` XML.
+Distinguish observed actions, attributed claims, and your interpretation. Preserve later corrections and unresolved disagreement. When an original is missing and a quotation survives inside another tool result, cite both the unavailable original locator and the surviving record; do not imply direct access. If a retained prompt is encrypted or absent, say so rather than reconstructing it. State coverage and material gaps without implying an exhaustive census.
 
-### Controlling assistant turn detail with `hide`
+## Specialised operations
 
-`grep_session`, `read_turn`, and `browse_session` accept a `hide` parameter — a comma-separated set of assistant-turn content atoms to suppress from both search and display:
-
-| Atom | What it suppresses |
-|------|--------------|
-| `thinking` | Extended thinking blocks (prefixed with `[thinking]`) |
-| `inputs` | Tool call summaries (`→ Bash(git status)`) |
-| `outputs` | Tool results (separate `T`-role entries interleaved after assistant turns) |
-
-Default is `""` (show and search everything). Pass `hide="outputs"` to suppress noisy tool results, or `hide="inputs,outputs,thinking"` for a text-only view. Text is always shown. When tool outputs are huge, control volume with `truncate` — `hide` is for category filtering, not size management.
-
-## The agent inspection tools
-
-Tools for tracing subagent execution — a separate axis from conversation content:
-
-- **`list_project_sessions(min_agents=1)`** — which sessions spawned subagents? The entry point: filter the normal session list down to the ones that dispatched agents.
-- **`list_session_agents`** — what agents did a specific session dispatch? Status, tokens, duration.
-- **`get_agent_detail`** — full prompt, result, stats for specific agent(s). Optional tool trace.
-- **`audit_session_tools`** — for every subagent in a session, tool counts + error rates + chronological tool-call traces. Use this to answer "are my agents using my tools right?" — see which tools land vs fail, where retries happened, which agents over-call.
-
-Use when tracing what an agent did, correlating outputs with sessions, or building timelines that distinguish "discussed doing X" from "dispatched agents to do X."
-
-## Workload token accounting
-
-`get_usage_report` measures observed workload tokens across selected sessions and discoverable children, with coverage, category semantics, configuration and role/phase rollups. `get_usage_observations` audits the same engine's native records and physical source locators. These tools accept no rates and calculate no prices. Read [usage accounting](references/usage-accounting.md) before interpreting consumption, cumulative counters, branches, coverage or caller attribution.
-
-## The failure tools
-
-Failure is its own axis of the corpus. Every tool result carries an `is_error` flag, so "which calls failed" is a structured question — you never have to guess what an error *said* and regex for the prose.
-
-- **`survey_failures`** — the landing page. Every failed tool call in a window, classified by kind and rolled up per tool and per session. Start here.
-- **`errors_only=true`** on `search_projects`, `grep_session`, and `grep_sessions` — restricts hits to failed tool calls. The pattern then narrows the **topic**, not the error vocabulary: `patterns=["ssh"], errors_only=true` finds every failed ssh-related call however it phrased the failure.
-
-Read a survey in this order:
-
-1. `total` / `sessions_affected` size the problem.
-2. `by_kind` splits it by what went wrong — and each kind carries a **category**. Most failure volume is category `agent` (the model called a tool wrong and recovered: editing a file it hadn't read, an edit whose target string moved, a `python -c` heredoc that didn't parse). When hunting real breakage, look at category `environment`; when auditing tool ergonomics, look at `agent`.
-3. `unclassified` is the yield — recurring failure shapes no rule anticipated, grouped by leading text and ranked by recurrence. Everything else is subtraction; this is the part that tells you something new.
-4. `by_tool` and `by_session` are drill-in targets.
-
-Then drill in with the read tools: `grep_session(..., errors_only=true)` on a hot session, `audit_session_tools` for one session's per-agent tool usage, `read_turn` for a specific moment. The survey orients; those read.
-
-Two defaults worth knowing. **Cascade errors are suppressed**: when one call in a parallel batch fails, the harness cancels its siblings and records each cancellation as its own error, so counting them multiplies that batch's apparent failure count — the suppressed total is always reported as `cascade_suppressed`, and `include_cascade=true` folds them back in. **Error text is opt-in** (`examples=true`): the default payload is counts, because a first orienting call rarely needs the prose.
-
-Read `by_tool.calls` as relative failure density between tools, not as an absolute reliability rate — it counts calls in the transcripts that were *scanned* (the ones carrying at least one error), since error-free transcripts are never parsed at all.
-
-## The conversion tools
-
-Tools that create, mutate, or remove transcripts — the one mutating axis in the toolset. `convert_session` only ever copies; `rewind_transcript` and `delete_conversions` mutate or delete, but **only conversion artifacts** (files carrying the `x-converter-provenance` line) — a real session or dispatched subagent is never touched.
-
-> **Resuming a `session_to_subagent` conversion needs `SendMessage` — and nothing else.** No agent-teams runtime, no env var: `SendMessage` resumes any background subagent by id, and a conversion artifact is one. If `SendMessage` is not in your toolset it is *deferred*, not absent — load it with `ToolSearch` query `"select:SendMessage"`, then convert and resume as normal. Only if it still can't be loaded should you stay on `grep_session`/`read_turn` against the source. (`subagent_to_session` → `claude -r` needs nothing at all.)
-
-- **`convert_session`** — copy a session into a subagent under the calling session (direction `session_to_subagent`), or a subagent out to a top-level session (direction `subagent_to_session`). A Codex session converts too (`session_to_subagent` only): its tool calls become `[Codex tool: …]` text with truncated output and its private reasoning is dropped, so ask it about intent and decisions, and check exact command output against the record.
-- **`rewind_transcript`** — truncate a conversion artifact (session or subagent) **in place** at a chosen turn, discarding everything after, so it resumes from that earlier point. Eligible only for conversion artifacts — a real session or dispatched subagent is refused untouched. Destructive (the cut tail is gone); use `convert_session` first if you want to keep the original.
-- **`delete_conversions`** — remove subagent artifacts the converter created. Refuses everything else, including converted sessions. Permanent — no undo.
-
-> Cleanup has two paths. `delete_conversions` is the explicit one — call it when you're **done** interrogating to drop a fork *now* (by id, or omit ids to sweep this session's forks). It's the only way to remove a *fresh* fork you're finished with. As a safety net, any **pristine** (never-resumed) `session_to_subagent` fork that gets left behind is auto-reaped once it's older than ~24h, swept whenever a cc-explorer server in that project starts or stops — so an un-cleaned *pristine* fork is a tidiness lag, not a permanent leak. **A fork you interviewed is not covered by that.** Interviewing counts as resuming, and both cleanup paths keep resumed forks by default — they hold unique conversation that exists nowhere else — so an interviewed fork you don't delete is a permanent leak. The escape hatch is the one you're expected to use: `delete_conversions(ids=[<id>], force=true)` on the explicitly listed id, right after the interview. `force` is rejected on the sweep form, so it can never blanket-delete work someone else may depend on.
-
-Convert a session to a subagent when the question needs the session itself, not excerpts from it: the reasoning behind a decision, a synthesis of the whole arc, a judgment call on evidence it hasn't seen, or a domain expert whose built-up context would be expensive to rebuild. For facts, quotes, locations, and tool-call ground truth, stay on the read tools.
-
-An **interview** is one-shot: batch every question you have into a single `SendMessage(to: <created_id>)` — each message replays the whole converted context, so splitting questions across messages re-bills it — take the reply, then `delete_conversions(ids=[<created_id>], force=true)`. Keeping a conversion alive for follow-ups is a different intent: *resuming the work* rather than questioning the record, which is a human-driven flow where nothing gets deleted.
-
-Convert a subagent to a session when the user wants to read or continue an agent's run themselves — hand them the `claude -r` command from the response.
-
-Rewind a conversion artifact when you want to replay it from a fixed point — re-run a skill from a known starting state, or regenerate a different user prompt. Read the artifact (`browse_session`/`read_turn`) to find the turn uuid, then `rewind_transcript(src_id, turn, cut)`. `cut="after"` (default) keeps the named turn as the new tail; `cut="before"` drops the named turn onward — use it to rewind to just *before* a user prompt so you can re-drive from there. The tail is auto-trimmed to a resumable boundary (dangling `tool_use`, trailing noise), and `lines_at_creation` is re-stamped so the artifact stays deletable. Resume the rewound artifact the same way you'd resume the original (`SendMessage` for a subagent, `claude -r` for a session).
-
-### Composing the first message to a converted conversation
-
-Open with the `suggested_handoff` from the tool response. The conversation has no way to know its interlocutor changed — messages arrive unlabeled, and you occupy the same `user` role its human did — so the handoff's one job is to resolve the contradiction between its runtime ("you are a subagent") and its history (an interactive session, mid-relationship with someone else). Then say who you are and what you want, in whatever role fits the intent: witness, fact-checker, expert consult, plain continuation. The framing controls stance, not correctness — without one, the conversation defaults to being its old user's assistant and offers to resume the relationship.
-
-Mind the knowledge asymmetry (the emic/etic gap): you've read excerpts from the outside; it lived the whole thing and is the authority on what its conversation was about. Offer your reading as a reading — "my understanding from the outside is this session was about X; correct me if that's off" — never as established fact. A presupposed frame invites it to elaborate your guess instead of reporting its reality, and when the premise is flat wrong it has to spend its whole answer fighting the frame. Converted conversations do push back rather than play along — but don't bet on that against a confidently-asserted wrong premise.
-
-Its knowledge ends where the conversation ended. If the answer should account for the present, brief it on what changed first, then ask for the judgment. Relay `environment` facts from the response only when the ask depends on them — e.g. it will run tools in a cwd it doesn't remember having left.
-
-## Worktree pooling
-
-Sessions from every git worktree of a project are pooled under one project — and this holds cross-project too: `list_projects` and an omitted-`projects` search show one row per repo, not one per worktree. Claude Desktop dispatch creates real git worktrees under `<project>/.claude-worktrees/<name>/`, so dispatched work shows up alongside interactive sessions automatically — no need to specify a worktree or know which branch work happened on.
-
-Each session carries a `worktree` field (absent for the main worktree, set to the worktree's directory basename like `happy-lehmann` for linked worktrees) and a `project` field (the repo it belongs to). `list_project_sessions`, `grep_session`, `read_turn`, `browse_session`, `list_session_agents`, `get_agent_detail`, and `audit_session_tools` all surface both.
-
-**Why it matters for mining:** labeled sessions are usually dispatch-driven, meaning the "user" turn is often a programmatically-constructed prompt, not a human typing in-the-moment. Weight signal accordingly — dispatch sessions are weaker evidence for "user's own words" but stronger evidence for "what the agent decided autonomously." The worktree label also doubles as a git branch bridge: `happy-lehmann` in the session metadata points you at the `happy-lehmann` branch when cross-referencing with git history.
-
-## When to use what
-
-**"What conversations exist?"** → `list_project_sessions`. Stats (message count, agent count, dates) help you decide where to look.
-
-**"Find where X was discussed"** → `search_projects` with candidate patterns (omit `projects` to sweep everything when you don't know which project it was). Results show which patterns are productive and which project/session contains them. Then `grep_session` (scoped to the returned project) to see actual matches in context.
-
-**"Show me what was said"** → `grep_session` for pattern-matched content with context, or `read_turn` to read a specific moment at full fidelity. Use `full_length` values in grep output to gauge entry size before reading.
-
-**"Trace agent execution"** → `list_project_sessions(min_agents=1)` → `list_session_agents` → `get_agent_detail` (or `audit_session_tools` for the whole-session tool-usage view). Top-down zoom from project to session to individual agent.
-
-**"What broke?" / "catalog every X failure"** → `survey_failures` for the shape of it, then `grep_session`/`grep_sessions` with `errors_only=true` to read the actual calls. Do **not** brainstorm candidate error strings and search for them — that guessing is exactly what this axis removes.
-
-**"Why did that session decide X? What did it learn?"** → `convert_session`, then `SendMessage` (deferred tool — load it with `ToolSearch` query `"select:SendMessage"` if it isn't in your toolset; see the conversion-tools note above). Grep finds what was said; a converted session can answer for what it meant. Interview one-shot: batch every question into a single message (splitting re-bills the replayed context), then `delete_conversions(ids=[...], force=true)`.
-
-**Any of the above, but it's an investigation** → dispatch `session-researcher` (see "Delegate or DIY" at the top) and let it drive the tools.
-
-## Key workflows
-
-### Progressive search (broad → narrow)
-
-Start with `search_projects` using all your candidate patterns in one call. The tool accepts an array and scans every session in a single pass regardless of pattern count — 20 patterns costs the same as 1. Front-load everything you can think of. The results show which terms land (high hit count) vs dead weight (zero hits, omitted from output), and tag each hit with its `project` (and `agent`, if it came from a subagent body). Omit `projects` to sweep everything; pass it once you know where to look.
-
-Then `grep_session` on the hot sessions with your best patterns, passing the `project` the search returned. Like `search_projects`, it takes a `patterns` list and returns per-pattern hit counts plus match blocks with surrounding context — front-load all your candidate terms in one call instead of OR-ing them into a kitchen-sink regex. When you find the moment you need, `read_turn` gives you the full untruncated text.
-
-### The search → grep → read loop
-
-`search_projects` locates the project + sessions. `grep_session` examines matches within a session. `read_turn` reads specific moments at full fidelity. Each step uses output from the previous one:
-- search_projects → project + session IDs → grep_session
-- grep_session → turn UUIDs + full_length → read_turn
-
-### Agent inspection
-
-Trace subagent execution top-down: `list_project_sessions(min_agents=1)` identifies which sessions spawned agents. `list_session_agents` shows what a specific session dispatched. `get_agent_detail` reveals what each agent was told to do and what it produced (the tool trace option adds the chronological tool-by-tool timeline), while `audit_session_tools` gives the whole-session view of how every agent used its tools.
-
-## Tips
-
-- Turn UUIDs from grep_session are the bridge to read_turn — grab them when you find something interesting.
-- `full_length` in grep output tells you how big an entry is before you read it. Large values (5000+) mean tool results or long outputs — use `read_turn` with a `limit` to avoid pulling in too much.
-- High agent counts in session listings signal orchestration sessions (fan-out research, multi-step workflows).
-- Search is exhaustive by default — patterns match against text, tool inputs (Bash commands, file paths, grep patterns), tool outputs, and assistant thinking. Write tight regex to narrow noisy searches.
-- Converted conversations push back on wrong premises rather than play along — but offer your understanding as understanding anyway; don't make them fight a frame you asserted as fact.
-
-## Parser diagnostics
-
-Each MCP call emits at most one parser summary to stderr: total skipped lines,
-affected transcript count, and separate malformed / unsupported counts. Counts
-cover distinct affected Claude transcripts loaded by that call, including cache
-hits; they are not a health assessment of files excluded by search prefilters.
-Structural headers are silent. Unsupported record types (including
-`agent-setting` and `bridge-session`) indicate missing parser support, not file
-corruption. Invalid JSON, invalid record shapes, and invalid modeled entries
-count as malformed. Codex provider parsing has its own behavior.
-
-For per-file paths and counts, set `CC_EXPLORER_PARSER_DEBUG=1` in the server's
-environment and restart it. Debug output goes to stderr, includes cache hits,
-and grows with the number of affected files; use it on a narrowed call. The
-ordinary summary contains no paths or transcript content, and tool response
-schemas carry no diagnostic fields.
-
-In-process library callers scanning multiple files should wrap the operation in
-`cc_explorer.parser.collect_parser_diagnostics()`; standalone `load_transcript`
-calls emit a single-file summary. Nested scopes share the outer aggregation.
-
-Issue #80 owns this diagnostic classification and aggregation. Issue #61 owns
-parsing and opt-in exposure of recorded provenance; supporting an additional
-record in the parser removes it from the unsupported count without adding it
-to default response payloads.
+- Agent execution: `list_session_agents`, `get_agent_detail`, `audit_session_tools` inspect Claude dispatches, prompts, results and traces. A dispatch request alone is not proof of completed work; inspect the result and trace. Codex children use ordinary session reads.
+- Failures: `survey_failures` or `errors_only=true` locates flagged failures. The survey's tool-call denominator includes only scanned error-bearing transcripts, not the whole corpus. Historical no-result errors can be ordinary discovery misses.
+- Usage: read [usage accounting](references/usage-accounting.md) before interpreting consumption; use `get_usage_report`, not browsing estimates or guessed prices.
+- Optional interviews, conversion, rewind and cleanup: read [conversation copies](references/conversation-copies.md) before using mutating tools. Interviews are an additional, potentially expensive testimony channel, not the default retrieval path.

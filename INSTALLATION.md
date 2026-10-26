@@ -1,135 +1,52 @@
-# Installing coryking-plugins
+# Install and update
 
-## Engineering Loop in Codex
+Both harnesses load the same skill sources. Claude Code registers the plugin's named agents; Codex skills use generic subagents with the plugin-local prompt. The cc-explorer server requires `uv` and Python 3.11 or later; the launch command resolves its dependencies.
 
-Register a local checkout and install the plugin:
+## Claude Code
 
-```bash
-codex plugin marketplace add /path/to/coryking-plugins
-codex plugin add engineering-loop@coryking-plugins
-```
+Register the marketplace and install the history plugin:
 
-Use a persistent checkout, not a worktree that will be deleted after delivery.
-The native manifest is `engineering-loop/.codex-plugin/plugin.json`; both
-harnesses load the same skill sources. Start a new thread after installation or
-updates. Check the installed version with:
-
-```bash
-codex plugin list --marketplace coryking-plugins --json
-```
-
-## From GitHub (recommended)
-
-```bash
-/install https://github.com/coryking/coryking-plugins
-```
-
-Run this inside Claude Code. It reads `.claude-plugin/marketplace.json` from the repo, discovers available plugins, and installs them.
-
-## Manual installation
-
-If you prefer to install manually or need a local development setup:
-
-### Prerequisites
-
-- Claude Code CLI (`claude`) installed
-- `uv` available for Python package management
-- This repo cloned locally
-
-### 1. Register as a local marketplace
-
-```bash
-claude plugin marketplace add /path/to/coryking-plugins
-```
-
-This reads `.claude-plugin/marketplace.json` from the repo root to discover available plugins.
-
-### 2. Install the plugin
-
-```bash
+```sh
+claude plugin marketplace add coryking/coryking-plugins
 claude plugin install project-mining@coryking-plugins --scope user
 ```
 
-This copies the plugin to `~/.claude/plugins/cache/coryking-plugins/project-mining/<version>/` and registers it in `~/.claude/plugins/installed_plugins.json`. At this point, the install works but points at a **frozen cache copy** — edits to the repo are invisible.
+Refresh the marketplace and installed copy after a release:
 
-### 3. Patch installed_plugins.json for live development
-
-Edit `~/.claude/plugins/installed_plugins.json`. Find the `"project-mining@coryking-plugins"` entry and:
-
-1. Change `installPath` from the cache path to your live repo:
-   ```json
-   "installPath": "/path/to/coryking-plugins/project-mining"
-   ```
-2. Remove the `gitCommitSha` field (it pins to a frozen snapshot)
-3. Ensure `version` matches both `plugin.json` and `marketplace.json`
-
-The entry should look like:
-```json
-"project-mining@coryking-plugins": [{
-  "scope": "user",
-  "installPath": "/path/to/coryking-plugins/project-mining",
-  "version": "1.1.0",
-  "installedAt": "2026-02-26T19:42:49.581Z",
-  "lastUpdated": "2026-03-03T00:00:00.000Z"
-}]
-```
-
-### 4. Restart Claude Code
-
-Plugin content is read at session start. Restart to pick up changes.
-
-## After making changes to skill/agent content
-
-Bump the version in **both** files and update `installed_plugins.json` to match:
-
-| File | Field |
-|------|-------|
-| `project-mining/.claude-plugin/plugin.json` | `version` |
-| `.claude-plugin/marketplace.json` | `plugins[].version` |
-| `~/.claude/plugins/installed_plugins.json` | `version` |
-
-All three must agree. A mismatch causes "Plugin not found in marketplace" errors even though the plugin appears installed. Then restart Claude Code.
-
-## Gotchas
-
-- **`@local` is not a keyword.** Using `project-mining@local` in `installed_plugins.json` makes Claude Code look for a marketplace named "local" — which doesn't exist.
-- **Cache symlinks get overwritten.** Replacing `~/.claude/plugins/cache/...` with a symlink to the repo works temporarily, but Claude Code may re-create the directory as a real copy.
-- **The cache directory may linger.** An `.orphaned_at` file marks stale cache entries. The `installPath` in `installed_plugins.json` is authoritative — ignore the cache.
-- **No hot reload.** Content changes require a Claude Code restart. Version bumps may also be required if Claude Code is caching based on version string.
-- **`--plugin-dir` is session-only.** `claude --plugin-dir /path/to/plugin` loads a plugin for one session without installing it. Useful for quick testing but not persistent.
-
-## Verifying the installation
-
-```bash
-# Should show the plugin as enabled
+```sh
+claude plugin marketplace update coryking-plugins
+claude plugin update project-mining@coryking-plugins
 claude plugin list
-
-# Inside Claude Code, check for plugin errors
-/plugins
 ```
 
-If the plugin shows as installed but disabled, run `claude plugin enable project-mining@coryking-plugins`.
+Start a new Claude Code session to load the new skills, agents and MCP process. The installed cache is a snapshot; editing the source checkout does not change that running snapshot. Use `claude --plugin-dir /absolute/path/to/project-mining` for an isolated session against development sources. Keep persistent installation changes in the CLI's managed path rather than editing cache copies or installation metadata.
 
-## Optional: enable session↔subagent conversation (`convert_session` + `SendMessage`)
+## Codex
 
-cc-explorer's `convert_session(session_to_subagent)` copies a past session into a resumable subagent so you can *talk to it* — ask what it meant, get a synthesis, use it as a domain expert. Resuming that subagent uses Claude Code's **agent-teams** runtime, which is gated behind an experimental env var. The conversion itself works without it, but `SendMessage` (the resume path) only exists when the env var is set — otherwise resume fails with *"no transcript to resume"*.
+Register a persistent source checkout and enable the plugin:
 
-To enable it, add the env var to your `settings.json` (project `.claude/settings.json`, `.claude/settings.local.json`, or `~/.claude/settings.json`) and **restart Claude Code** (env is read at session start):
-
-```json
-{
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
-  }
-}
+```sh
+codex plugin marketplace add /absolute/path/to/coryking-plugins
+codex plugin add project-mining@coryking-plugins
+codex plugin list --marketplace coryking-plugins --json
 ```
 
-Quick check inside a session: if `SendMessage` is in your toolset, agent-teams is active. The reverse direction (`subagent_to_session` → `claude -r`) needs no env var.
+Keep a local marketplace's checkout current through its normal Git workflow. Do not register a disposable worktree as a persistent source. For a configured Git marketplace snapshot, refresh with:
 
-## MCP server dependencies
+```sh
+codex plugin marketplace upgrade coryking-plugins
+```
 
-The cc-explorer MCP server requires Python dependencies managed by `uv`. When the plugin is enabled, Claude Code starts the server via the `.mcp.json` configuration using `uv run`, which handles dependency resolution automatically. No manual `pip install` or venv setup is needed.
+Start a new thread after changes. The native manifest is `project-mining/.codex-plugin/plugin.json`, and `.mcp.json` launches the server from that installed plugin root. Inspect the plugin list's enabled state and source path when checking which copy is active; an already-running MCP process can retain its previous code even after the source updates.
 
-## Known upstream issues
+## Release bookkeeping
 
-There is no native "editable install" for Claude Code plugins. Relevant GitHub issues: #17361, #13799, #14061, #29074.
+Update the affected plugin's Claude and Codex manifest versions together. For server changes, also update `project-mining/pyproject.toml` and refresh its lockfile with `uv lock --project project-mining`. The root marketplace resolves each plugin from its source directory; it does not duplicate plugin versions. Commit and push the source before updating installed snapshots.
+
+Verify a fresh server process, not just a reported version. For development checks, the server can be started with `uv run --project project-mining cc-explorer`; a successful MCP initialize/list/call verifies the actual entrypoint. Tests live in `project-mining/tests` and run with `uv run --project project-mining pytest project-mining/tests`.
+
+## Optional conversation copies
+
+Search and source reads need no conversion. Interviews and continued work use converter-created transcript copies and require a compatible resume operation in the destination harness. Check that capability before creating a copy. Generic Codex messaging cannot resume a Claude conversion merely because it accepts an agent id.
+
+The [conversation-copy reference](project-mining/skills/cc-explorer/references/conversation-copies.md) preserves the headroom, provenance, rewind and cleanup rules. Interviews produce generated testimony; original record reads establish exact historical wording and tool actions.
