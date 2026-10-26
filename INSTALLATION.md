@@ -31,7 +31,7 @@ codex plugin add project-mining@coryking-plugins
 codex plugin list --marketplace coryking-plugins --json
 ```
 
-Keep a local marketplace's checkout current through its normal Git workflow. Do not register a disposable worktree as a persistent source. For a configured Git marketplace snapshot, refresh with:
+Keep a local marketplace's checkout current through its normal Git workflow, then rerun `codex plugin add project-mining@coryking-plugins` to refresh the installed cache. Updating the checkout alone leaves the installed version unchanged. Do not register a disposable worktree as a persistent source. For a configured Git marketplace snapshot, refresh with:
 
 ```sh
 codex plugin marketplace upgrade coryking-plugins
